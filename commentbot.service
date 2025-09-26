@@ -1,0 +1,30 @@
+[Unit]
+Description=Telegram Comment Bot
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=botuser
+WorkingDirectory=/opt/telegram-comment-bot
+Environment=PATH=/opt/telegram-comment-bot/venv/bin
+ExecStart=/opt/telegram-comment-bot/venv/bin/python main.py
+Restart=always
+RestartSec=10
+
+# Логирование
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=commentbot
+
+# Безопасность
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/telegram-comment-bot/sessions
+ReadWritePaths=/opt/telegram-comment-bot/logs
+
+[Install]
+WantedBy=multi-user.target
+
+

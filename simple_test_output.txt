@@ -1,0 +1,5 @@
+BOT_TOKEN: None
+API_ID: None
+API_HASH: None
+PASSWORD: None
+Some environment variables are missing!
