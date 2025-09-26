@@ -1,4 +1,5 @@
 import os
+import asyncio
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -10,6 +11,24 @@ _pool: Optional[asyncpg.Pool] = None
 
 class DatabaseNotInitialized(RuntimeError):
     pass
+
+
+async def _retry_db_operation(func, *args, max_retries=3, delay=1, **kwargs):
+    """Retry database operation with exponential backoff"""
+    for attempt in range(max_retries):
+        try:
+            return await func(*args, **kwargs)
+        except (asyncpg.exceptions.DeadlockDetected, 
+                asyncpg.exceptions.LockNotAvailable,
+                asyncpg.exceptions.UniqueViolation) as e:
+            if attempt == max_retries - 1:
+                raise e
+            await asyncio.sleep(delay * (2 ** attempt))
+        except Exception as e:
+            if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                await asyncio.sleep(delay * (2 ** attempt))
+                continue
+            raise e
 
 
 def _require_pool() -> asyncpg.Pool:
@@ -657,19 +676,22 @@ async def add_comment_log(
     status: str,
     error: Optional[str] = None,
 ) -> None:
-    pool = _require_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO comment_logs (account_id, channel, message_id, status, error)
-            VALUES ($1, $2, $3, $4, $5)
-            """,
-            account_id,
-            channel,
-            message_id,
-            status,
-            error,
-        )
+    async def _execute_log():
+        pool = _require_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO comment_logs (account_id, channel, message_id, status, error)
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                account_id,
+                channel,
+                message_id,
+                status,
+                error,
+            )
+    
+    await _retry_db_operation(_execute_log)
 
 
 
