@@ -111,7 +111,7 @@ WARMUP_SLEEP_START_HOUR = 4  # Начало периода сна (4:00)
 WARMUP_SLEEP_END_HOUR = 6    # Конец периода сна (6:00)
 
 # Ограничение одновременных подключений
-MAX_CONCURRENT_ACCOUNTS = 3
+MAX_CONCURRENT_ACCOUNTS = 5
 account_semaphore = asyncio.Semaphore(MAX_CONCURRENT_ACCOUNTS)
 
 
