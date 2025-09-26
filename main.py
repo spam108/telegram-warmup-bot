@@ -655,6 +655,8 @@ async def send_comments(userid, session, account_id):
                     else:
                         await bot.send_message(log_channel, f'Аккаунт {session} отправил комментарий\n'
                                                         f'https://t.me/c/{str(message.chat.id).replace("-", "")}/{msg.id}')
+                    # Небольшая пауза перед записью в БД
+                    await asyncio.sleep(0.2)
                     await add_comment_log(
                         account_id,
                             channel=str(message.chat.id),
@@ -665,6 +667,8 @@ async def send_comments(userid, session, account_id):
                     
                 except Exception as e:
                     await bot.send_message(log_channel, f'Аккаунт {session} ошибка комментирования: {e}')
+                    # Пауза перед записью ошибки в БД
+                    await asyncio.sleep(0.2)
                     await add_comment_log(
                         account_id,
                         channel=str(message.chat.id),
@@ -908,6 +912,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             active_sessions[key] = True
             active_account_ids[key] = account_id
             quiet_sessions_notified.discard(key)
+            await asyncio.sleep(0.1)  # Пауза перед операцией с БД
             await mark_account_running(account_id)
             
             await state.clear()
@@ -926,6 +931,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             active_sessions[key] = True
             active_account_ids[key] = account_id
             quiet_sessions_notified.discard(key)
+            await asyncio.sleep(0.1)  # Пауза перед операцией с БД
             await mark_account_running(account_id)
             
             await state.clear()
@@ -959,6 +965,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             active_sessions[key] = True
             active_account_ids[key] = account_id
             quiet_sessions_notified.discard(key)
+            await asyncio.sleep(0.1)  # Пауза перед операцией с БД
             await mark_account_running(account_id)
             
             await state.clear()
@@ -977,6 +984,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             active_sessions[key] = True
             active_account_ids[key] = account_id
             quiet_sessions_notified.discard(key)
+            await asyncio.sleep(0.1)  # Пауза перед операцией с БД
             await mark_account_running(account_id)
             
             await state.clear()

@@ -15,6 +15,9 @@ class DatabaseNotInitialized(RuntimeError):
 
 async def _retry_db_operation(func, *args, max_retries=3, delay=1, **kwargs):
     """Retry database operation with exponential backoff"""
+    # Небольшая пауза перед операцией для избежания одновременных запросов
+    await asyncio.sleep(0.1)
+    
     for attempt in range(max_retries):
         try:
             return await func(*args, **kwargs)
