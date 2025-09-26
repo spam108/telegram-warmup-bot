@@ -9,6 +9,17 @@ services:
       POSTGRES_DB: commentbot
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    command: >
+      postgres
+      -c max_connections=100
+      -c shared_buffers=512MB
+      -c effective_cache_size=2GB
+      -c maintenance_work_mem=128MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=32MB
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -35,6 +46,15 @@ services:
       - ./sessions:/app/sessions
       - ./logs:/app/logs
     restart: unless-stopped
+    user: "0:0"
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 2G
+          cpus: '1.0'
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; requests.get('https://api.telegram.org/bot${BOT_TOKEN}/getMe')"]
       interval: 60s

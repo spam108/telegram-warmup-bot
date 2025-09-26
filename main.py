@@ -110,6 +110,10 @@ WARMUP_DEFAULT_DAYS = 7
 WARMUP_SLEEP_START_HOUR = 4  # Начало периода сна (4:00)
 WARMUP_SLEEP_END_HOUR = 6    # Конец периода сна (6:00)
 
+# Ограничение одновременных подключений
+MAX_CONCURRENT_ACCOUNTS = 3
+account_semaphore = asyncio.Semaphore(MAX_CONCURRENT_ACCOUNTS)
+
 
 def make_session_key(user_id: int, phone: str) -> str:
     return f"{user_id}:{phone}"
@@ -586,100 +590,101 @@ async def add_channels(message: Message, state: FSMContext) -> None:
 
 
 async def send_comments(userid, session, account_id):
-    app = Client(
-        name=f"sessions/{userid}/{session}",
-        api_id=API_ID,
-        api_hash=API_HASH)
-    
-    account = await get_account_by_id(account_id)
-    if not account:
-        active_sessions.pop(make_session_key(userid, session), None)
-        return
-    
-    # Режим прогрева не блокирует комментирование - это стандартный режим + warmup задача
-
-    system_promt = account.get("system_prompt") or ""
-    sleep_min = account.get("sleep_min") or 10
-    sleep_max = account.get("sleep_max") or 20
-    chance = account.get("chance") or 100
-
-    xsleep, ysleep = sleep_min, sleep_max
-
-    @app.on_message(filters.channel)
-    async def channel_handler(client: Client, message: Message):
-        key = make_session_key(userid, session)
-        if not active_sessions.get(key, False):
-            return
-        try:
-            channel = await client.get_chat(message.chat.id)
-            linked_chat = channel.linked_chat
-            if linked_chat:
-                await client.join_chat(linked_chat.id)
-        except Exception as ex:
-            print(ex)
-
-    @app.on_message(filters.linked_channel)
-    async def linked_channel_handler(client: Client, message: Message):
-        key = make_session_key(userid, session)
-        if not active_sessions.get(key, False):
+    async with account_semaphore:
+        app = Client(
+            name=f"sessions/{userid}/{session}",
+            api_id=API_ID,
+            api_hash=API_HASH)
+        
+        account = await get_account_by_id(account_id)
+        if not account:
+            active_sessions.pop(make_session_key(userid, session), None)
             return
         
-        if (message.chat.permissions.can_send_messages is True) and (
-                message.text is not None or message.caption is not None):
-            
-            if random.randint(1, 100) > chance:
-                await bot.send_message(log_channel, f'Аккаунт {session} пропустил комментарий')
+        # Режим прогрева не блокирует комментирование - это стандартный режим + warmup задача
+
+        system_promt = account.get("system_prompt") or ""
+        sleep_min = account.get("sleep_min") or 10
+        sleep_max = account.get("sleep_max") or 20
+        chance = account.get("chance") or 100
+
+        xsleep, ysleep = sleep_min, sleep_max
+
+        @app.on_message(filters.channel)
+        async def channel_handler(client: Client, message: Message):
+            key = make_session_key(userid, session)
+            if not active_sessions.get(key, False):
                 return
-
-            post_text = message.text or message.caption
-            comment = generate_comment(post_text, system_promt)
-
             try:
-                if is_quiet_period():
-                    key = make_session_key(userid, session)
-                    if key not in quiet_sessions_notified:
-                        await bot.send_message(log_channel, f'Аккаунт {session} приостановлен до 07:00 (циркадный режим)')
-                        quiet_sessions_notified.add(key)
-                    return
-                await asyncio.sleep(random.uniform(xsleep, ysleep))
-                msg = await client.send_message(message.chat.id, comment, reply_to_message_id=message.id)
+                channel = await client.get_chat(message.chat.id)
+                linked_chat = channel.linked_chat
+                if linked_chat:
+                    await client.join_chat(linked_chat.id)
+            except Exception as ex:
+                print(ex)
 
-                if hasattr(msg, "reply_to_message") and msg.reply_to_message and hasattr(msg.reply_to_message, "forward_from_chat") and msg.reply_to_message.forward_from_chat:
-                    await bot.send_message(log_channel, f'Аккаунт {session} отправил комментарий\n'
-                                                    f'https://t.me/{msg.reply_to_message.forward_from_chat.username}/{msg.reply_to_message.forward_from_message_id}?comment={msg.id}')
-                else:
-                    await bot.send_message(log_channel, f'Аккаунт {session} отправил комментарий\n'
-                                                    f'https://t.me/c/{str(message.chat.id).replace("-", "")}/{msg.id}')
-                await add_comment_log(
-                    account_id,
-                        channel=str(message.chat.id),
-                        message_id=msg.id,
-                        status='success',
-                    )
-
+        @app.on_message(filters.linked_channel)
+        async def linked_channel_handler(client: Client, message: Message):
+            key = make_session_key(userid, session)
+            if not active_sessions.get(key, False):
+                return
+            
+            if (message.chat.permissions.can_send_messages is True) and (
+                    message.text is not None or message.caption is not None):
                 
-            except Exception as e:
-                await bot.send_message(log_channel, f'Аккаунт {session} ошибка комментирования: {e}')
-                await add_comment_log(
-                    account_id,
-                    channel=str(message.chat.id),
-                    message_id=message.id,
-                    status='error',
-                    error=str(e),
-                )
-    try:
-        await app.start()
-        key = make_session_key(userid, session)
-        while active_sessions.get(key, False):
-            await asyncio.sleep(1)
-    finally:
-        await app.stop()
-        key = make_session_key(userid, session)
-        account_id = active_account_ids.pop(key, None)
-        if account_id:
-            await mark_account_stopped(account_id)
-        active_sessions.pop(key, None)
-        quiet_sessions_notified.discard(key)
+                if random.randint(1, 100) > chance:
+                    await bot.send_message(log_channel, f'Аккаунт {session} пропустил комментарий')
+                    return
+
+                post_text = message.text or message.caption
+                comment = generate_comment(post_text, system_promt)
+
+                try:
+                    if is_quiet_period():
+                        key = make_session_key(userid, session)
+                        if key not in quiet_sessions_notified:
+                            await bot.send_message(log_channel, f'Аккаунт {session} приостановлен до 07:00 (циркадный режим)')
+                            quiet_sessions_notified.add(key)
+                        return
+                    await asyncio.sleep(random.uniform(xsleep, ysleep))
+                    msg = await client.send_message(message.chat.id, comment, reply_to_message_id=message.id)
+
+                    if hasattr(msg, "reply_to_message") and msg.reply_to_message and hasattr(msg.reply_to_message, "forward_from_chat") and msg.reply_to_message.forward_from_chat:
+                        await bot.send_message(log_channel, f'Аккаунт {session} отправил комментарий\n'
+                                                        f'https://t.me/{msg.reply_to_message.forward_from_chat.username}/{msg.reply_to_message.forward_from_message_id}?comment={msg.id}')
+                    else:
+                        await bot.send_message(log_channel, f'Аккаунт {session} отправил комментарий\n'
+                                                        f'https://t.me/c/{str(message.chat.id).replace("-", "")}/{msg.id}')
+                    await add_comment_log(
+                        account_id,
+                            channel=str(message.chat.id),
+                            message_id=msg.id,
+                            status='success',
+                        )
+
+                    
+                except Exception as e:
+                    await bot.send_message(log_channel, f'Аккаунт {session} ошибка комментирования: {e}')
+                    await add_comment_log(
+                        account_id,
+                        channel=str(message.chat.id),
+                        message_id=message.id,
+                        status='error',
+                        error=str(e),
+                    )
+        try:
+            await app.start()
+            key = make_session_key(userid, session)
+            while active_sessions.get(key, False):
+                await asyncio.sleep(1)
+        finally:
+            await app.stop()
+            key = make_session_key(userid, session)
+            account_id = active_account_ids.pop(key, None)
+            if account_id:
+                await mark_account_stopped(account_id)
+            active_sessions.pop(key, None)
+            quiet_sessions_notified.discard(key)
 
 
 async def process_warmup_accounts():
