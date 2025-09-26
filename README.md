@@ -129,13 +129,28 @@ python main.py
 - `channels` - Активные каналы для комментирования
 - `warmup_channels` - Каналы в очереди прогрева
 
-## Развертывание на VPS
+## 🚀 Развертывание на VPS
 
-### Docker (рекомендуется)
+### Быстрое развертывание (рекомендуется)
 
 ```bash
-# Сборка и запуск
-docker-compose up -d
+# Скачайте и запустите скрипт автоматического развертывания
+curl -fsSL https://raw.githubusercontent.com/yourusername/telegram-comment-bot/main/deploy.sh | bash
+```
+
+### Docker развертывание
+
+```bash
+# Клонируйте репозиторий
+git clone https://github.com/yourusername/telegram-comment-bot.git
+cd telegram-comment-bot
+
+# Настройте переменные окружения
+cp .env.example .env
+nano .env
+
+# Запустите через Docker
+docker-compose up -d --build
 
 # Просмотр логов
 docker-compose logs -f
@@ -146,7 +161,7 @@ docker-compose logs -f
 1. **Установка зависимостей**:
 ```bash
 sudo apt update
-sudo apt install python3 python3-pip postgresql postgresql-contrib
+sudo apt install python3 python3-pip postgresql postgresql-contrib git
 ```
 
 2. **Настройка PostgreSQL**:
@@ -155,33 +170,43 @@ sudo -u postgres createdb commentbot
 sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'your_password';"
 ```
 
-3. **Настройка systemd сервиса**:
+3. **Клонирование и настройка**:
 ```bash
-sudo nano /etc/systemd/system/commentbot.service
+git clone https://github.com/yourusername/telegram-comment-bot.git
+cd telegram-comment-bot
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
-```ini
-[Unit]
-Description=Telegram Comment Bot
-After=network.target
-
-[Service]
-Type=simple
-User=your_user
-WorkingDirectory=/path/to/bot
-Environment=PATH=/path/to/bot/venv/bin
-ExecStart=/path/to/bot/venv/bin/python main.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-4. **Запуск сервиса**:
+4. **Настройка systemd сервиса**:
 ```bash
+sudo cp commentbot.service /etc/systemd/system/
+sudo systemctl daemon-reload
 sudo systemctl enable commentbot
 sudo systemctl start commentbot
 ```
+
+### Управление ботом
+
+```bash
+# Использование скрипта управления (если доступен)
+./manage.sh start      # Запуск
+./manage.sh stop       # Остановка
+./manage.sh restart    # Перезапуск
+./manage.sh status     # Статус
+./manage.sh logs       # Логи
+./manage.sh update     # Обновление
+
+# Или через systemd
+sudo systemctl start commentbot
+sudo systemctl stop commentbot
+sudo systemctl restart commentbot
+sudo systemctl status commentbot
+sudo journalctl -u commentbot -f
+```
+
+📖 **Подробное руководство по развертыванию**: [DEPLOYMENT.md](DEPLOYMENT.md)
 
 ## Мониторинг
 
