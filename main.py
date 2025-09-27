@@ -1109,6 +1109,7 @@ async def main():
                         log_file.flush()
                         # Убеждаемся, что аккаунт НЕ активен
                         active_sessions.pop(key, None)
+                        active_account_ids.pop(key, None)
                     else:
                         # Обычные аккаунты запускаем как обычно
                         active_sessions[key] = True
