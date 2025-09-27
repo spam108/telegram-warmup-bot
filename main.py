@@ -785,8 +785,11 @@ async def process_warmup_accounts():
             
             # Проверяем, находимся ли мы в периоде для вступления в каналы (во время сна)
             if not is_warmup_join_time:
+                await bot.send_message(log_channel, f"Warmup: NOT in join period, skipping. Time: {now.strftime('%H:%M')} UTC")
                 await asyncio.sleep(WARMUP_SCAN_INTERVAL_SECONDS)
                 continue
+            
+            await bot.send_message(log_channel, f"Warmup: IN join period, processing accounts. Time: {now.strftime('%H:%M')} UTC")
             
             all_accounts = await get_running_accounts()
             accounts = [acc for acc in all_accounts if acc.get("mode") == "warmup"]
