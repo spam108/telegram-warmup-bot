@@ -215,7 +215,7 @@ async def main_message(message):
     existing_accounts = {account["phone"]: account for account in db_accounts}
 
     for file in os.listdir(user_sessions_dir):
-        if file.endswith('.session'):
+        if file.endswith('.session') and not file.endswith('.session.session'):
             phone = file.replace('.session', '')
             if phone not in existing_accounts:
                 session_path = os.path.join(user_sessions_dir, file)
@@ -229,7 +229,11 @@ async def main_message(message):
         call = account["phone"]
         session_file = os.path.join(user_sessions_dir, f"{call}.session")
         if not os.path.exists(session_file):
-            continue
+            # Проверяем также файл .session.session
+            session_file_alt = os.path.join(user_sessions_dir, f"{call}.session.session")
+            if not os.path.exists(session_file_alt):
+                continue
+            session_file = session_file_alt
 
         key = make_session_key(user_id, call)
         # Проверяем статус в базе данных, а не только в active_sessions
@@ -294,6 +298,39 @@ async def test_warmup_command(message: Message) -> None:
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
         logging.exception("Error in test_warmup_command: %s", e)
+
+
+@dp.message(Command("cleansessions"))
+async def clean_sessions_command(message: Message) -> None:
+    """Команда для удаления .session.session файлов"""
+    try:
+        user_id = message.from_user.id
+        user_sessions_dir = os.path.join("sessions", str(user_id))
+        
+        if not os.path.isdir(user_sessions_dir):
+            await message.answer("❌ Директория сессий не найдена")
+            return
+        
+        deleted_files = []
+        for file in os.listdir(user_sessions_dir):
+            if file.endswith('.session.session'):
+                file_path = os.path.join(user_sessions_dir, file)
+                try:
+                    os.remove(file_path)
+                    deleted_files.append(file)
+                    await bot.send_message(log_channel, f"Удален файл сессии: {file}")
+                except Exception as e:
+                    await message.answer(f"❌ Ошибка удаления {file}: {e}")
+                    return
+        
+        if deleted_files:
+            await message.answer(f"✅ Удалено файлов: {len(deleted_files)}\n{chr(10).join(deleted_files)}")
+        else:
+            await message.answer("ℹ️ Файлы .session.session не найдены")
+            
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+        logging.exception("Error in clean_sessions_command: %s", e)
 
 @dp.message(Command("fixmode"))
 async def fix_mode_command(message: Message) -> None:
@@ -495,7 +532,21 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
 
         try:
             await delete_account(callback_query.from_user.id, session)
-            os.remove(f'sessions/{callback_query.from_user.id}/{session}.session')
+            
+            # Удаляем оба типа файлов сессий
+            session_file = f'sessions/{callback_query.from_user.id}/{session}.session'
+            session_file_alt = f'sessions/{callback_query.from_user.id}/{session}.session.session'
+            
+            deleted_files = []
+            if os.path.exists(session_file):
+                os.remove(session_file)
+                deleted_files.append(f"{session}.session")
+                
+            if os.path.exists(session_file_alt):
+                os.remove(session_file_alt)
+                deleted_files.append(f"{session}.session.session")
+            
+            await bot.send_message(log_channel, f"Аккаунт {session} удален. Удалены файлы: {', '.join(deleted_files)}")
             await main_message(callback_query)
         except Exception as e:
             await bot.send_message(callback_query.from_user.id, f"Ошибка: {str(e)}")
