@@ -233,7 +233,7 @@ async def main_message(message):
         key = make_session_key(user_id, call)
         # Проверяем статус в базе данных, а не только в active_sessions
         is_running = active_sessions.get(key) or account.get("status") == "running"
-        status_button_text = "Запустить" if not is_running else "Stop1"
+        status_button_text = "Запустить" if not is_running else "Остановить"
         status_button_callback = f"start_{call}" if not is_running else f"stop_{call}"
 
         button_info = types.InlineKeyboardButton(text=f"ℹ️ {call}", callback_data=f"info_{call}")
@@ -535,9 +535,11 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
             # Останавливаем аккаунт
             active_sessions.pop(key, None)
             account_id = active_account_ids.pop(key, None)
-            if account_id:
-                await mark_account_stopped(account_id)
+            
+            # Останавливаем аккаунт в БД
+            await mark_account_stopped(account_row["id"])
 
+            await bot.send_message(callback_query.from_user.id, f'Аккаунт {session} остановлен')
             await bot.send_message(log_channel, f'Аккаунт {session} остановлен')
             await main_message(callback_query)
 
