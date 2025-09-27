@@ -173,6 +173,12 @@ def is_warmup_sleep_period(now: datetime | None = None) -> bool:
     result = start <= current_time < end
     return result
 
+def is_warmup_join_period(now: datetime | None = None) -> bool:
+    """Проверяет, находимся ли мы в периоде для вступления в каналы прогрева (во время сна)"""
+    now = now or datetime.now(timezone.utc)
+    # Вступаем в каналы только когда комментирование спит (циркадный ритм)
+    return is_quiet_period(now)
+
 async def check_account(user_id, phone):
     try:
         client = Client(
@@ -728,18 +734,18 @@ async def send_comments(userid, session, account_id):
 
 
 async def process_warmup_accounts():
-    """Фоновая задача для добавления каналов в режиме прогрева (настраивается через env)"""
+    """Фоновая задача для добавления каналов в режиме прогрева (во время сна)"""
     while True:
         try:
             now = datetime.now(timezone.utc)
-            is_warmup_time = is_warmup_sleep_period(now)
+            is_warmup_join_time = is_warmup_join_period(now)
             
             # Логируем каждые 10 минут для отладки
             if now.minute % 10 == 0:
-                await bot.send_message(log_channel, f"Warmup check: {now.strftime('%H:%M')} UTC, is_warmup_time: {is_warmup_time}")
+                await bot.send_message(log_channel, f"Warmup check: {now.strftime('%H:%M')} UTC, is_warmup_join_time: {is_warmup_join_time}")
             
-            # Проверяем, находимся ли мы в периоде сна для прогрева
-            if not is_warmup_time:
+            # Проверяем, находимся ли мы в периоде для вступления в каналы (во время сна)
+            if not is_warmup_join_time:
                 await asyncio.sleep(WARMUP_SCAN_INTERVAL_SECONDS)
                 continue
             
@@ -753,15 +759,13 @@ async def process_warmup_accounts():
                 if account.get("mode") != "warmup":
                     continue
 
-                # Проверяем, что основной процесс комментирования не запущен
+                # Аккаунты в режиме прогрева комментируют как обычно,
+                # но дополнительно вступают в каналы во время сна
                 session_key = account["phone"]
                 user_id = account["user_id"]
                 key = make_session_key(user_id, session_key)
                 
                 await bot.send_message(log_channel, f"Warmup: Processing account {session_key}, active: {active_sessions.get(key)}")
-                
-                # Аккаунты в режиме прогрева могут быть активными (комментирование) 
-                # и одновременно обрабатываться для вступления в каналы
 
                 # Проверяем, не истек ли период прогрева
                 warmup_end = account.get("warmup_end_at")
