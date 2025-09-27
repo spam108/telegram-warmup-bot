@@ -771,9 +771,9 @@ async def process_warmup_accounts():
                 session_file = os.path.join("sessions", str(user_id), f"{session_key}.session")
                 if not os.path.exists(session_file):
                     await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) - файл сессии не найден: {session_file}")
-                        # Переключаем в стандартный режим если нет сессии
-                        await set_account_mode(account["id"], "standard", warmup_days=None)
-                        continue
+                    # Переключаем в стандартный режим если нет сессии
+                    await set_account_mode(account["id"], "standard", warmup_days=None)
+                    continue
 
                 # Создаем клиент и пытаемся вступить в канал
                 client = Client(
