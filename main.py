@@ -1110,11 +1110,11 @@ async def main():
                         active_sessions.pop(key, None)
                     else:
                         # Обычные аккаунты запускаем как обычно
-                    active_sessions[key] = True
-                    active_account_ids[key] = account["id"]
-                    asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
-                    log_file.write(f"Started account {phone}\n")
-                    log_file.flush()
+                        active_sessions[key] = True
+                        active_account_ids[key] = account["id"]
+                        asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
+                        log_file.write(f"Started account {phone}\n")
+                        log_file.flush()
                 else:
                     await mark_account_stopped(account["id"])
                     log_file.write(f"Stopped account {phone} - no session file\n")
