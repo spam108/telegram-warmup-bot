@@ -927,9 +927,9 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             tomorrow_4_30am = now.replace(hour=4, minute=30, second=0, microsecond=0) + timedelta(days=1)
             await db_update_warmup_schedule(account_id, next_join=tomorrow_4_30am)
             
-            # Запускаем аккаунт
+            # Запускаем аккаунт в режиме прогрева (БЕЗ основной задачи комментирования)
             key = make_session_key(message.from_user.id, session)
-            active_sessions[key] = True
+            # НЕ устанавливаем active_sessions[key] = True для режима прогрева
             active_account_ids[key] = account_id
             quiet_sessions_notified.discard(key)
             await asyncio.sleep(0.1)  # Пауза перед операцией с БД
@@ -939,16 +939,16 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             await bot.send_message(message.from_user.id, f'Аккаунт запущен в режиме прогрева. Используются существующие каналы прогрева.')
             await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование в режиме прогрева')
             await main_message(message)
-            asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))
+            # asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Отключено для режима прогрева
             return
         else:
             # Нет каналов в прогреве - запускаем в стандартном режиме
             await set_account_mode(account_id, "standard", warmup_days=None)
             await sync_warmup_channels(account_id, [])
             
-            # Запускаем аккаунт
+            # Запускаем аккаунт в режиме прогрева (БЕЗ основной задачи комментирования)
             key = make_session_key(message.from_user.id, session)
-            active_sessions[key] = True
+            # НЕ устанавливаем active_sessions[key] = True для режима прогрева
             active_account_ids[key] = account_id
             quiet_sessions_notified.discard(key)
             await asyncio.sleep(0.1)  # Пауза перед операцией с БД
@@ -958,7 +958,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             await bot.send_message(message.from_user.id, 'Аккаунт запущен в стандартном режиме (без прогрева).')
             await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование')
             await main_message(message)
-            asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))
+            # asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Отключено для режима прогрева
             return
 
     channels = [line.strip() for line in message.text.splitlines() if line.strip()]
@@ -980,9 +980,9 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             tomorrow_4_30am = now.replace(hour=4, minute=30, second=0, microsecond=0) + timedelta(days=1)
             await db_update_warmup_schedule(account_id, next_join=tomorrow_4_30am)
             
-            # Запускаем аккаунт
+            # Запускаем аккаунт в режиме прогрева (БЕЗ основной задачи комментирования)
             key = make_session_key(message.from_user.id, session)
-            active_sessions[key] = True
+            # НЕ устанавливаем active_sessions[key] = True для режима прогрева
             active_account_ids[key] = account_id
             quiet_sessions_notified.discard(key)
             await asyncio.sleep(0.1)  # Пауза перед операцией с БД
@@ -992,16 +992,16 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             await bot.send_message(message.from_user.id, f'Аккаунт запущен в режиме прогрева. Используются существующие каналы прогрева.')
             await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование в режиме прогрева')
             await main_message(message)
-            asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))
+            # asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Отключено для режима прогрева
             return
         else:
             # Нет каналов в прогреве - запускаем в стандартном режиме
             await set_account_mode(account_id, "standard", warmup_days=None)
             await sync_warmup_channels(account_id, [])
             
-            # Запускаем аккаунт
+            # Запускаем аккаунт в режиме прогрева (БЕЗ основной задачи комментирования)
             key = make_session_key(message.from_user.id, session)
-            active_sessions[key] = True
+            # НЕ устанавливаем active_sessions[key] = True для режима прогрева
             active_account_ids[key] = account_id
             quiet_sessions_notified.discard(key)
             await asyncio.sleep(0.1)  # Пауза перед операцией с БД
@@ -1011,7 +1011,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             await bot.send_message(message.from_user.id, 'Аккаунт запущен в стандартном режиме (без прогрева).')
             await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование')
             await main_message(message)
-            asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))
+            # asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Отключено для режима прогрева
             return
 
     try:
@@ -1028,18 +1028,18 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
         await main_message(message)
         return
 
-    # Запускаем аккаунт
+    # Запускаем аккаунт в режиме прогрева (БЕЗ основной задачи комментирования)
     key = make_session_key(message.from_user.id, session)
-    active_sessions[key] = True
+    # НЕ устанавливаем active_sessions[key] = True для режима прогрева
     active_account_ids[key] = account_id
     quiet_sessions_notified.discard(key)
     await mark_account_running(account_id)
 
     await state.clear()
     await bot.send_message(message.from_user.id, f'Аккаунт запущен в режиме прогрева. Запланировано {len(warmup_channels)} каналов для прогрева.')
-    await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование в режиме прогрева')
+    await bot.send_message(log_channel, f'Аккаунт {session} начал режим прогрева (без комментирования)')
     await main_message(message)
-    asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))
+    # НЕ запускаем safe_send_comments для режима прогрева
 
 
 async def safe_send_comments(user_id, phone, account_id):
@@ -1078,11 +1078,19 @@ async def main():
                 key = make_session_key(user_id, phone)
                 session_file = os.path.join("sessions", str(user_id), f"{phone}.session")
                 if os.path.exists(session_file):
-                    active_sessions[key] = True
-                    active_account_ids[key] = account["id"]
-                    asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
-                    log_file.write(f"Started account {phone}\n")
-                    log_file.flush()
+                    # Проверяем, не в режиме ли прогрева
+                    if account.get("mode") == "warmup":
+                        # Для аккаунтов в режиме прогрева не запускаем основную задачу комментирования
+                        # Они будут обрабатываться только в process_warmup_accounts
+                        log_file.write(f"Account {phone} in warmup mode - skipping main comment task\n")
+                        log_file.flush()
+                    else:
+                        # Обычные аккаунты запускаем как обычно
+                        active_sessions[key] = True
+                        active_account_ids[key] = account["id"]
+                        asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
+                        log_file.write(f"Started account {phone}\n")
+                        log_file.flush()
                 else:
                     await mark_account_stopped(account["id"])
                     log_file.write(f"Stopped account {phone} - no session file\n")
