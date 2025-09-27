@@ -768,28 +768,16 @@ async def process_warmup_accounts():
                 channel = channel_entry["channel"]
 
                 # Проверяем существование файла сессии
-                session_file = f"{account['session_path']}.session"
+                session_file = os.path.join("sessions", str(user_id), f"{session_key}.session")
                 if not os.path.exists(session_file):
-                    # Проверяем альтернативный формат с двойным расширением
-                    session_file_alt = f"{account['session_path']}.session.session"
-                    if os.path.exists(session_file_alt):
-                        # Обновляем путь к сессии в базе данных
-                        pool = _require_pool()
-                        async with pool.acquire() as conn:
-                            await conn.execute(
-                                "UPDATE accounts SET session_path = $1 WHERE id = $2",
-                                f"{account['session_path']}.session",
-                                account["id"]
-                            )
-                    else:
-                        await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) - файл сессии не найден")
+                    await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) - файл сессии не найден: {session_file}")
                         # Переключаем в стандартный режим если нет сессии
                         await set_account_mode(account["id"], "standard", warmup_days=None)
                         continue
 
                 # Создаем клиент и пытаемся вступить в канал
                 client = Client(
-                    name=account["session_path"],
+                    name=os.path.join("sessions", str(user_id), session_key),
                     api_id=API_ID,
                     api_hash=API_HASH,
                 )
@@ -1089,11 +1077,11 @@ async def main():
                         active_sessions.pop(key, None)
                     else:
                         # Обычные аккаунты запускаем как обычно
-                        active_sessions[key] = True
-                        active_account_ids[key] = account["id"]
-                        asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
-                        log_file.write(f"Started account {phone}\n")
-                        log_file.flush()
+                    active_sessions[key] = True
+                    active_account_ids[key] = account["id"]
+                    asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
+                    log_file.write(f"Started account {phone}\n")
+                    log_file.flush()
                 else:
                     await mark_account_stopped(account["id"])
                     log_file.write(f"Stopped account {phone} - no session file\n")
