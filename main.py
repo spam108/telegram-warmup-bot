@@ -233,7 +233,7 @@ async def main_message(message):
         key = make_session_key(user_id, call)
         # Проверяем статус в базе данных, а не только в active_sessions
         is_running = active_sessions.get(key) or account.get("status") == "running"
-        status_button_text = "Запустить" if not is_running else "Остановить"
+        status_button_text = "Запустить" if not is_running else "Stop1"
         status_button_callback = f"start_{call}" if not is_running else f"stop_{call}"
 
         button_info = types.InlineKeyboardButton(text=f"ℹ️ {call}", callback_data=f"info_{call}")
@@ -241,7 +241,7 @@ async def main_message(message):
         button_delete = types.InlineKeyboardButton(text="Удалить", callback_data=f"del_{call}")
         button_mode = types.InlineKeyboardButton(text="Режим", callback_data=f"mode_{call}")
 
-        if active_sessions.get(key):
+        if is_running:
             builder.row(button_info, button_status, button_mode)
         else:
             builder.row(button_info, button_status, button_mode, button_delete)
