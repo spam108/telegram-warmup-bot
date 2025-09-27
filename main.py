@@ -760,9 +760,8 @@ async def process_warmup_accounts():
                 
                 await bot.send_message(log_channel, f"Warmup: Processing account {session_key}, active: {active_sessions.get(key)}")
                 
-                if active_sessions.get(key):
-                    await bot.send_message(log_channel, f"Warmup: Account {session_key} is active, skipping")
-                    continue
+                # Аккаунты в режиме прогрева могут быть активными (комментирование) 
+                # и одновременно обрабатываться для вступления в каналы
 
                 # Проверяем, не истек ли период прогрева
                 warmup_end = account.get("warmup_end_at")
@@ -1101,22 +1100,15 @@ async def main():
                 key = make_session_key(user_id, phone)
                 session_file = os.path.join("sessions", str(user_id), f"{phone}.session")
                 if os.path.exists(session_file):
-                    # Проверяем, не в режиме ли прогрева
+                    # Запускаем все аккаунты (включая режим прогрева)
+                    active_sessions[key] = True
+                    active_account_ids[key] = account["id"]
+                    asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
                     if account.get("mode") == "warmup":
-                        # Для аккаунтов в режиме прогрева не запускаем основную задачу комментирования
-                        # Они будут обрабатываться только в process_warmup_accounts
-                        log_file.write(f"Account {phone} in warmup mode - skipping main comment task\n")
-                        log_file.flush()
-                        # Убеждаемся, что аккаунт НЕ активен
-                        active_sessions.pop(key, None)
-                        active_account_ids.pop(key, None)
+                        log_file.write(f"Started account {phone} in warmup mode\n")
                     else:
-                        # Обычные аккаунты запускаем как обычно
-                        active_sessions[key] = True
-                        active_account_ids[key] = account["id"]
-                        asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
                         log_file.write(f"Started account {phone}\n")
-                        log_file.flush()
+                    log_file.flush()
                 else:
                     await mark_account_stopped(account["id"])
                     log_file.write(f"Stopped account {phone} - no session file\n")
