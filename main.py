@@ -97,6 +97,7 @@ class startaccount(StatesGroup):
     systempromt = State()
     sleeps = State()
     chance = State()
+    regular_channels = State()
     warmup_channels = State()
 
 active_sessions: Dict[str, bool] = {}  # Глобальный словарь для хранения активных сессий
@@ -172,7 +173,7 @@ async def main_message(message):
     existing_accounts = {account["phone"]: account for account in db_accounts}
 
     for file in os.listdir(user_sessions_dir):
-        if file.endswith('.session'):
+        if file.endswith('.session') and not file.endswith('.session.session'):
             phone = file.replace('.session', '')
             if phone not in existing_accounts:
                 session_path = os.path.join(user_sessions_dir, file)
@@ -186,7 +187,11 @@ async def main_message(message):
         call = account["phone"]
         session_file = os.path.join(user_sessions_dir, f"{call}.session")
         if not os.path.exists(session_file):
-            continue
+            # Проверяем также файл .session.session
+            session_file_alt = os.path.join(user_sessions_dir, f"{call}.session.session")
+            if not os.path.exists(session_file_alt):
+                continue
+            session_file = session_file_alt
 
         key = make_session_key(user_id, call)
         status_button_text = "Запустить" if not active_sessions.get(key) else "Остановить"
@@ -423,7 +428,21 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
 
         try:
             await delete_account(callback_query.from_user.id, session)
-            os.remove(f'sessions/{callback_query.from_user.id}/{session}.session')
+            
+            # Удаляем оба типа файлов сессий
+            session_file = f'sessions/{callback_query.from_user.id}/{session}.session'
+            session_file_alt = f'sessions/{callback_query.from_user.id}/{session}.session.session'
+            
+            deleted_files = []
+            if os.path.exists(session_file):
+                os.remove(session_file)
+                deleted_files.append(f"{session}.session")
+                
+            if os.path.exists(session_file_alt):
+                os.remove(session_file_alt)
+                deleted_files.append(f"{session}.session.session")
+            
+            await bot.send_message(log_channel, f"Аккаунт {session} удален. Удалены файлы: {', '.join(deleted_files)}")
             await main_message(callback_query)
         except Exception as e:
             await bot.send_message(callback_query.from_user.id, f"Ошибка: {str(e)}")
@@ -507,7 +526,7 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
 
             await bot.send_message(message.from_user.id,
                                 f'Аккаунт подписан на каналы:\n{channels}\n\nПришлите каналы на которые нужно подписаться\n(если не нужно пришлите -)')
-            await state.set_state(startaccount.channels)
+            await state.set_state(startaccount.regular_channels)
         else:
             await state.clear()
             await main_message(message)
@@ -521,7 +540,6 @@ async def add_channels(message: Message, state: FSMContext) -> None:
     chance = (await state.get_data()).get("chance")
 
     account_id = (await state.get_data()).get("account_id")
-    warmup_channels = []
 
     if str(message.text) != '-':
         channels = str(message.text).splitlines()
@@ -552,12 +570,8 @@ async def add_channels(message: Message, state: FSMContext) -> None:
                             await bot.send_message(log_channel, f'Ошибка при выходе из канала {chl}: {e}')
 
                     else:
-
-                        try:
-                            await app.join_chat(chl)
-                            await bot.send_message(log_channel, f'Аккаунт {session} вступил в канал: {chl}')
-                        except Exception as e:
-                            await bot.send_message(log_channel, f'Ошибка при вступлении в канал {chl}: {e}')
+                        # Обычные каналы - вступаем сразу
+                        await join_channel(chl, account_id, session, message.from_user.id, is_warmup=False)
         else:
             await state.clear()
             await main_message(message)
@@ -585,6 +599,43 @@ async def add_channels(message: Message, state: FSMContext) -> None:
 
     # Переходим к вводу каналов для прогрева
     await state.update_data({"account_id": account_id})
+    await bot.send_message(message.from_user.id, 'Теперь пришлите каналы для прогрева (каждый канал с новой строки). Для отмены отправьте "-".')
+    await state.set_state(startaccount.warmup_channels)
+
+
+@dp.message(startaccount.regular_channels)
+async def add_regular_channels(message: Message, state: FSMContext) -> None:
+    """Обработчик для обычных каналов (немедленное вступление)"""
+    session = (await state.get_data()).get("account")
+    account_id = (await state.get_data()).get("account_id")
+    
+    if not account_id:
+        await bot.send_message(message.from_user.id, "Ошибка: аккаунт не найден. Попробуйте снова.")
+        await state.clear()
+        await main_message(message)
+        return
+    
+    if str(message.text) != '-':
+        channels = [line.strip() for line in message.text.splitlines() if line.strip()]
+        
+        # Вступаем в обычные каналы сразу
+        for channel in channels:
+            await join_channel(channel, account_id, session, message.from_user.id, is_warmup=False)
+        
+        # Обновляем список обычных каналов в БД
+        await update_account_settings(account_id, channels=channels)
+    
+    # Переходим к диалогу каналов прогрева
+    await bot.send_message(message.from_user.id, 'Текущие каналы в прогреве:')
+    
+    # Показываем существующие каналы прогрева
+    existing_warmup = await get_warmup_pending(account_id, limit=10)
+    if existing_warmup:
+        warmup_list = [ch["channel"] for ch in existing_warmup]
+        await bot.send_message(message.from_user.id, '\n'.join(warmup_list))
+    else:
+        await bot.send_message(message.from_user.id, 'Нет каналов в прогреве')
+    
     await bot.send_message(message.from_user.id, 'Теперь пришлите каналы для прогрева (каждый канал с новой строки). Для отмены отправьте "-".')
     await state.set_state(startaccount.warmup_channels)
 
@@ -655,6 +706,8 @@ async def send_comments(userid, session, account_id):
                     else:
                         await bot.send_message(log_channel, f'Аккаунт {session} отправил комментарий\n'
                                                         f'https://t.me/c/{str(message.chat.id).replace("-", "")}/{msg.id}')
+                    # Небольшая пауза перед записью в БД
+                    await asyncio.sleep(0.2)
                     await add_comment_log(
                         account_id,
                             channel=str(message.chat.id),
@@ -665,6 +718,8 @@ async def send_comments(userid, session, account_id):
                     
                 except Exception as e:
                     await bot.send_message(log_channel, f'Аккаунт {session} ошибка комментирования: {e}')
+                    # Пауза перед записью ошибки в БД
+                    await asyncio.sleep(0.2)
                     await add_comment_log(
                         account_id,
                         channel=str(message.chat.id),
@@ -685,6 +740,58 @@ async def send_comments(userid, session, account_id):
                 await mark_account_stopped(account_id)
             active_sessions.pop(key, None)
             quiet_sessions_notified.discard(key)
+
+
+async def join_channel(channel: str, account_id: int, session_key: str, user_id: int, is_warmup: bool = False) -> bool:
+    """Единая функция для вступления в канал (обычный или прогрев)"""
+    try:
+        # Создаем клиент
+        session_file = os.path.join("sessions", str(user_id), f"{session_key}.session")
+        if not os.path.exists(session_file):
+            await bot.send_message(log_channel, f"Аккаунт {session_key} - файл сессии не найден: {session_file}")
+            return False
+            
+        client = Client(
+            name=session_file,
+            api_id=API_ID,
+            api_hash=API_HASH,
+        )
+        
+        async with client:
+            try:
+                await client.join_chat(channel)
+                
+                if is_warmup:
+                    # Для каналов прогрева - обновляем БД
+                    await mark_warmup_channel_joined(account_id, channel)
+                    await increment_warmup_joined(account_id)
+                    await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) вступил в канал: {channel}")
+                else:
+                    # Для обычных каналов - просто логируем
+                    await bot.send_message(log_channel, f"Аккаунт {session_key} вступил в канал: {channel}")
+                
+                return True
+                
+            except UserAlreadyParticipant:
+                if is_warmup:
+                    await mark_warmup_channel_joined(account_id, channel)
+                await bot.send_message(log_channel, f"Аккаунт {session_key} уже состоит в канале: {channel}")
+                return True
+                
+            except Exception as e:
+                if is_warmup:
+                    await record_warmup_channel_error(account_id, channel, str(e))
+                await bot.send_message(log_channel, f"Аккаунт {session_key} ошибка вступления в канал {channel}: {e}")
+                return False
+                
+    except Exception as e:
+        error_msg = str(e)
+        if any(keyword in error_msg.lower() for keyword in ["phone number", "auth", "eof when reading", "session", "unauthorized"]):
+            await bot.send_message(log_channel, f"Аккаунт {session_key} - сессия истекла или повреждена: {error_msg}")
+            return False
+        else:
+            await bot.send_message(log_channel, f"Аккаунт {session_key} ошибка подключения: {e}")
+            return False
 
 
 async def process_warmup_accounts():
@@ -743,52 +850,19 @@ async def process_warmup_accounts():
                 channel = channel_entry["channel"]
 
                 # Проверяем существование файла сессии
-                session_file = f"{account['session_path']}.session"
+                session_file = os.path.join("sessions", str(user_id), f"{session_key}.session")
                 if not os.path.exists(session_file):
-                    # Проверяем альтернативный формат с двойным расширением
-                    session_file_alt = f"{account['session_path']}.session.session"
-                    if os.path.exists(session_file_alt):
-                        # Обновляем путь к сессии в базе данных
-                        pool = _require_pool()
-                        async with pool.acquire() as conn:
-                            await conn.execute(
-                                "UPDATE accounts SET session_path = $1 WHERE id = $2",
-                                f"{account['session_path']}.session",
-                                account["id"]
-                            )
-                    else:
-                        await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) - файл сессии не найден")
-                        # Переключаем в стандартный режим если нет сессии
-                        await set_account_mode(account["id"], "standard", warmup_days=None)
-                        continue
+                    await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) - файл сессии не найден: {session_file}")
+                    # Переключаем в стандартный режим если нет сессии
+                    await set_account_mode(account["id"], "standard", warmup_days=None)
+                    continue
 
-                # Создаем клиент и пытаемся вступить в канал
-                client = Client(
-                    name=account["session_path"],
-                    api_id=API_ID,
-                    api_hash=API_HASH,
-                )
-
-                try:
-                    async with client:
-                        try:
-                            await client.join_chat(channel)
-                            await mark_warmup_channel_joined(account["id"], channel)
-                            await increment_warmup_joined(account["id"])
-                            await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) вступил в канал: {channel}")
-                        except UserAlreadyParticipant:
-                            await mark_warmup_channel_joined(account["id"], channel)
-                        except Exception as e:
-                            await record_warmup_channel_error(account["id"], channel, str(e))
-                            await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) ошибка вступления в канал {channel}: {e}")
-                except Exception as e:
-                    error_msg = str(e)
-                    if "phone number" in error_msg.lower() or "auth" in error_msg.lower():
-                        await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) - сессия истекла, пропускаем прогрев")
-                        # Переключаем в стандартный режим если сессия истекла
-                        await set_account_mode(account["id"], "standard", warmup_days=None)
-                    else:
-                        await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) ошибка подключения: {e}")
+                # Используем единую функцию для вступления в канал прогрева
+                success = await join_channel(channel, account["id"], session_key, user_id, is_warmup=True)
+                
+                if not success:
+                    # Если сессия истекла - переключаем в стандартный режим
+                    await set_account_mode(account["id"], "standard", warmup_days=None)
 
         except Exception as e:
             logging.exception("Warmup loop error: %s", e)
@@ -908,6 +982,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             active_sessions[key] = True
             active_account_ids[key] = account_id
             quiet_sessions_notified.discard(key)
+            await asyncio.sleep(0.1)  # Пауза перед операцией с БД
             await mark_account_running(account_id)
             
             await state.clear()
@@ -926,6 +1001,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             active_sessions[key] = True
             active_account_ids[key] = account_id
             quiet_sessions_notified.discard(key)
+            await asyncio.sleep(0.1)  # Пауза перед операцией с БД
             await mark_account_running(account_id)
             
             await state.clear()
@@ -959,6 +1035,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             active_sessions[key] = True
             active_account_ids[key] = account_id
             quiet_sessions_notified.discard(key)
+            await asyncio.sleep(0.1)  # Пауза перед операцией с БД
             await mark_account_running(account_id)
             
             await state.clear()
@@ -977,6 +1054,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             active_sessions[key] = True
             active_account_ids[key] = account_id
             quiet_sessions_notified.discard(key)
+            await asyncio.sleep(0.1)  # Пауза перед операцией с БД
             await mark_account_running(account_id)
             
             await state.clear()
@@ -1050,10 +1128,15 @@ async def main():
                 key = make_session_key(user_id, phone)
                 session_file = os.path.join("sessions", str(user_id), f"{phone}.session")
                 if os.path.exists(session_file):
-                    active_sessions[key] = True
-                    active_account_ids[key] = account["id"]
-                    asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
-                    log_file.write(f"Started account {phone}\n")
+                    # Запускаем только аккаунты в стандартном режиме
+                    if account.get("mode") == "standard":
+                        active_sessions[key] = True
+                        active_account_ids[key] = account["id"]
+                        asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
+                        log_file.write(f"Started account {phone}\n")
+                    else:
+                        # Аккаунты в режиме прогрева не запускаем автоматически
+                        log_file.write(f"Account {phone} in warmup mode - not started automatically\n")
                     log_file.flush()
                 else:
                     await mark_account_stopped(account["id"])
