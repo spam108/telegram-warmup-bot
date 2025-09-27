@@ -98,6 +98,7 @@ class startaccount(StatesGroup):
     systempromt = State()
     sleeps = State()
     chance = State()
+    regular_channels = State()
     warmup_channels = State()
 
 active_sessions: Dict[str, bool] = {}  # Глобальный словарь для хранения активных сессий
@@ -588,7 +589,7 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
 
             await bot.send_message(message.from_user.id,
                                 f'Аккаунт подписан на каналы:\n{channels}\n\nПришлите каналы на которые нужно подписаться\n(если не нужно пришлите -)')
-            await state.set_state(startaccount.channels)
+            await state.set_state(startaccount.regular_channels)
         else:
             await state.clear()
             await main_message(message)
@@ -988,6 +989,43 @@ async def add_code(message: Message, state: FSMContext) -> None:
     await state.clear()
 
 
+@dp.message(startaccount.regular_channels)
+async def add_regular_channels(message: Message, state: FSMContext) -> None:
+    """Обработчик для обычных каналов (немедленное вступление)"""
+    session = (await state.get_data()).get("account")
+    account_id = (await state.get_data()).get("account_id")
+    
+    if not account_id:
+        await bot.send_message(message.from_user.id, "Ошибка: аккаунт не найден. Попробуйте снова.")
+        await state.clear()
+        await main_message(message)
+        return
+    
+    if str(message.text) != '-':
+        channels = [line.strip() for line in message.text.splitlines() if line.strip()]
+        
+        # Вступаем в обычные каналы сразу
+        for channel in channels:
+            await join_channel(channel, account_id, session, message.from_user.id, is_warmup=False)
+        
+        # Обновляем список обычных каналов в БД
+        await update_account_settings(account_id, channels=channels)
+    
+    # Переходим к диалогу каналов прогрева
+    await bot.send_message(message.from_user.id, 'Текущие каналы в прогреве:')
+    
+    # Показываем существующие каналы прогрева
+    existing_warmup = await get_warmup_pending(account_id, limit=10)
+    if existing_warmup:
+        warmup_list = [ch["channel"] for ch in existing_warmup]
+        await bot.send_message(message.from_user.id, '\n'.join(warmup_list))
+    else:
+        await bot.send_message(message.from_user.id, 'Нет каналов в прогреве')
+    
+    await bot.send_message(message.from_user.id, 'Теперь пришлите каналы для прогрева (каждый канал с новой строки). Для отмены отправьте "-".')
+    await state.set_state(startaccount.warmup_channels)
+
+
 @dp.message(startaccount.warmup_channels)
 async def add_warmup_channels(message: Message, state: FSMContext) -> None:
     session = (await state.get_data()).get("account")
@@ -1057,8 +1095,8 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
     warmup_channels = [chl for chl in channels if not chl.startswith('-')]
     
     # Удаляем дубликаты, сохраняя порядок
-    seen = set()
-    warmup_channels = [x for x in warmup_channels if not (x in seen or seen.add(x))]
+    seen_warmup = set()
+    warmup_channels = [x for x in warmup_channels if not (x in seen_warmup or seen_warmup.add(x))]
 
     if not warmup_channels:
         # Проверяем, есть ли уже каналы в прогреве
