@@ -103,14 +103,21 @@ active_sessions: Dict[str, bool] = {}  # Глобальный словарь д�
 active_account_ids: Dict[str, int] = {}
 quiet_sessions_notified: Set[str] = set()
 
-WARMUP_CHANNELS_PER_DAY = 15
-WARMUP_DELAY_SECONDS = 7 * 60  # 7 минут между добавлениями
+# Настройки времени из переменных окружения
+QUIET_START_HOUR = int(os.getenv("QUIET_START_HOUR", "8"))
+QUIET_START_MINUTE = int(os.getenv("QUIET_START_MINUTE", "0"))
+QUIET_END_HOUR = int(os.getenv("QUIET_END_HOUR", "20"))
+QUIET_END_MINUTE = int(os.getenv("QUIET_END_MINUTE", "0"))
+
+WARMUP_CHANNELS_PER_DAY = int(os.getenv("WARMUP_CHANNELS_PER_DAY", "15"))
+WARMUP_DELAY_MINUTES = int(os.getenv("WARMUP_DELAY_MINUTES", "7"))
+WARMUP_DELAY_SECONDS = WARMUP_DELAY_MINUTES * 60
 WARMUP_SCAN_INTERVAL_SECONDS = 60  # Проверка каждую минуту
-WARMUP_DEFAULT_DAYS = 7
-WARMUP_SLEEP_START_HOUR = 4  # Начало периода сна (4:30)
-WARMUP_SLEEP_START_MINUTE = 30
-WARMUP_SLEEP_END_HOUR = 8    # Конец периода сна (8:25)
-WARMUP_SLEEP_END_MINUTE = 25
+WARMUP_DEFAULT_DAYS = int(os.getenv("WARMUP_DEFAULT_DAYS", "7"))
+WARMUP_SLEEP_START_HOUR = int(os.getenv("WARMUP_START_HOUR", "12"))
+WARMUP_SLEEP_START_MINUTE = int(os.getenv("WARMUP_START_MINUTE", "0"))
+WARMUP_SLEEP_END_HOUR = int(os.getenv("WARMUP_END_HOUR", "19"))
+WARMUP_SLEEP_END_MINUTE = int(os.getenv("WARMUP_END_MINUTE", "0"))
 
 # Ограничение одновременных подключений
 MAX_CONCURRENT_ACCOUNTS = 5
@@ -122,16 +129,16 @@ def make_session_key(user_id: int, phone: str) -> str:
 
 
 def is_quiet_period(now: datetime | None = None) -> bool:
-    """Проверяет, находимся ли мы в тихом периоде (00:30 - 08:30)"""
+    """Проверяет, находимся ли мы в тихом периоде (настраивается через env)"""
     now = now or datetime.now(timezone.utc)
     current_time = now.time()
-    start = time(0, 30)
-    end = time(8, 30)
+    start = time(QUIET_START_HOUR, QUIET_START_MINUTE)
+    end = time(QUIET_END_HOUR, QUIET_END_MINUTE)
     return start <= current_time < end
 
 
 def is_warmup_sleep_period(now: datetime | None = None) -> bool:
-    """Проверяет, находимся ли мы в периоде сна для прогрева (04:30 - 08:25)"""
+    """Проверяет, находимся ли мы в периоде сна для прогрева (настраивается через env)"""
     now = now or datetime.now(timezone.utc)
     current_time = now.time()
     start = time(WARMUP_SLEEP_START_HOUR, WARMUP_SLEEP_START_MINUTE)
@@ -694,7 +701,7 @@ async def send_comments(userid, session, account_id):
 
 
 async def process_warmup_accounts():
-    """Фоновая задача для добавления каналов в режиме прогрева во время сна (4:30-8:25)"""
+    """Фоновая задача для добавления каналов в режиме прогрева (настраивается через env)"""
     while True:
         try:
             now = datetime.now(timezone.utc)
