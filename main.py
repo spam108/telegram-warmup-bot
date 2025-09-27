@@ -812,8 +812,8 @@ async def join_channel(channel: str, account_id: int, session_key: str, user_id:
                 
     except Exception as e:
         error_msg = str(e)
-        if "phone number" in error_msg.lower() or "auth" in error_msg.lower():
-            await bot.send_message(log_channel, f"Аккаунт {session_key} - сессия истекла")
+        if any(keyword in error_msg.lower() for keyword in ["phone number", "auth", "eof when reading", "session", "unauthorized"]):
+            await bot.send_message(log_channel, f"Аккаунт {session_key} - сессия истекла или повреждена: {error_msg}")
             return False
         else:
             await bot.send_message(log_channel, f"Аккаунт {session_key} ошибка подключения: {e}")
@@ -994,9 +994,6 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
     account_id = (await state.get_data()).get("account_id")
     processed = (await state.get_data()).get("warmup_processed", False)
     
-    # Логируем для отладки
-    await bot.send_message(log_channel, f"Обработка каналов прогрева для {session}: '{message.text[:50]}...' (processed: {processed})")
-
     # Проверяем, не обрабатывали ли мы уже это состояние
     if not account_id or processed:
         if processed:
@@ -1006,6 +1003,9 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
         await state.clear()
         await main_message(message)
         return
+    
+    # Помечаем как обработанное, чтобы избежать повторных вызовов
+    await state.update_data({"warmup_processed": True})
 
     if str(message.text) == '-':
         # Проверяем, есть ли уже каналы в прогреве
@@ -1120,7 +1120,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
         await main_message(message)
         return
 
-    # Запускаем аккаунт в режиме прогрева (БЕЗ основной задачи комментирования)
+    # Запускаем аккаунт в режиме прогрева (С комментированием + прогрев)
     key = make_session_key(message.from_user.id, session)
     active_sessions[key] = True  # Устанавливаем для комментирования
     active_account_ids[key] = account_id
@@ -1129,9 +1129,9 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     await bot.send_message(message.from_user.id, f'Аккаунт запущен в режиме прогрева. Запланировано {len(warmup_channels)} каналов для прогрева.')
-    await bot.send_message(log_channel, f'Аккаунт {session} начал режим прогрева (без комментирования)')
+    await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование в режиме прогрева')
     await main_message(message)
-    # НЕ запускаем safe_send_comments для режима прогрева
+    asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Запускаем комментирование
 
 
 async def safe_send_comments(user_id, phone, account_id):
