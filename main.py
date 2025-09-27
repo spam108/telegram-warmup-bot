@@ -517,13 +517,22 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
 
         session = str(call).split('_')[1]
         key = make_session_key(callback_query.from_user.id, session)
-        if not active_sessions.get(key):
-            await bot.send_message(log_channel, f"Аккаунт {session} не запущен")
+        
+        # Проверяем, запущен ли аккаунт (в active_sessions или в БД)
+        account_row = await get_account_by_session(callback_query.from_user.id, session)
+        if not account_row:
+            await bot.send_message(callback_query.from_user.id, "Аккаунт не найден в базе данных")
+            await main_message(callback_query)
+            return
+            
+        is_running = active_sessions.get(key) or account_row.get("status") == "running"
+        if not is_running:
+            await bot.send_message(callback_query.from_user.id, f"Аккаунт {session} не запущен")
             await main_message(callback_query)
             return
 
         try:
-
+            # Останавливаем аккаунт
             active_sessions.pop(key, None)
             account_id = active_account_ids.pop(key, None)
             if account_id:
@@ -531,7 +540,6 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
 
             await bot.send_message(log_channel, f'Аккаунт {session} остановлен')
             await main_message(callback_query)
-
 
         except Exception as e:
             await bot.send_message(callback_query.from_user.id, f"Ошибка: {str(e)}")
