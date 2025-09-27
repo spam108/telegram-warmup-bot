@@ -66,15 +66,10 @@ PASSWORD=your_secure_password_here
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/commentbot
 
 # Настройки времени теперь в файле schedule.json
-# Скопируйте schedule.example.json в schedule.json и настройте по необходимости
+# Отредактируйте schedule.json под ваши нужды
 ```
 
 ### 6. Настройка расписания
-
-Скопируйте файл с примером настроек:
-```bash
-cp schedule.example.json schedule.json
-```
 
 Отредактируйте `schedule.json` под ваши нужды:
 ```json
