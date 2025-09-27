@@ -633,12 +633,8 @@ async def add_channels(message: Message, state: FSMContext) -> None:
                             await bot.send_message(log_channel, f'Ошибка при выходе из канала {chl}: {e}')
 
                     else:
-
-                        try:
-                            await app.join_chat(chl)
-                            await bot.send_message(log_channel, f'Аккаунт {session} вступил в канал: {chl}')
-                        except Exception as e:
-                            await bot.send_message(log_channel, f'Ошибка при вступлении в канал {chl}: {e}')
+                        # Обычные каналы - вступаем сразу
+                        await join_channel(chl, account_id, session, message.from_user.id, is_warmup=False)
         else:
             await state.clear()
             await main_message(message)
@@ -772,6 +768,58 @@ async def send_comments(userid, session, account_id):
             quiet_sessions_notified.discard(key)
 
 
+async def join_channel(channel: str, account_id: int, session_key: str, user_id: int, is_warmup: bool = False) -> bool:
+    """Единая функция для вступления в канал (обычный или прогрев)"""
+    try:
+        # Создаем клиент
+        session_file = os.path.join("sessions", str(user_id), f"{session_key}.session")
+        if not os.path.exists(session_file):
+            await bot.send_message(log_channel, f"Аккаунт {session_key} - файл сессии не найден: {session_file}")
+            return False
+            
+        client = Client(
+            name=session_file,
+            api_id=API_ID,
+            api_hash=API_HASH,
+        )
+        
+        async with client:
+            try:
+                await client.join_chat(channel)
+                
+                if is_warmup:
+                    # Для каналов прогрева - обновляем БД
+                    await mark_warmup_channel_joined(account_id, channel)
+                    await increment_warmup_joined(account_id)
+                    await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) вступил в канал: {channel}")
+                else:
+                    # Для обычных каналов - просто логируем
+                    await bot.send_message(log_channel, f"Аккаунт {session_key} вступил в канал: {channel}")
+                
+                return True
+                
+            except UserAlreadyParticipant:
+                if is_warmup:
+                    await mark_warmup_channel_joined(account_id, channel)
+                await bot.send_message(log_channel, f"Аккаунт {session_key} уже состоит в канале: {channel}")
+                return True
+                
+            except Exception as e:
+                if is_warmup:
+                    await record_warmup_channel_error(account_id, channel, str(e))
+                await bot.send_message(log_channel, f"Аккаунт {session_key} ошибка вступления в канал {channel}: {e}")
+                return False
+                
+    except Exception as e:
+        error_msg = str(e)
+        if "phone number" in error_msg.lower() or "auth" in error_msg.lower():
+            await bot.send_message(log_channel, f"Аккаунт {session_key} - сессия истекла")
+            return False
+        else:
+            await bot.send_message(log_channel, f"Аккаунт {session_key} ошибка подключения: {e}")
+            return False
+
+
 async def process_warmup_accounts():
     """Фоновая задача для добавления каналов в режиме прогрева (во время сна)"""
     while True:
@@ -785,11 +833,8 @@ async def process_warmup_accounts():
             
             # Проверяем, находимся ли мы в периоде для вступления в каналы (во время сна)
             if not is_warmup_join_time:
-                await bot.send_message(log_channel, f"Warmup: NOT in join period, skipping. Time: {now.strftime('%H:%M')} UTC")
                 await asyncio.sleep(WARMUP_SCAN_INTERVAL_SECONDS)
                 continue
-            
-            await bot.send_message(log_channel, f"Warmup: IN join period, processing accounts. Time: {now.strftime('%H:%M')} UTC")
             
             all_accounts = await get_running_accounts()
             accounts = [acc for acc in all_accounts if acc.get("mode") == "warmup"]
@@ -854,33 +899,12 @@ async def process_warmup_accounts():
                     await set_account_mode(account["id"], "standard", warmup_days=None)
                     continue
 
-                # Создаем клиент и пытаемся вступить в канал
-                client = Client(
-                    name=os.path.join("sessions", str(user_id), session_key),
-                    api_id=API_ID,
-                    api_hash=API_HASH,
-                )
-
-                try:
-                    async with client:
-                        try:
-                            await client.join_chat(channel)
-                            await mark_warmup_channel_joined(account["id"], channel)
-                            await increment_warmup_joined(account["id"])
-                            await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) вступил в канал: {channel}")
-                        except UserAlreadyParticipant:
-                            await mark_warmup_channel_joined(account["id"], channel)
-                        except Exception as e:
-                            await record_warmup_channel_error(account["id"], channel, str(e))
-                            await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) ошибка вступления в канал {channel}: {e}")
-                except Exception as e:
-                    error_msg = str(e)
-                    if "phone number" in error_msg.lower() or "auth" in error_msg.lower():
-                        await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) - сессия истекла, пропускаем прогрев")
-                        # Переключаем в стандартный режим если сессия истекла
-                        await set_account_mode(account["id"], "standard", warmup_days=None)
-                    else:
-                        await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) ошибка подключения: {e}")
+                # Используем единую функцию для вступления в канал прогрева
+                success = await join_channel(channel, account["id"], session_key, user_id, is_warmup=True)
+                
+                if not success:
+                    # Если сессия истекла - переключаем в стандартный режим
+                    await set_account_mode(account["id"], "standard", warmup_days=None)
 
         except Exception as e:
             logging.exception("Warmup loop error: %s", e)
