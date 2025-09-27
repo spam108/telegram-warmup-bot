@@ -65,26 +65,44 @@ OPENAI_API_KEY=your_openai_api_key_here
 PASSWORD=your_secure_password_here
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/commentbot
 
-# Настройки времени (24-часовой формат, UTC)
-# Циркадный ритм (тихий период) - бот не комментирует в это время
-QUIET_START_HOUR=8
-QUIET_START_MINUTE=0
-QUIET_END_HOUR=20
-QUIET_END_MINUTE=0
-
-# Период прогрева - бот вступает в каналы в это время
-WARMUP_START_HOUR=12
-WARMUP_START_MINUTE=0
-WARMUP_END_HOUR=19
-WARMUP_END_MINUTE=0
-
-# Настройки прогрева
-WARMUP_CHANNELS_PER_DAY=15
-WARMUP_DELAY_MINUTES=7
-WARMUP_DEFAULT_DAYS=7
+# Настройки времени теперь в файле schedule.json
+# Скопируйте schedule.example.json в schedule.json и настройте по необходимости
 ```
 
-### 6. Запуск бота
+### 6. Настройка расписания
+
+Скопируйте файл с примером настроек:
+```bash
+cp schedule.example.json schedule.json
+```
+
+Отредактируйте `schedule.json` под ваши нужды:
+```json
+{
+  "quiet_period": {
+    "start_hour": 8,
+    "start_minute": 0,
+    "end_hour": 20,
+    "end_minute": 0,
+    "description": "Циркадный ритм - бот не комментирует в это время (UTC)"
+  },
+  "warmup_period": {
+    "start_hour": 12,
+    "start_minute": 0,
+    "end_hour": 19,
+    "end_minute": 0,
+    "description": "Период прогрева - бот вступает в каналы в это время (UTC)"
+  },
+  "warmup_settings": {
+    "channels_per_day": 15,
+    "delay_minutes": 7,
+    "default_days": 7,
+    "description": "Настройки режима прогрева"
+  }
+}
+```
+
+### 7. Запуск бота
 
 ```bash
 python main.py

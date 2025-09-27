@@ -103,21 +103,47 @@ active_sessions: Dict[str, bool] = {}  # Глобальный словарь д�
 active_account_ids: Dict[str, int] = {}
 quiet_sessions_notified: Set[str] = set()
 
-# Настройки времени из переменных окружения
-QUIET_START_HOUR = int(os.getenv("QUIET_START_HOUR", "8"))
-QUIET_START_MINUTE = int(os.getenv("QUIET_START_MINUTE", "0"))
-QUIET_END_HOUR = int(os.getenv("QUIET_END_HOUR", "20"))
-QUIET_END_MINUTE = int(os.getenv("QUIET_END_MINUTE", "0"))
+# Функция для загрузки настроек расписания
+def load_schedule_config():
+    """Загружает настройки расписания из schedule.json"""
+    try:
+        with open('schedule.json', 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        return config
+    except FileNotFoundError:
+        # Если файл не найден, используем значения по умолчанию
+        return {
+            "quiet_period": {"start_hour": 8, "start_minute": 0, "end_hour": 20, "end_minute": 0},
+            "warmup_period": {"start_hour": 12, "start_minute": 0, "end_hour": 19, "end_minute": 0},
+            "warmup_settings": {"channels_per_day": 15, "delay_minutes": 7, "default_days": 7}
+        }
+    except Exception as e:
+        print(f"Ошибка загрузки schedule.json: {e}")
+        # Используем значения по умолчанию
+        return {
+            "quiet_period": {"start_hour": 8, "start_minute": 0, "end_hour": 20, "end_minute": 0},
+            "warmup_period": {"start_hour": 12, "start_minute": 0, "end_hour": 19, "end_minute": 0},
+            "warmup_settings": {"channels_per_day": 15, "delay_minutes": 7, "default_days": 7}
+        }
 
-WARMUP_CHANNELS_PER_DAY = int(os.getenv("WARMUP_CHANNELS_PER_DAY", "15"))
-WARMUP_DELAY_MINUTES = int(os.getenv("WARMUP_DELAY_MINUTES", "7"))
+# Загружаем настройки расписания
+SCHEDULE_CONFIG = load_schedule_config()
+
+# Настройки времени из schedule.json
+QUIET_START_HOUR = SCHEDULE_CONFIG["quiet_period"]["start_hour"]
+QUIET_START_MINUTE = SCHEDULE_CONFIG["quiet_period"]["start_minute"]
+QUIET_END_HOUR = SCHEDULE_CONFIG["quiet_period"]["end_hour"]
+QUIET_END_MINUTE = SCHEDULE_CONFIG["quiet_period"]["end_minute"]
+
+WARMUP_CHANNELS_PER_DAY = SCHEDULE_CONFIG["warmup_settings"]["channels_per_day"]
+WARMUP_DELAY_MINUTES = SCHEDULE_CONFIG["warmup_settings"]["delay_minutes"]
 WARMUP_DELAY_SECONDS = WARMUP_DELAY_MINUTES * 60
 WARMUP_SCAN_INTERVAL_SECONDS = 60  # Проверка каждую минуту
-WARMUP_DEFAULT_DAYS = int(os.getenv("WARMUP_DEFAULT_DAYS", "7"))
-WARMUP_SLEEP_START_HOUR = int(os.getenv("WARMUP_START_HOUR", "12"))
-WARMUP_SLEEP_START_MINUTE = int(os.getenv("WARMUP_START_MINUTE", "0"))
-WARMUP_SLEEP_END_HOUR = int(os.getenv("WARMUP_END_HOUR", "19"))
-WARMUP_SLEEP_END_MINUTE = int(os.getenv("WARMUP_END_MINUTE", "0"))
+WARMUP_DEFAULT_DAYS = SCHEDULE_CONFIG["warmup_settings"]["default_days"]
+WARMUP_SLEEP_START_HOUR = SCHEDULE_CONFIG["warmup_period"]["start_hour"]
+WARMUP_SLEEP_START_MINUTE = SCHEDULE_CONFIG["warmup_period"]["start_minute"]
+WARMUP_SLEEP_END_HOUR = SCHEDULE_CONFIG["warmup_period"]["end_hour"]
+WARMUP_SLEEP_END_MINUTE = SCHEDULE_CONFIG["warmup_period"]["end_minute"]
 
 # Ограничение одновременных подключений
 MAX_CONCURRENT_ACCOUNTS = 5

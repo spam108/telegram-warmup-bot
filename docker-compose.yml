@@ -49,6 +49,7 @@ services:
     volumes:
       - ./sessions:/app/sessions
       - ./logs:/app/logs
+      - ./schedule.json:/app/schedule.json
     restart: unless-stopped
     user: "0:0"
     deploy:
