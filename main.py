@@ -713,6 +713,7 @@ async def process_warmup_accounts():
             accounts = [acc for acc in all_accounts if acc.get("mode") == "warmup"]
             
             await bot.send_message(log_channel, f"Warmup: Found {len(all_accounts)} running accounts, {len(accounts)} in warmup mode")
+            await bot.send_message(log_channel, f"Warmup: Active sessions: {list(active_sessions.keys())}")
 
             for account in accounts:
                 if account.get("mode") != "warmup":
@@ -1084,6 +1085,8 @@ async def main():
                         # Они будут обрабатываться только в process_warmup_accounts
                         log_file.write(f"Account {phone} in warmup mode - skipping main comment task\n")
                         log_file.flush()
+                        # Убеждаемся, что аккаунт НЕ активен
+                        active_sessions.pop(key, None)
                     else:
                         # Обычные аккаунты запускаем как обычно
                         active_sessions[key] = True
