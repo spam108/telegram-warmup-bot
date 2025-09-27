@@ -406,19 +406,7 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
                     await main_message(callback_query)
                     return
 
-                # Если аккаунт в режиме прогрева, запускаем его сразу
-                if account_row.get("mode") == "warmup":
-                    # Запускаем аккаунт в режиме прогрева
-                    active_sessions[key] = True
-                    active_account_ids[key] = account_row["id"]
-                    await mark_account_running(account_row["id"])
-                    await bot.send_message(callback_query.from_user.id, f"Аккаунт {session} запущен в режиме прогрева")
-                    await bot.send_message(log_channel, f"Аккаунт {session} запущен в режиме прогрева")
-                    # Запускаем задачу комментирования
-                    asyncio.create_task(safe_send_comments(callback_query.from_user.id, session, account_row["id"]))
-                    await main_message(callback_query)
-                    return
-
+                # Все аккаунты проходят через диалог настройки
                 await state.update_data({"account": session, "account_id": account_row["id"]})
                 await bot.send_message(callback_query.from_user.id, 'Пришлите шанс комментирования\nПример: 50')
                 await state.set_state(startaccount.chance)
