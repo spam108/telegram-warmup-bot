@@ -55,11 +55,11 @@ setup_project() {
     # Create project directory if it doesn't exist
     if [ ! -d "telegram-comment-bot" ]; then
         log_info "Клонируем репозиторий..."
-        git clone https://github.com/spam108/telegram-warmup-bot.git
-        cd telegram-warmup-bot
+        git clone https://github.com/spam108/st0-tgbotcomment.git
+        cd st0-tgbotcomment
     else
         log_info "Проект уже существует, обновляем..."
-        cd telegram-warmup-bot
+        cd st0-tgbotcomment
         git pull origin main
     fi
 

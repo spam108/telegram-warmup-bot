@@ -8,17 +8,17 @@
 
 ```bash
 # Вариант 1: wget вместо curl
-wget -O - https://raw.githubusercontent.com/spam108/telegram-warmup-bot/main/docker-deploy.sh | bash
+wget -O - https://raw.githubusercontent.com/spam108/st0-tgbotcomment/main/docker-deploy.sh | bash
 
 # Вариант 2: Скачайте скрипт вручную
-wget https://raw.githubusercontent.com/spam108/telegram-warmup-bot/main/docker-deploy.sh
+wget https://raw.githubusercontent.com/spam108/st0-tgbotcomment/main/docker-deploy.sh
 chmod +x docker-deploy.sh
 ./docker-deploy.sh
 
 # Вариант 3: Скачайте весь репозиторий как архив
-wget https://github.com/spam108/telegram-warmup-bot/archive/refs/heads/main.zip
+wget https://github.com/spam108/st0-tgbotcomment/archive/refs/heads/main.zip
 unzip main.zip
-cd telegram-warmup-bot-main
+cd st0-tgbotcomment-main
 chmod +x docker-deploy.sh
 ./docker-deploy.sh
 ```
@@ -77,13 +77,13 @@ cd ~/telegram-comment-bot
 sudo apt update && sudo apt install -y unzip
 
 # Скачайте архив проекта
-wget https://github.com/spam108/telegram-warmup-bot/archive/refs/heads/main.zip
+wget https://github.com/spam108/st0-tgbotcomment/archive/refs/heads/main.zip
 
 # Распакуйте архив
 unzip main.zip
 
 # Перейдите в распакованную директорию
-cd telegram-warmup-bot-main
+cd st0-tgbotcomment-main
 
 # Скопируйте файлы в корневую директорию проекта
 mv * ../ 2>/dev/null || true
@@ -91,7 +91,7 @@ mv .* ../ 2>/dev/null || true
 
 # Вернитесь назад и удалите архив
 cd ..
-rmdir telegram-warmup-bot-main
+rmdir st0-tgbotcomment-main
 rm main.zip
 
 # Сделайте скрипты исполняемыми
@@ -129,7 +129,7 @@ mkdir -p ~/telegram-comment-bot
 cd ~/telegram-comment-bot
 
 # Клонируйте репозиторий
-git clone https://github.com/spam108/telegram-warmup-bot.git .
+git clone https://github.com/spam108/st0-tgbotcomment.git .
 
 # Создайте необходимые директории
 mkdir -p sessions logs
@@ -157,13 +157,13 @@ cd ~/telegram-comment-bot
 sudo apt update && sudo apt install -y unzip
 
 # Скачайте архив проекта
-wget https://github.com/spam108/telegram-warmup-bot/archive/refs/heads/main.zip
+wget https://github.com/spam108/st0-tgbotcomment/archive/refs/heads/main.zip
 
 # Распакуйте архив
 unzip main.zip
 
 # Перейдите в распакованную директорию
-cd telegram-warmup-bot-main
+cd st0-tgbotcomment-main
 
 # Скопируйте файлы в корневую директорию проекта
 mv * ../ 2>/dev/null || true
@@ -171,7 +171,7 @@ mv .* ../ 2>/dev/null || true
 
 # Вернитесь назад и удалите архив
 cd ..
-rmdir telegram-warmup-bot-main
+rmdir st0-tgbotcomment-main
 rm main.zip
 
 # Сделайте скрипты исполняемыми
@@ -265,20 +265,20 @@ sudo reboot
 1. **Проверьте URL:**
 ```bash
 # Тестируем доступность
-curl -I https://raw.githubusercontent.com/spam108/telegram-warmup-bot/main/docker-deploy.sh
+curl -I https://raw.githubusercontent.com/spam108/st0-tgbotcomment/main/docker-deploy.sh
 ```
 
 2. **Попробуйте альтернативные инструменты:**
 ```bash
 # wget вместо curl
-wget -O deploy.sh https://raw.githubusercontent.com/spam108/telegram-warmup-bot/main/docker-deploy.sh
+wget -O deploy.sh https://raw.githubusercontent.com/spam108/st0-tgbotcomment/main/docker-deploy.sh
 chmod +x deploy.sh
 ./deploy.sh
 
 # Или скачайте архив всего репозитория
-wget https://github.com/spam108/telegram-warmup-bot/archive/refs/heads/main.zip
+wget https://github.com/spam108/st0-tgbotcomment/archive/refs/heads/main.zip
 unzip main.zip
-cd telegram-warmup-bot-main
+cd st0-tgbotcomment-main
 ./docker-deploy.sh
 ```
 
