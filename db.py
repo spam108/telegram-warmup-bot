@@ -15,6 +15,9 @@ class DatabaseNotInitialized(RuntimeError):
 
 async def _retry_db_operation(func, *args, max_retries=3, delay=1, **kwargs):
     """Retry database operation with exponential backoff"""
+    # Небольшая пауза перед операцией для избежания одновременных запросов
+    await asyncio.sleep(0.1)
+    
     for attempt in range(max_retries):
         try:
             return await func(*args, **kwargs)
@@ -156,6 +159,19 @@ async def init_db() -> None:
             """
         )
 
+        # Создаем индексы для оптимизации производительности
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_accounts_user_id ON accounts(user_id);
+            CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
+            CREATE INDEX IF NOT EXISTS idx_accounts_mode ON accounts(mode);
+            CREATE INDEX IF NOT EXISTS idx_accounts_user_status ON accounts(user_id, status);
+            CREATE INDEX IF NOT EXISTS idx_accounts_user_mode ON accounts(user_id, mode);
+            CREATE INDEX IF NOT EXISTS idx_accounts_warmup_end_at ON accounts(warmup_end_at);
+            CREATE INDEX IF NOT EXISTS idx_accounts_last_started_at ON accounts(last_started_at);
+            """
+        )
+
         await conn.execute(
             """
             UPDATE accounts
@@ -218,6 +234,10 @@ async def init_db() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_warmup_channels_pending
             ON warmup_channels (account_id, status, position);
+            CREATE INDEX IF NOT EXISTS idx_warmup_channels_account_id ON warmup_channels(account_id);
+            CREATE INDEX IF NOT EXISTS idx_warmup_channels_channel ON warmup_channels(channel);
+            CREATE INDEX IF NOT EXISTS idx_warmup_channels_status ON warmup_channels(status);
+            CREATE INDEX IF NOT EXISTS idx_warmup_channels_added_at ON warmup_channels(added_at);
             """
         )
 
@@ -232,6 +252,16 @@ async def init_db() -> None:
                 error TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+            """
+        )
+
+        # Создаем индексы для таблицы comment_logs
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_comment_logs_account_id ON comment_logs(account_id);
+            CREATE INDEX IF NOT EXISTS idx_comment_logs_channel_id ON comment_logs(channel);
+            CREATE INDEX IF NOT EXISTS idx_comment_logs_created_at ON comment_logs(created_at);
+            CREATE INDEX IF NOT EXISTS idx_comment_logs_account_created ON comment_logs(account_id, created_at);
             """
         )
 

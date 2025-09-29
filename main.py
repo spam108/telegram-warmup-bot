@@ -42,6 +42,17 @@ from typing import Dict, Set
 from datetime import datetime, time, timezone, timedelta
 from dotenv import load_dotenv
 
+# Настройка улучшенного логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 
 # Конфигурация
 # Загрузка переменных окружения
@@ -62,14 +73,14 @@ def load_env_file():
 # Load environment variables
 env_vars = load_env_file()
 BOT_TOKEN = env_vars.get("BOT_TOKEN") or os.getenv("BOT_TOKEN")
-print(f"BOT_TOKEN loaded: {BOT_TOKEN}")
+logger.info(f"BOT_TOKEN loaded: {'✅' if BOT_TOKEN else '❌'}")
 #APcommentbot @AP_comment_bot
 log_channel = -1003123025616 # cloveend #-1002711973256 #-1002678984799
 
 API_ID = int(env_vars.get("API_ID") or os.getenv("API_ID"))
-print(f"API_ID loaded: {API_ID}")
+logger.info(f"API_ID loaded: {API_ID}")
 API_HASH = env_vars.get("API_HASH") or os.getenv("API_HASH")
-print(f"API_HASH loaded: {API_HASH}")
+logger.info(f"API_HASH loaded: {'✅' if API_HASH else '❌'}")
 #1823
 
 
@@ -562,6 +573,7 @@ async def add_channels(message: Message, state: FSMContext) -> None:
             await state.clear()
             await main_message(message)
             return
+        # Сохраняем каналы в базу данных независимо от подписки
         await update_account_settings(
             account_id,
             channels=channels,
@@ -664,13 +676,31 @@ async def send_comments(userid, session, account_id):
 
                     
                 except Exception as e:
-                    await bot.send_message(log_channel, f'Аккаунт {session} ошибка комментирования: {e}')
+                    error_msg = str(e).lower()
+
+                    # Определяем тип ошибки для лучшего логирования
+                    if "flood" in error_msg:
+                        error_type = "FLOOD_WAIT"
+                        await bot.send_message(log_channel, f'🚫 Аккаунт {session} заблокирован за спам (flood wait)')
+                    elif "auth" in error_msg or "session" in error_msg:
+                        error_type = "AUTH_ERROR"
+                        await bot.send_message(log_channel, f'🔐 Аккаунт {session} ошибка авторизации')
+                    elif "channel" in error_msg or "chat" in error_msg:
+                        error_type = "CHANNEL_ERROR"
+                        await bot.send_message(log_channel, f'📢 Аккаунт {session} ошибка канала: {str(e)[:100]}...')
+                    elif "network" in error_msg or "timeout" in error_msg:
+                        error_type = "NETWORK_ERROR"
+                        await bot.send_message(log_channel, f'🌐 Аккаунт {session} сетевая ошибка')
+                    else:
+                        error_type = "UNKNOWN_ERROR"
+                        await bot.send_message(log_channel, f'❓ Аккаунт {session} неизвестная ошибка: {str(e)[:100]}...')
+
                     await add_comment_log(
                         account_id,
                         channel=str(message.chat.id),
                         message_id=message.id,
                         status='error',
-                        error=str(e),
+                        error=f"{error_type}: {str(e)}",
                     )
         try:
             await app.start()
@@ -779,8 +809,24 @@ async def process_warmup_accounts():
                         except UserAlreadyParticipant:
                             await mark_warmup_channel_joined(account["id"], channel)
                         except Exception as e:
-                            await record_warmup_channel_error(account["id"], channel, str(e))
-                            await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) ошибка вступления в канал {channel}: {e}")
+                            error_msg = str(e).lower()
+
+                            # Классифицируем ошибки каналов
+                            if "already participant" in error_msg or "user already participant" in error_msg:
+                                await mark_warmup_channel_joined(account["id"], channel)
+                                await bot.send_message(log_channel, f"✅ Аккаунт {session_key} уже в канале: {channel}")
+                            elif "private" in error_msg or "chat not found" in error_msg:
+                                await record_warmup_channel_error(account["id"], channel, f"PRIVATE_CHANNEL: {str(e)}")
+                                await bot.send_message(log_channel, f"🔒 Аккаунт {session_key} приватный канал: {channel}")
+                            elif "flood" in error_msg:
+                                await record_warmup_channel_error(account["id"], channel, f"FLOOD_WAIT: {str(e)}")
+                                await bot.send_message(log_channel, f"🚫 Аккаунт {session_key} flood wait при подписке: {channel}")
+                            elif "auth" in error_msg or "session" in error_msg:
+                                await record_warmup_channel_error(account["id"], channel, f"AUTH_ERROR: {str(e)}")
+                                await bot.send_message(log_channel, f"🔐 Аккаунт {session_key} ошибка авторизации: {channel}")
+                            else:
+                                await record_warmup_channel_error(account["id"], channel, str(e))
+                                await bot.send_message(log_channel, f"❌ Аккаунт {session_key} ошибка канала {channel}: {str(e)[:100]}...")
                 except Exception as e:
                     error_msg = str(e)
                     if "phone number" in error_msg.lower() or "auth" in error_msg.lower():
@@ -791,7 +837,7 @@ async def process_warmup_accounts():
                         await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) ошибка подключения: {e}")
 
         except Exception as e:
-            logging.exception("Warmup loop error: %s", e)
+            logger.error(f"Ошибка в цикле прогрева: {e}", exc_info=True)
 
         # Ждем 10 минут до следующей попытки
         await asyncio.sleep(WARMUP_DELAY_SECONDS)
@@ -942,49 +988,54 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
     seen = set()
     warmup_channels = [x for x in warmup_channels if not (x in seen or seen.add(x))]
 
-    if not warmup_channels:
-        # Проверяем, есть ли уже каналы в прогреве
-        existing_warmup = await get_warmup_pending(account_id, limit=1)
-        
-        if existing_warmup:
-            # Есть каналы в прогреве - запускаем в режиме прогрева
-            await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
-            # Планируем следующее вступление в период сна (4:00-6:00)
-            now = datetime.now(timezone.utc)
-            tomorrow_4am = now.replace(hour=4, minute=0, second=0, microsecond=0) + timedelta(days=1)
-            await db_update_warmup_schedule(account_id, next_join=tomorrow_4am)
-            
-            # Запускаем аккаунт
-            key = make_session_key(message.from_user.id, session)
-            active_sessions[key] = True
-            active_account_ids[key] = account_id
-            quiet_sessions_notified.discard(key)
-            await mark_account_running(account_id)
-            
+    # Проверяем, есть ли каналы в прогреве (новые или существующие)
+    existing_warmup = await get_warmup_pending(account_id, limit=1)
+
+    if warmup_channels or existing_warmup:
+        # Есть каналы в прогреве - запускаем в режиме прогрева
+        await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
+        # Планируем следующее вступление в период сна (4:00-6:00)
+        now = datetime.now(timezone.utc)
+        tomorrow_4am = now.replace(hour=4, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        await db_update_warmup_schedule(account_id, next_join=tomorrow_4am)
+
+        # Запускаем аккаунт
+        key = make_session_key(message.from_user.id, session)
+        active_sessions[key] = True
+        active_account_ids[key] = account_id
+        quiet_sessions_notified.discard(key)
+        await mark_account_running(account_id)
+
+        if warmup_channels:
+            await state.clear()
+            await bot.send_message(message.from_user.id, f'Аккаунт запущен в режиме прогрева. Запланировано {len(warmup_channels)} каналов для прогрева.')
+            await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование в режиме прогрева')
+        else:
             await state.clear()
             await bot.send_message(message.from_user.id, f'Аккаунт запущен в режиме прогрева. Используются существующие каналы прогрева.')
             await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование в режиме прогрева')
-            await main_message(message)
-            asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))
-            return
-        else:
-            # Нет каналов в прогреве - запускаем в стандартном режиме
-            await set_account_mode(account_id, "standard", warmup_days=None)
-            await sync_warmup_channels(account_id, [])
-            
-            # Запускаем аккаунт
-            key = make_session_key(message.from_user.id, session)
-            active_sessions[key] = True
-            active_account_ids[key] = account_id
-            quiet_sessions_notified.discard(key)
-            await mark_account_running(account_id)
-            
-            await state.clear()
-            await bot.send_message(message.from_user.id, 'Аккаунт запущен в стандартном режиме (без прогрева).')
-            await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование')
-            await main_message(message)
-            asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))
-            return
+        await main_message(message)
+        asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))
+        return
+    else:
+        # Нет каналов в прогреве - запускаем в стандартном режиме
+        await set_account_mode(account_id, "standard", warmup_days=None)
+        await sync_warmup_channels(account_id, [])
+
+        # Запускаем аккаунт
+        key = make_session_key(message.from_user.id, session)
+        active_sessions[key] = True
+        active_account_ids[key] = account_id
+        quiet_sessions_notified.discard(key)
+        await mark_account_running(account_id)
+
+        await state.clear()
+        await bot.send_message(message.from_user.id, 'Аккаунт запущен в стандартном режиме (без прогрева).')
+        logger.info(f"Аккаунт {session} запущен в стандартном режиме пользователем {message.from_user.id}")
+        await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование')
+        await main_message(message)
+        asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))
+        return
 
     try:
         await sync_warmup_channels(account_id, warmup_channels)
@@ -1026,15 +1077,46 @@ async def safe_send_comments(user_id, phone, account_id):
         active_account_ids.pop(make_session_key(user_id, phone), None)
 
 
+async def log_system_status():
+    """Логирует текущее состояние системы"""
+    try:
+        # Получаем статистику аккаунтов
+        running_accounts = await get_running_accounts()
+        total_accounts = len(running_accounts)
+
+        # Подсчитываем по режимам
+        warmup_accounts = len([acc for acc in running_accounts if acc.get("mode") == "warmup"])
+        standard_accounts = total_accounts - warmup_accounts
+
+        # Получаем статистику каналов прогрева
+        warmup_stats = await get_warmup_queue_stats()
+
+        logger.info("📊 СТАТУС СИСТЕМЫ:"        logger.info(f"   Активных аккаунтов: {total_accounts}")
+        logger.info(f"   Режим прогрева: {warmup_accounts}")
+        logger.info(f"   Стандартный режим: {standard_accounts}")
+        logger.info(f"   Каналов в очереди прогрева: {warmup_stats.get('pending', 0)}")
+        logger.info(f"   Успешных подписок сегодня: {warmup_stats.get('joined', 0)}")
+        logger.info(f"   Ошибок прогрева: {warmup_stats.get('error', 0)}")
+
+        # Отправляем в лог-канал если настроен
+        if log_channel:
+            await bot.send_message(
+                log_channel,
+                "📊 СТАТУС СИСТЕМЫ:\n"
+                f"Активных аккаунтов: {total_accounts}\n"
+                f"Режим прогрева: {warmup_accounts}\n"
+                f"Стандартный режим: {standard_accounts}\n"
+                f"Каналов в очереди: {warmup_stats.get('pending', 0)}"
+            )
+
+    except Exception as e:
+        logger.error(f"Ошибка при логировании статуса системы: {e}")
+
 async def main():
     try:
-        with open("bot_log.txt", "w") as log_file:
-            log_file.write("Starting bot initialization...\n")
-            log_file.flush()
-            
-            await init_db()
-            log_file.write("Database initialized successfully\n")
-            log_file.flush()
+        logger.info("🚀 Начинаем инициализацию бота...")
+        await init_db()
+        logger.info("✅ База данных инициализирована")
             
             await bot.delete_webhook(drop_pending_updates=True)
             log_file.write("Webhook deleted\n")
@@ -1063,7 +1145,15 @@ async def main():
             asyncio.create_task(process_warmup_accounts())
             log_file.write("Starting bot polling...\n")
             log_file.flush()
-            
+
+            # Запускаем периодический мониторинг статуса (каждые 30 минут)
+            async def periodic_status_logging():
+                while True:
+                    await asyncio.sleep(1800)  # 30 минут
+                    await log_system_status()
+
+            asyncio.create_task(periodic_status_logging())
+
             await dp.start_polling(bot)
     except Exception as e:
         with open("bot_error.txt", "w") as error_file:
