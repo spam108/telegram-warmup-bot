@@ -58,7 +58,7 @@ rmdir telegram-comment-bot
 rm ~/telegram-comment-bot.zip
 
 # Сделайте скрипты исполняемыми
-chmod +x docker-deploy.sh check_docker.py
+chmod +x deploy.sh check_docker.py
 
 # Проверьте файлы
 ls -la
@@ -68,7 +68,7 @@ cp .env.example .env
 nano .env  # Заполните токены
 
 # Запустите развертывание
-./docker-deploy.sh
+./deploy.sh
 ```
 
 ## Способ 2: Через rsync (для синхронизации)
@@ -89,10 +89,10 @@ rsync -avz --exclude='*.git*' \
 # На сервере
 ssh root@ваш_сервер_ip
 cd ~/telegram-comment-bot
-chmod +x docker-deploy.sh check_docker.py
+chmod +x deploy.sh check_docker.py
 cp .env.example .env
 nano .env  # Заполните токены
-./docker-deploy.sh
+./deploy.sh
 ```
 
 ## Способ 3: Через файловый менеджер (SFTP)
@@ -103,10 +103,10 @@ nano .env  # Заполните токены
 4. **Подключитесь по SSH** и выполните команды:
    ```bash
    cd ~/telegram-comment-bot
-   chmod +x docker-deploy.sh check_docker.py
+   chmod +x deploy.sh check_docker.py
    cp .env.example .env
    nano .env  # Заполните токены
-   ./docker-deploy.sh
+   ./deploy.sh
    ```
 
 ## Проверка успешного копирования

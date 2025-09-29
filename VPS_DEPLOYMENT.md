@@ -8,19 +8,19 @@
 
 ```bash
 # Вариант 1: wget вместо curl
-wget -O - https://raw.githubusercontent.com/spam108/st0-tgbotcomment/main/docker-deploy.sh | bash
+wget -O - https://raw.githubusercontent.com/spam108/telegram-warmup-bot/main/deploy.sh | bash
 
 # Вариант 2: Скачайте скрипт вручную
-wget https://raw.githubusercontent.com/spam108/st0-tgbotcomment/main/docker-deploy.sh
-chmod +x docker-deploy.sh
-./docker-deploy.sh
+wget https://raw.githubusercontent.com/spam108/telegram-warmup-bot/main/deploy.sh
+chmod +x deploy.sh
+./deploy.sh
 
 # Вариант 3: Скачайте весь репозиторий как архив
-wget https://github.com/spam108/st0-tgbotcomment/archive/refs/heads/main.zip
+wget https://github.com/spam108/telegram-warmup-bot/archive/refs/heads/main.zip
 unzip main.zip
-cd st0-tgbotcomment-main
-chmod +x docker-deploy.sh
-./docker-deploy.sh
+cd telegram-warmup-bot-main
+chmod +x deploy.sh
+./deploy.sh
 ```
 
 ### Если все способы через интернет не работают:
@@ -45,10 +45,10 @@ cp .env.example .env
 nano .env
 
 # Сделайте скрипты исполняемыми (если нужно)
-chmod +x docker-deploy.sh check_docker.py
+chmod +x deploy.sh check_docker.py
 
 # Запустите развертывание
-./docker-deploy.sh
+./deploy.sh
 ```
 
 **Необходимые файлы в проекте:**
@@ -77,13 +77,13 @@ cd ~/telegram-comment-bot
 sudo apt update && sudo apt install -y unzip
 
 # Скачайте архив проекта
-wget https://github.com/spam108/st0-tgbotcomment/archive/refs/heads/main.zip
+wget https://github.com/spam108/telegram-warmup-bot/archive/refs/heads/main.zip
 
 # Распакуйте архив
 unzip main.zip
 
 # Перейдите в распакованную директорию
-cd st0-tgbotcomment-main
+cd telegram-warmup-bot-main
 
 # Скопируйте файлы в корневую директорию проекта
 mv * ../ 2>/dev/null || true
@@ -91,17 +91,17 @@ mv .* ../ 2>/dev/null || true
 
 # Вернитесь назад и удалите архив
 cd ..
-rmdir st0-tgbotcomment-main
+rmdir telegram-warmup-bot-main
 rm main.zip
 
 # Сделайте скрипты исполняемыми
-chmod +x docker-deploy.sh check_docker.py
+chmod +x deploy.sh check_docker.py
 
 # Настройте переменные окружения
 nano .env
 
 # Запустите развертывание
-./docker-deploy.sh
+./deploy.sh
 ```
 
 ### Вариант 2: Локальное развертывание (текущий способ)
@@ -115,10 +115,10 @@ cd ~/telegram-comment-bot
 # Например, через scp, rsync или git clone из вашего репозитория
 
 # Сделайте скрипт исполняемым
-chmod +x docker-deploy.sh
+chmod +x deploy.sh
 
 # Запустите развертывание
-./docker-deploy.sh
+./deploy.sh
 ```
 
 ### Вариант 3: Ручное развертывание
@@ -129,19 +129,19 @@ mkdir -p ~/telegram-comment-bot
 cd ~/telegram-comment-bot
 
 # Клонируйте репозиторий
-git clone https://github.com/spam108/st0-tgbotcomment.git .
+git clone https://github.com/spam108/telegram-warmup-bot.git .
 
 # Создайте необходимые директории
 mkdir -p sessions logs
 
 # Сделайте скрипты исполняемыми
-chmod +x docker-deploy.sh check_docker.py
+chmod +x deploy.sh check_docker.py
 
 # Настройте переменные окружения
 nano .env
 
 # Запустите развертывание
-./docker-deploy.sh
+./deploy.sh
 ```
 
 ### Вариант 4: Развертывание через прямую загрузку
@@ -157,13 +157,13 @@ cd ~/telegram-comment-bot
 sudo apt update && sudo apt install -y unzip
 
 # Скачайте архив проекта
-wget https://github.com/spam108/st0-tgbotcomment/archive/refs/heads/main.zip
+wget https://github.com/spam108/telegram-warmup-bot/archive/refs/heads/main.zip
 
 # Распакуйте архив
 unzip main.zip
 
 # Перейдите в распакованную директорию
-cd st0-tgbotcomment-main
+cd telegram-warmup-bot-main
 
 # Скопируйте файлы в корневую директорию проекта
 mv * ../ 2>/dev/null || true
@@ -171,17 +171,17 @@ mv .* ../ 2>/dev/null || true
 
 # Вернитесь назад и удалите архив
 cd ..
-rmdir st0-tgbotcomment-main
+rmdir telegram-warmup-bot-main
 rm main.zip
 
 # Сделайте скрипты исполняемыми
-chmod +x docker-deploy.sh check_docker.py
+chmod +x deploy.sh check_docker.py
 
 # Настройте переменные окружения
 nano .env
 
 # Запустите развертывание
-./docker-deploy.sh
+./deploy.sh
 ```
 
 ### Вариант 5: Через scp/rsync (с вашей локальной машины)
@@ -203,13 +203,13 @@ unzip telegram-comment-bot.zip
 rm telegram-comment-bot.zip
 
 # Сделайте скрипты исполняемыми
-chmod +x docker-deploy.sh check_docker.py
+chmod +x deploy.sh check_docker.py
 
 # Настройте переменные окружения
 nano .env
 
 # Запустите развертывание
-./docker-deploy.sh
+./deploy.sh
 ```
 
 ## Требования к серверу
@@ -258,28 +258,130 @@ sudo chmod +x /usr/local/bin/docker-compose
 sudo reboot
 ```
 
-## Диагностика проблем с загрузкой
+## 🚨 РЕШЕНИЕ ПРОБЛЕМЫ С GITHUB
 
-### Если curl возвращает ошибку 400/22:
+Ошибка 404 означает что репозиторий либо приватный, либо файл не найден.
 
-1. **Проверьте URL:**
+### Диагностика:
+
+1. **Проверьте репозиторий на GitHub:**
+   Откройте: https://github.com/spam108/telegram-warmup-bot
+   Убедитесь что файл `deploy.sh` существует в корне
+
+2. **Если репозиторий приватный:**
+   ```bash
+   # Используйте токен аутентификации
+   curl -fsSL -H "Authorization: token YOUR_GITHUB_TOKEN" https://raw.githubusercontent.com/spam108/telegram-warmup-bot/main/deploy.sh | bash
+   ```
+
+3. **Альтернативные способы развертывания:**
+
+**Способ 1: Через архив репозитория**
 ```bash
-# Тестируем доступность
-curl -I https://raw.githubusercontent.com/spam108/st0-tgbotcomment/main/docker-deploy.sh
+# Создайте обычного пользователя с полными правами sudo
+sudo useradd -m -s /bin/bash botuser
+
+# Добавьте пользователя в группу sudo с полными правами
+sudo usermod -aG sudo botuser
+
+# Добавьте пользователя в группу docker
+sudo usermod -aG docker botuser
+
+# Установите пароль для пользователя botuser
+sudo passwd botuser
+
+# Обновите группы для текущей сессии
+newgrp sudo
+newgrp docker
+
+# Добавьте пользователя в sudoers файл для беспарольного sudo
+echo 'botuser ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/botuser
+
+# Переключитесь на нового пользователя
+sudo su - botuser
+
+# Создайте директорию проекта
+mkdir -p ~/telegram-comment-bot
+cd ~/telegram-comment-bot
+
+# Установите unzip если отсутствует
+sudo apt update && sudo apt install -y unzip
+
+# Скачайте архив
+wget https://github.com/spam108/telegram-warmup-bot/archive/refs/heads/main.zip
+
+# Распакуйте
+unzip main.zip
+cd telegram-warmup-bot-main
+
+# Скопируйте файлы
+mv * ../ 2>/dev/null || true
+mv .* ../ 2>/dev/null || true
+cd ..
+rmdir telegram-warmup-bot-main
+rm main.zip
+
+# Сделайте скрипты исполняемыми
+chmod +x deploy.sh check_docker.py
+
+# Создайте .env файл
+cp .env.example .env
+nano .env
+
+# Запустите развертывание
+./deploy.sh
 ```
 
-2. **Попробуйте альтернативные инструменты:**
+**Способ 2: Через git clone**
 ```bash
-# wget вместо curl
-wget -O deploy.sh https://raw.githubusercontent.com/spam108/st0-tgbotcomment/main/docker-deploy.sh
-chmod +x deploy.sh
-./deploy.sh
+# Создайте обычного пользователя с полными правами sudo
+sudo useradd -m -s /bin/bash botuser
 
-# Или скачайте архив всего репозитория
-wget https://github.com/spam108/st0-tgbotcomment/archive/refs/heads/main.zip
+# Добавьте пользователя в группу sudo с полными правами
+sudo usermod -aG sudo botuser
+
+# Добавьте пользователя в группу docker
+sudo usermod -aG docker botuser
+
+# Установите пароль для пользователя botuser
+sudo passwd botuser
+
+# Обновите группы для текущей сессии
+newgrp sudo
+newgrp docker
+
+# Добавьте пользователя в sudoers файл для беспарольного sudo
+echo 'botuser ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/botuser
+
+# Переключитесь на нового пользователя
+sudo su - botuser
+
+# Создайте директорию проекта
+mkdir -p ~/telegram-comment-bot
+cd ~/telegram-comment-bot
+
+# Клонируйте репозиторий
+git clone https://github.com/spam108/telegram-warmup-bot.git .
+
+# Проверьте файлы в репозитории
+ls -la
+
+# Сделайте скрипты исполняемыми
+chmod +x deploy.sh check_docker.py
+
+# Создайте .env файл
+cp .env.example .env
+nano .env
+
+# Запустите развертывание
+./deploy.sh
+```
+
+**Способ 3: Локальное копирование**
+Следуйте инструкциям в файле `LOCAL_COPY.md`
 unzip main.zip
-cd st0-tgbotcomment-main
-./docker-deploy.sh
+cd telegram-warmup-bot-main
+./deploy.sh
 ```
 
 3. **Проверьте сетевые настройки:**
@@ -342,7 +444,7 @@ unzip ~/telegram-comment-bot.zip
 rm ~/telegram-comment-bot.zip
 
 # Сделайте скрипты исполняемыми
-chmod +x docker-deploy.sh check_docker.py
+chmod +x deploy.sh check_docker.py
 
 # Создайте .env файл из шаблона
 cp .env.example .env
@@ -351,7 +453,7 @@ cp .env.example .env
 nano .env
 
 # Запустите развертывание
-./docker-deploy.sh
+./deploy.sh
 ```
 
 ### Шаг 4: Проверка
@@ -394,7 +496,116 @@ sudo docker-compose logs --tail=20
 # (проверьте что токены в .env файле заполнены правильно)
 ```
 
-## 🔧 Если возникли проблемы
+## 🔧 Диагностика проблем с ботом
+
+### Если бот не отвечает на /start:
+
+**Шаг 1: Проверьте статус бота**
+```bash
+# Переключитесь на пользователя botuser
+sudo su - botuser
+
+# Перейдите в директорию проекта
+cd ~/telegram-comment-bot
+
+# Проверьте что сервисы запущены
+sudo docker-compose ps
+
+# Посмотрите последние логи бота
+sudo docker-compose logs --tail=50
+
+# Проверьте логи ошибок
+sudo docker-compose logs --tail=20 | grep -i "error\|exception"
+
+# Проверьте статус базы данных
+sudo docker-compose ps postgres
+```
+
+**Шаг 2: Исправьте файл .env**
+```bash
+# Сначала посмотрите текущее содержимое .env
+cat ~/telegram-comment-bot/.env
+
+# Если там шаблонный код - удалите файл и создайте заново
+rm ~/telegram-comment-bot/.env
+cp ~/telegram-comment-bot/.env.example ~/telegram-comment-bot/.env
+
+# Отредактируйте .env с вашими реальными токенами
+nano ~/telegram-comment-bot/.env
+
+# Заполните следующие переменные:
+# BOT_TOKEN=ваш_bot_token_от_BotFather
+# API_ID=ваш_api_id_от_telegram.org
+# API_HASH=ваш_api_hash_от_telegram.org
+# OPENAI_API_KEY=ваш_openai_api_key
+# PASSWORD=ваш_пароль_для_доступа_к_боту
+# DATABASE_URL=postgresql://postgres:postgres@localhost:5432/commentbot
+# LOG_CHANNEL_ID=ваш_лог_канал_id
+```
+
+**Шаг 3: Проверьте переменные окружения**
+```bash
+# Проверьте что токены загружены правильно
+sudo docker-compose exec bot env | grep -E "(BOT_TOKEN|API_ID|DATABASE_URL)"
+
+# Убедитесь что токены заполнены правильно
+cat ~/telegram-comment-bot/.env
+```
+
+**Шаг 3: Отправьте коммит и запустите бота**
+```bash
+# Перейдите в директорию проекта
+cd ~/telegram-comment-bot
+
+# ШАГ 1: Проверьте статус и отправьте коммит
+git status
+git log --oneline  # Посмотрите последний коммит
+git push origin main  # Отправьте коммит в репозиторий
+
+# ШАГ 2: Запустите бота в фоновом режиме
+sudo docker-compose up -d
+
+# ШАГ 3: Проверьте статус сервисов
+sudo docker-compose ps
+
+# ШАГ 4: Посмотрите последние логи
+sudo docker-compose logs --tail=15
+
+# ШАГ 5: Проверьте базу данных
+sudo docker-compose exec postgres psql -U postgres -d commentbot -c "SELECT COUNT(*) FROM users;" 2>/dev/null || echo "База данных еще не готова"
+```
+
+**Шаг 4: Проверьте базу данных**
+```bash
+# Подключитесь к базе данных
+sudo docker-compose exec postgres psql -U postgres -d commentbot -c "\dt"
+
+# Проверьте таблицы
+sudo docker-compose exec postgres psql -U postgres -d commentbot -c "SELECT COUNT(*) FROM users;"
+```
+
+**Шаг 5: Тестирование Telegram API**
+```bash
+# Тестируйте токен бота
+curl "https://api.telegram.org/bot${BOT_TOKEN}/getMe"
+
+# Тестируйте API ID/HASH (замените на ваши значения)
+curl "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=-1"
+```
+
+**Шаг 5: Если ничего не помогает**
+```bash
+# Перезапустите бота
+sudo docker-compose restart
+
+# Проверьте системные ресурсы
+df -h  # Свободное место на диске
+free -h  # Память
+
+# Проверьте сетевые подключения
+ping 8.8.8.8
+ping api.telegram.org
+```
 
 ### Проверка сетевого доступа
 ```bash
@@ -445,7 +656,7 @@ git clone https://github.com/yourusername/telegram-comment-bot.git .
 mkdir -p sessions logs
 
 # Настраиваем права доступа
-chmod +x docker-deploy.sh check_docker.py
+chmod +x deploy.sh check_docker.py
 ```
 
 ## Шаг 3: Конфигурация

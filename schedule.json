@@ -1,0 +1,22 @@
+{
+  "quiet_period": {
+    "start_hour": 8,
+    "start_minute": 0,
+    "end_hour": 20,
+    "end_minute": 0,
+    "description": "Циркадный ритм - бот не комментирует в это время (UTC)"
+  },
+  "warmup_period": {
+    "start_hour": 12,
+    "start_minute": 0,
+    "end_hour": 19,
+    "end_minute": 0,
+    "description": "Период прогрева - бот вступает в каналы в это время (UTC)"
+  },
+  "warmup_settings": {
+    "channels_per_day": 15,
+    "delay_minutes": 7,
+    "default_days": 7,
+    "description": "Настройки режима прогрева"
+  }
+}

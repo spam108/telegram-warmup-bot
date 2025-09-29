@@ -1,6 +1,6 @@
 # 📤 Репозиторий уже создан на GitHub!
 
-✅ **Репозиторий доступен по адресу:** https://github.com/spam108/st0-tgbotcomment
+✅ **Репозиторий доступен по адресу:** https://github.com/spam108/telegram-warmup-bot
 
 ## Обновление существующего репозитория
 
@@ -11,7 +11,7 @@
 cd ~/git\ cursor/clonetest
 
 # Добавляем удаленный репозиторий (если еще не добавлен)
-git remote add origin https://github.com/spam108/st0-tgbotcomment.git
+git remote add origin https://github.com/spam108/telegram-warmup-bot.git
 
 # Загружаем последние изменения
 git add .
