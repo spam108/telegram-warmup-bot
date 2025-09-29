@@ -7,18 +7,18 @@
 Попробуйте альтернативные команды:
 
 ```bash
-# Вариант 1: wget вместо curl
-wget -O - https://raw.githubusercontent.com/spam108/telegram-warmup-bot/main/deploy.sh | bash
+# Вариант 1: wget вместо curl (используем ветку st.0)
+wget -O - https://raw.githubusercontent.com/spam108/telegram-warmup-bot/st.0/deploy.sh | bash
 
 # Вариант 2: Скачайте скрипт вручную
-wget https://raw.githubusercontent.com/spam108/telegram-warmup-bot/main/deploy.sh
+wget https://raw.githubusercontent.com/spam108/telegram-warmup-bot/st.0/deploy.sh
 chmod +x deploy.sh
 ./deploy.sh
 
 # Вариант 3: Скачайте весь репозиторий как архив
-wget https://github.com/spam108/telegram-warmup-bot/archive/refs/heads/main.zip
-unzip main.zip
-cd telegram-warmup-bot-main
+wget https://github.com/spam108/telegram-warmup-bot/archive/refs/heads/st.0.zip
+unzip st.0.zip
+cd telegram-warmup-bot-st.0
 chmod +x deploy.sh
 ./deploy.sh
 ```
@@ -130,6 +130,9 @@ cd ~/telegram-comment-bot
 
 # Клонируйте репозиторий
 git clone https://github.com/spam108/telegram-warmup-bot.git .
+
+# Переключитесь на ветку st.0
+git checkout st.0
 
 # Создайте необходимые директории
 mkdir -p sessions logs
