@@ -278,6 +278,36 @@ async def start(message: types.Message, state: FSMContext):
     else:
         await main_message(message)
 
+@dp.message(lambda message: message.text and message.text.startswith('/summary'))
+async def show_account_summary(message: types.Message, state: FSMContext):
+    """Показывает резюме аккаунта по номеру телефона"""
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+    
+    # Извлекаем номер телефона из команды
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Использование: /summary <номер_телефона>\nПример: /summary 79991234567")
+        return
+    
+    phone = parts[1]
+    
+    # Ищем аккаунт в базе данных
+    accounts = await get_accounts_for_user(message.from_user.id)
+    account = None
+    for acc in accounts:
+        if acc.get('phone') == phone:
+            account = acc
+            break
+    
+    if not account:
+        await message.answer(f"Аккаунт с номером {phone} не найден")
+        return
+    
+    # Показываем резюме
+    await send_account_summary_to_user(message.from_user.id, account['id'], phone)
+
 @dp.message(Command("testwarmup"))
 async def test_warmup_command(message: Message) -> None:
     """Команда для тестирования режима прогрева"""
@@ -648,8 +678,9 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
                     if chat.username is not None:
                         channels.append(f"@{chat.username}")
 
-        await bot.send_message(message.from_user.id,
-                            f'Аккаунт подписан на каналы:\n{channels}\n\nПришлите каналы на которые нужно подписаться\n(если не нужно пришлите -)')
+        # Используем унифицированное отображение каналов
+        channels_display = await format_channels_display(channels, "Аккаунт подписан на каналы", 10)
+        await bot.send_message(message.from_user.id, f'{channels_display}\n\nПришлите каналы на которые нужно подписаться\n(если не нужно пришлите -)')
         await state.set_state(startaccount.regular_channels)
     else:
         await state.clear()
@@ -1082,13 +1113,11 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
         await update_account_settings(account_id, channels=channels)
     
     # Переходим к диалогу каналов прогрева
-    # Показываем существующие каналы прогрева
-    existing_warmup = await get_warmup_pending(account_id, limit=10)
-    if existing_warmup:
-        warmup_list = [ch["channel"] for ch in existing_warmup]
-        await bot.send_message(message.from_user.id, f'Текущие каналы в прогреве:\n' + '\n'.join(warmup_list))
-    else:
-        await bot.send_message(message.from_user.id, 'Каналы в прогреве: нет')
+    # Показываем существующие каналы прогрева с унифицированным отображением
+    existing_warmup = await get_warmup_pending(account_id, limit=100)
+    warmup_list = [ch["channel"] for ch in existing_warmup] if existing_warmup else []
+    warmup_display = await format_channels_display(warmup_list, "Текущие каналы в прогреве", 10)
+    await bot.send_message(message.from_user.id, warmup_display)
     
     await bot.send_message(message.from_user.id, 'Теперь пришлите каналы для прогрева (каждый канал с новой строки). Для отмены отправьте "-".')
     await state.set_state(startaccount.warmup_channels)
@@ -1161,6 +1190,11 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             await state.clear()
             await bot.send_message(message.from_user.id, f'Аккаунт запущен в режиме прогрева. Используются существующие каналы прогрева.')
             await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование в режиме прогрева')
+            
+            # Отправляем резюме аккаунта пользователю и в лог-канал
+            await send_account_summary_to_user(message.from_user.id, account_id, session)
+            await send_account_summary_to_logs(account_id, session)
+            
             await main_message(message)
             asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Запускаем комментирование
             return
@@ -1180,6 +1214,11 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             await state.clear()
             await bot.send_message(message.from_user.id, 'Аккаунт запущен в стандартном режиме (без прогрева).')
             await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование')
+            
+            # Отправляем резюме аккаунта пользователю и в лог-канал
+            await send_account_summary_to_user(message.from_user.id, account_id, session)
+            await send_account_summary_to_logs(account_id, session)
+            
             await main_message(message)
             asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Запускаем комментирование
             return
@@ -1214,6 +1253,11 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             await state.clear()
             await bot.send_message(message.from_user.id, f'Аккаунт запущен в режиме прогрева. Используются существующие каналы прогрева.')
             await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование в режиме прогрева')
+            
+            # Отправляем резюме аккаунта пользователю и в лог-канал
+            await send_account_summary_to_user(message.from_user.id, account_id, session)
+            await send_account_summary_to_logs(account_id, session)
+            
             await main_message(message)
             asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Запускаем комментирование
             return
@@ -1233,6 +1277,11 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             await state.clear()
             await bot.send_message(message.from_user.id, 'Аккаунт запущен в стандартном режиме (без прогрева).')
             await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование')
+            
+            # Отправляем резюме аккаунта пользователю и в лог-канал
+            await send_account_summary_to_user(message.from_user.id, account_id, session)
+            await send_account_summary_to_logs(account_id, session)
+            
             await main_message(message)
             asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Запускаем комментирование
             return
@@ -1261,6 +1310,11 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
     await state.clear()
     await bot.send_message(message.from_user.id, f'Аккаунт запущен в режиме прогрева. Запланировано {len(warmup_channels)} каналов для прогрева.')
     await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование в режиме прогрева')
+    
+    # Отправляем резюме аккаунта пользователю и в лог-канал
+    await send_account_summary_to_user(message.from_user.id, account_id, session)
+    await send_account_summary_to_logs(account_id, session)
+    
     await main_message(message)
     asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Запускаем комментирование
 
@@ -1276,6 +1330,77 @@ async def safe_send_comments(user_id, phone, account_id):
         active_sessions.pop(make_session_key(user_id, phone), None)
         active_account_ids.pop(make_session_key(user_id, phone), None)
 
+
+async def format_channels_display(channels, title="Каналы", max_display=10):
+    """Унифицированное отображение списка каналов"""
+    if not channels:
+        return f"{title}: нет"
+    
+    if len(channels) <= max_display:
+        return f"{title} ({len(channels)}):\n" + '\n'.join(channels)
+    else:
+        displayed = channels[:max_display]
+        return f"{title} ({len(channels)}):\n" + '\n'.join(displayed) + f"\n... и еще {len(channels) - max_display} каналов"
+
+async def get_account_summary(account_id):
+    """Получает полное резюме аккаунта из базы данных"""
+    account = await get_account_by_id(account_id)
+    if not account:
+        return None
+    
+    # Получаем каналы подписки
+    regular_channels = account.get('channels', []) or []
+    
+    # Получаем каналы прогрева
+    warmup_channels = await get_warmup_pending(account_id, limit=100)
+    warmup_list = [ch["channel"] for ch in warmup_channels] if warmup_channels else []
+    
+    # Формируем резюме
+    summary = f"""
+📊 **Резюме аккаунта {account.get('phone', 'N/A')}**
+
+⚙️ **Настройки:**
+• Задержка: {account.get('sleep_min', 'N/A')}-{account.get('sleep_max', 'N/A')} сек
+• Шанс комментирования: {account.get('chance', 'N/A')}%
+• Режим: {account.get('mode', 'N/A')}
+• Статус: {account.get('status', 'N/A')}
+
+📝 **Системный промпт:**
+{account.get('system_prompt', 'Не задан')}
+
+📺 **Каналы подписки ({len(regular_channels)}):**
+{await format_channels_display(regular_channels, "Подписки", 5)}
+
+🔥 **Каналы прогрева ({len(warmup_list)}):**
+{await format_channels_display(warmup_list, "Прогрев", 5)}
+
+📅 **Время прогрева:**
+• Завершение: {account.get('warmup_end_at', 'N/A')}
+• Вступлений сегодня: {account.get('warmup_joined_today', 0)}
+• Следующее вступление: {account.get('warmup_next_join_at', 'N/A')}
+
+🕐 **Время работы:**
+• Запущен: {account.get('last_started_at', 'N/A')}
+• Остановлен: {account.get('last_stopped_at', 'N/A')}
+• Обновлен: {account.get('updated_at', 'N/A')}
+"""
+    return summary
+
+async def send_account_summary_to_user(user_id, account_id, session_name):
+    """Отправляет резюме аккаунта пользователю"""
+    summary = await get_account_summary(account_id)
+    if summary:
+        await bot.send_message(user_id, summary, parse_mode="Markdown")
+    else:
+        await bot.send_message(user_id, f"❌ Не удалось получить информацию об аккаунте {session_name}")
+
+async def send_account_summary_to_logs(account_id, session_name):
+    """Отправляет резюме аккаунта в лог-канал"""
+    summary = await get_account_summary(account_id)
+    if summary:
+        await bot.send_message(log_channel, f"📊 **Резюме аккаунта {session_name}**\n{summary}", parse_mode="Markdown")
+    else:
+        await bot.send_message(log_channel, f"❌ Не удалось получить информацию об аккаунте {session_name}")
 
 async def main():
     try:
