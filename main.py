@@ -619,6 +619,9 @@ async def send_comments(userid, session, account_id):
         sleep_min = account.get("sleep_min") or 10
         sleep_max = account.get("sleep_max") or 20
         chance = account.get("chance") or 100
+        
+        # Логируем загруженные настройки для отладки
+        logger.info(f'[DEBUG] Аккаунт {session} загружен: chance={chance}%, sleep={sleep_min}-{sleep_max}s')
 
         xsleep, ysleep = sleep_min, sleep_max
 
@@ -646,6 +649,8 @@ async def send_comments(userid, session, account_id):
                 
                 # Проверяем процент комментирования (chance = 30 означает 30% вероятность)
                 random_value = random.randint(1, 100)
+                logger.info(f'[DEBUG] Аккаунт {session}: шанс={chance}%, выпало={random_value}, будет комментировать={random_value <= chance}')
+                
                 if random_value > chance:
                     # Логируем только пропуски для отладки (можно убрать в продакшене)
                     logger.info(f'Аккаунт {session} пропустил комментарий (шанс: {chance}%, выпало: {random_value})')
