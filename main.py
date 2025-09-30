@@ -1124,7 +1124,8 @@ async def log_system_status():
         # Получаем статистику каналов прогрева
         warmup_stats = await get_warmup_queue_stats()
 
-        logger.info("📊 СТАТУС СИСТЕМЫ:"        logger.info(f"   Активных аккаунтов: {total_accounts}")
+        logger.info("📊 СТАТУС СИСТЕМЫ:")
+        logger.info(f"   Активных аккаунтов: {total_accounts}")
         logger.info(f"   Режим прогрева: {warmup_accounts}")
         logger.info(f"   Стандартный режим: {standard_accounts}")
         logger.info(f"   Каналов в очереди прогрева: {warmup_stats.get('pending', 0)}")
@@ -1150,44 +1151,44 @@ async def main():
         logger.info("🚀 Начинаем инициализацию бота...")
         await init_db()
         logger.info("✅ База данных инициализирована")
-            
-            await bot.delete_webhook(drop_pending_updates=True)
-            log_file.write("Webhook deleted\n")
-            log_file.flush()
-            
-            running_accounts = await get_running_accounts()
-            log_file.write(f"Found {len(running_accounts)} running accounts\n")
-            log_file.flush()
-            
-            for account in running_accounts:
-                user_id = account["user_id"]
-                phone = account["phone"]
-                key = make_session_key(user_id, phone)
-                session_file = os.path.join("sessions", str(user_id), f"{phone}.session")
-                if os.path.exists(session_file):
-                    active_sessions[key] = True
-                    active_account_ids[key] = account["id"]
-                    asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
-                    log_file.write(f"Started account {phone}\n")
-                    log_file.flush()
-                else:
-                    await mark_account_stopped(account["id"])
-                    log_file.write(f"Stopped account {phone} - no session file\n")
-                    log_file.flush()
-            
-            asyncio.create_task(process_warmup_accounts())
-            log_file.write("Starting bot polling...\n")
-            log_file.flush()
+        
+        await bot.delete_webhook(drop_pending_updates=True)
+        log_file.write("Webhook deleted\n")
+        log_file.flush()
+        
+        running_accounts = await get_running_accounts()
+        log_file.write(f"Found {len(running_accounts)} running accounts\n")
+        log_file.flush()
+        
+        for account in running_accounts:
+            user_id = account["user_id"]
+            phone = account["phone"]
+            key = make_session_key(user_id, phone)
+            session_file = os.path.join("sessions", str(user_id), f"{phone}.session")
+            if os.path.exists(session_file):
+                active_sessions[key] = True
+                active_account_ids[key] = account["id"]
+                asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
+                log_file.write(f"Started account {phone}\n")
+                log_file.flush()
+            else:
+                await mark_account_stopped(account["id"])
+                log_file.write(f"Stopped account {phone} - no session file\n")
+                log_file.flush()
+        
+        asyncio.create_task(process_warmup_accounts())
+        log_file.write("Starting bot polling...\n")
+        log_file.flush()
 
-            # Запускаем периодический мониторинг статуса (каждые 30 минут)
-            async def periodic_status_logging():
-                while True:
-                    await asyncio.sleep(1800)  # 30 минут
-                    await log_system_status()
+        # Запускаем периодический мониторинг статуса (каждые 30 минут)
+        async def periodic_status_logging():
+            while True:
+                await asyncio.sleep(1800)  # 30 минут
+                await log_system_status()
 
-            asyncio.create_task(periodic_status_logging())
+        asyncio.create_task(periodic_status_logging())
 
-            await dp.start_polling(bot)
+        await dp.start_polling(bot)
     except Exception as e:
         with open("bot_error.txt", "w") as error_file:
             error_file.write(f"Error in main: {e}\n")
