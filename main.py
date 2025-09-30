@@ -644,12 +644,18 @@ async def send_comments(userid, session, account_id):
             if (message.chat.permissions.can_send_messages is True) and (
                     message.text is not None or message.caption is not None):
                 
-                if random.randint(1, 100) > chance:
-                    await bot.send_message(log_channel, f'Аккаунт {session} пропустил комментарий')
+                # Проверяем процент комментирования (chance = 30 означает 30% вероятность)
+                random_value = random.randint(1, 100)
+                if random_value > chance:
+                    # Логируем только пропуски для отладки (можно убрать в продакшене)
+                    logger.info(f'Аккаунт {session} пропустил комментарий (шанс: {chance}%, выпало: {random_value})')
                     return
 
                 post_text = message.text or message.caption
                 comment = generate_comment(post_text, system_promt)
+                
+                # Логируем успешную проверку процента для отладки
+                logger.info(f'Аккаунт {session} будет комментировать (шанс: {chance}%, выпало: {random_value})')
 
                 try:
                     if is_quiet_period():
