@@ -369,6 +369,8 @@ async def update_account_settings(
     sleep_max: Optional[int] = None,
     channels: Optional[List[str]] = None,
 ) -> None:
+    print(f"DEBUG: update_account_settings called with account_id={account_id}, chance={chance}, sleep_min={sleep_min}, sleep_max={sleep_max}, system_prompt={system_prompt}")
+    
     pool = _require_pool()
 
     updates: List[str] = []
@@ -391,8 +393,10 @@ async def update_account_settings(
         values.append(channels)
 
     if not updates:
+        print("DEBUG: No updates to perform")
         return
 
+    print(f"DEBUG: Executing SQL update with {len(updates)} fields: {updates}")
     values.append(account_id)
     assignments = ", ".join(updates)
 
@@ -405,6 +409,7 @@ async def update_account_settings(
     pool = _require_pool()
     async with pool.acquire() as conn:
         await conn.execute(query, *values)
+        print(f"DEBUG: SQL update completed successfully for account_id={account_id}")
 
 
 async def set_account_mode(account_id: int, mode: str, warmup_days: Optional[int] = None) -> None:
