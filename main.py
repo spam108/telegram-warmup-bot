@@ -544,6 +544,13 @@ async def add_channels(message: Message, state: FSMContext) -> None:
         if await check_account(message.from_user.id, session):
             async with app:  
                 for chl in channels:
+                    # Пропускаем некорректные каналы
+                    if (len(chl) <= 1 or 
+                        chl in ['+', '-', '.', ',', '!', '?', ' '] or
+                        (not chl.startswith('-') and not ('@' in chl or chl.startswith('t.me/') or chl.startswith('https://t.me/')))):
+                        await bot.send_message(log_channel, f'⚠️ Пропущен некорректный канал: {chl}')
+                        continue
+                        
                     await asyncio.sleep(random.uniform(20, 30))
 
                     if chl.startswith('-'):
@@ -563,7 +570,6 @@ async def add_channels(message: Message, state: FSMContext) -> None:
                             await bot.send_message(log_channel, f'Ошибка при выходе из канала {chl}: {e}')
 
                     else:
-
                         try:
                             await app.join_chat(chl)
                             await bot.send_message(log_channel, f'Аккаунт {session} вступил в канал: {chl}')
@@ -741,7 +747,11 @@ async def send_comments(userid, session, account_id):
             while active_sessions.get(key, False):
                 await asyncio.sleep(1)
         finally:
-            await app.stop()
+            try:
+                if app.is_connected:
+                    await app.stop()
+            except Exception as e:
+                logger.error(f"Error stopping Pyrogram client for {session}: {e}")
             key = make_session_key(userid, session)
             account_id = active_account_ids.pop(key, None)
             if account_id:
@@ -1015,7 +1025,16 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             return
 
     channels = [line.strip() for line in message.text.splitlines() if line.strip()]
-    warmup_channels = [chl for chl in channels if not chl.startswith('-')]
+    # Фильтруем валидные каналы (исключаем одиночные символы и некорректные значения)
+    valid_channels = []
+    for chl in channels:
+        if (len(chl) > 1 and 
+            not chl.startswith('-') and 
+            chl not in ['+', '-', '.', ',', '!', '?', ' '] and
+            ('@' in chl or chl.startswith('t.me/') or chl.startswith('https://t.me/'))):
+            valid_channels.append(chl)
+    
+    warmup_channels = valid_channels
     
     # Удаляем дубликаты, сохраняя порядок
     seen = set()
