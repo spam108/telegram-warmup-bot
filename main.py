@@ -618,37 +618,38 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
             if len(sleeps) == 2 and all(sleep.isdigit() for sleep in sleeps):
                 await state.update_data({"sleeps": message.text})
             else:
-                await main_message(message)
+                await bot.send_message(message.from_user.id, "Неверный формат. Используйте формат: 10-20")
                 return
         except Exception as e:
             await bot.send_message(message.from_user.id, f"Ошибка: {str(e)}")
-            await main_message(message)
             return
+    else:
+        await bot.send_message(message.from_user.id, "Неверный формат. Используйте формат: 10-20")
+        return
 
+    session = (await state.get_data()).get("account")
 
-        session = (await state.get_data()).get("account")
+    channels = []
 
-        channels = []
+    app = Client(
+        name=f"sessions/{message.from_user.id}/{session}",
+        api_id=API_ID,
+        api_hash=API_HASH)
+    
+    if await check_account(message.from_user.id, session):
+        async with app:
+            async for dialog in app.get_dialogs():
+                chat = dialog.chat
+                if str(chat.type) == "ChatType.CHANNEL":
+                    if chat.username is not None:
+                        channels.append(f"@{chat.username}")
 
-        app = Client(
-            name=f"sessions/{message.from_user.id}/{session}",
-            api_id=API_ID,
-            api_hash=API_HASH)
-        
-        if await check_account(message.from_user.id, session):
-            async with app:
-                async for dialog in app.get_dialogs():
-                    chat = dialog.chat
-                    if str(chat.type) == "ChatType.CHANNEL":
-                        if chat.username is not None:
-                            channels.append(f"@{chat.username}")
-
-            await bot.send_message(message.from_user.id,
-                                f'Аккаунт подписан на каналы:\n{channels}\n\nПришлите каналы на которые нужно подписаться\n(если не нужно пришлите -)')
-            await state.set_state(startaccount.regular_channels)
-        else:
-            await state.clear()
-            await main_message(message)
+        await bot.send_message(message.from_user.id,
+                            f'Аккаунт подписан на каналы:\n{channels}\n\nПришлите каналы на которые нужно подписаться\n(если не нужно пришлите -)')
+        await state.set_state(startaccount.regular_channels)
+    else:
+        await state.clear()
+        await main_message(message)
 
 
 @dp.message(startaccount.channels)
@@ -660,6 +661,7 @@ async def add_channels(message: Message, state: FSMContext) -> None:
 
     account_id = (await state.get_data()).get("account_id")
     warmup_channels = []
+    channels = []
 
     if str(message.text) != '-':
         channels = str(message.text).splitlines()
@@ -696,17 +698,25 @@ async def add_channels(message: Message, state: FSMContext) -> None:
             await state.clear()
             await main_message(message)
             return
-        await update_account_settings(
-            account_id,
-            channels=channels,
-        )
+
+    # Сохраняем все настройки в базу данных
+    sleep_min, sleep_max = None, None
+    if sleeps and '-' in sleeps:
+        try:
+            sleep_parts = sleeps.split('-')
+            if len(sleep_parts) == 2:
+                sleep_min = int(sleep_parts[0])
+                sleep_max = int(sleep_parts[1])
+        except ValueError:
+            pass
 
     await update_account_settings(
         account_id,
+        channels=channels,
+        sleep_min=sleep_min,
+        sleep_max=sleep_max,
         chance=chance,
-        system_prompt=system_promt,
-        sleep_min=int(sleeps.split('-')[0]),
-        sleep_max=int(sleeps.split('-')[1]),
+        system_prompt=system_promt
     )
 
     # Показываем существующие каналы для прогрева
