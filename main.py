@@ -1135,12 +1135,6 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
         await update_account_settings(account_id, channels=channels)
     
     # Переходим к диалогу каналов прогрева
-    # Показываем существующие каналы прогрева с унифицированным отображением
-    existing_warmup = await get_warmup_pending(account_id, limit=100)
-    warmup_list = [ch["channel"] for ch in existing_warmup] if existing_warmup else []
-    warmup_display = await format_channels_display(warmup_list, "Текущие каналы в прогреве", 10)
-    await bot.send_message(message.from_user.id, warmup_display)
-    
     await bot.send_message(message.from_user.id, 'Теперь пришлите каналы для прогрева (каждый канал с новой строки). Для отмены отправьте "-".')
     await state.set_state(startaccount.warmup_channels)
 
@@ -1160,6 +1154,13 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
         await state.clear()
         await main_message(message)
         return
+    
+    # Показываем существующие каналы прогрева перед обработкой
+    existing_warmup = await get_warmup_pending(account_id, limit=100)
+    warmup_list = [ch["channel"] for ch in existing_warmup] if existing_warmup else []
+    if warmup_list:
+        warmup_display = await format_channels_display(warmup_list, "Текущие каналы в прогреве", 10)
+        await bot.send_message(message.from_user.id, warmup_display)
     
     # Помечаем как обработанное, чтобы избежать повторных вызовов
     await state.update_data({"warmup_processed": True})
