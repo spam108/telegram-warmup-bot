@@ -157,12 +157,17 @@ def make_session_key(user_id: int, phone: str) -> str:
 
 
 def is_quiet_period(now: datetime | None = None) -> bool:
-    """Проверяет, находимся ли мы в тихом периоде (настраивается через env)"""
+    """Проверяет, находимся ли мы в тихом периоде (00:30-07:30 МСК = 21:30-04:30 UTC)"""
     now = now or datetime.now(timezone.utc)
     current_time = now.time()
     start = time(QUIET_START_HOUR, QUIET_START_MINUTE)
     end = time(QUIET_END_HOUR, QUIET_END_MINUTE)
-    return start <= current_time < end
+    
+    # Обрабатываем случай, когда период переходит через полночь (21:30-04:30)
+    if start > end:  # 21:30 > 04:30
+        return current_time >= start or current_time < end
+    else:
+        return start <= current_time < end
 
 
 def is_warmup_sleep_period(now: datetime | None = None) -> bool:

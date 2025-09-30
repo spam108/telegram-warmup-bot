@@ -1,17 +1,17 @@
 {
   "quiet_period": {
-    "start_hour": 8,
-    "start_minute": 0,
-    "end_hour": 20,
-    "end_minute": 0,
-    "description": "Циркадный ритм - бот не комментирует в это время (UTC)"
+    "start_hour": 21,
+    "start_minute": 30,
+    "end_hour": 4,
+    "end_minute": 30,
+    "description": "Режим тишины - бот не комментирует в это время (00:30-07:30 МСК = 21:30-04:30 UTC)"
   },
   "warmup_period": {
-    "start_hour": 12,
+    "start_hour": 1,
     "start_minute": 0,
-    "end_hour": 19,
+    "end_hour": 3,
     "end_minute": 0,
-    "description": "Период прогрева - бот вступает в каналы в это время (UTC)"
+    "description": "Период прогрева - бот вступает в каналы в это время (04:00-06:00 МСК = 01:00-03:00 UTC)"
   },
   "warmup_settings": {
     "channels_per_day": 15,
