@@ -1153,12 +1153,10 @@ async def main():
         logger.info("✅ База данных инициализирована")
         
         await bot.delete_webhook(drop_pending_updates=True)
-        log_file.write("Webhook deleted\n")
-        log_file.flush()
+        logger.info("Webhook deleted")
         
         running_accounts = await get_running_accounts()
-        log_file.write(f"Found {len(running_accounts)} running accounts\n")
-        log_file.flush()
+        logger.info(f"Found {len(running_accounts)} running accounts")
         
         for account in running_accounts:
             user_id = account["user_id"]
@@ -1169,16 +1167,13 @@ async def main():
                 active_sessions[key] = True
                 active_account_ids[key] = account["id"]
                 asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
-                log_file.write(f"Started account {phone}\n")
-                log_file.flush()
+                logger.info(f"Started account {phone}")
             else:
                 await mark_account_stopped(account["id"])
-                log_file.write(f"Stopped account {phone} - no session file\n")
-                log_file.flush()
+                logger.info(f"Stopped account {phone} - no session file")
         
         asyncio.create_task(process_warmup_accounts())
-        log_file.write("Starting bot polling...\n")
-        log_file.flush()
+        logger.info("Starting bot polling...")
 
         # Запускаем периодический мониторинг статуса (каждые 30 минут)
         async def periodic_status_logging():
