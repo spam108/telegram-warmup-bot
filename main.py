@@ -1125,6 +1125,31 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
     # Помечаем как обработанное, чтобы избежать повторных вызовов
     await state.update_data({"warmup_processed": True})
 
+    # Сохраняем все настройки аккаунта в базу данных
+    sleeps = (await state.get_data()).get("sleeps")
+    system_promt = (await state.get_data()).get("systempromt")
+    chance = (await state.get_data()).get("chance")
+    
+    # Парсим sleeps
+    sleep_min, sleep_max = None, None
+    if sleeps and '-' in sleeps:
+        try:
+            sleep_parts = sleeps.split('-')
+            if len(sleep_parts) == 2:
+                sleep_min = int(sleep_parts[0])
+                sleep_max = int(sleep_parts[1])
+        except ValueError:
+            pass
+    
+    # Сохраняем все настройки
+    await update_account_settings(
+        account_id=account_id,
+        chance=chance,
+        system_prompt=system_promt,
+        sleep_min=sleep_min,
+        sleep_max=sleep_max
+    )
+
     if str(message.text) == '-':
         # Проверяем, есть ли уже каналы в прогреве
         existing_warmup = await get_warmup_pending(account_id, limit=1)
