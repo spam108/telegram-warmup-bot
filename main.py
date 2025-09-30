@@ -433,14 +433,36 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
             await main_message(callback_query)
             return
 
+        # Получаем реальные подписки аккаунта из Telegram
+        real_channels = []
+        try:
+            session_path = account_row.get('session_path', '')
+            if session_path and os.path.exists(session_path):
+                app = Client(
+                    name=session_path.replace('.session', ''),
+                    api_id=API_ID,
+                    api_hash=API_HASH
+                )
+                async with app:
+                    async for dialog in app.get_dialogs():
+                        chat = dialog.chat
+                        if str(chat.type) == "ChatType.CHANNEL" and chat.username:
+                            real_channels.append(f"@{chat.username}")
+        except Exception as e:
+            print(f"Ошибка при получении подписок для аккаунта {session}: {e}")
+            # Если не удалось получить реальные подписки, используем из БД
+            real_channels = account_row.get("channels") or []
+
         channels = account_row.get("channels") or []
         warmup_stats = await get_warmup_queue_stats(account_row["id"])
 
         info_lines = [f"Аккаунт {session}"]
-        if channels:
-            info_lines.append(f"Активные каналы ({len(channels)}):\n" + "\n".join(channels[:20]))
-            if len(channels) > 20:
-                info_lines.append(f"... и ещё {len(channels) - 20}")
+        
+        # Показываем реальные подписки
+        if real_channels:
+            info_lines.append(f"Активные каналы ({len(real_channels)}):\n" + "\n".join(real_channels[:20]))
+            if len(real_channels) > 20:
+                info_lines.append(f"... и ещё {len(real_channels) - 20}")
         else:
             info_lines.append("Активные каналы: нет")
 
@@ -1348,8 +1370,28 @@ async def get_account_summary(account_id):
     if not account:
         return None
     
-    # Получаем каналы подписки
-    regular_channels = account.get('channels', []) or []
+    # Получаем реальные подписки аккаунта из Telegram
+    real_channels = []
+    try:
+        session_path = account.get('session_path', '')
+        if session_path and os.path.exists(session_path):
+            app = Client(
+                name=session_path.replace('.session', ''),
+                api_id=API_ID,
+                api_hash=API_HASH
+            )
+            async with app:
+                async for dialog in app.get_dialogs():
+                    chat = dialog.chat
+                    if str(chat.type) == "ChatType.CHANNEL" and chat.username:
+                        real_channels.append(f"@{chat.username}")
+    except Exception as e:
+        print(f"Ошибка при получении подписок для аккаунта {account_id}: {e}")
+        # Если не удалось получить реальные подписки, используем из БД
+        real_channels = account.get('channels', []) or []
+    
+    # Получаем каналы из БД (для сравнения)
+    db_channels = account.get('channels', []) or []
     
     # Получаем каналы прогрева
     warmup_channels = await get_warmup_pending(account_id, limit=100)
@@ -1368,11 +1410,14 @@ async def get_account_summary(account_id):
 📝 **Системный промпт:**
 {account.get('system_prompt', 'Не задан')}
 
-📺 **Каналы подписки ({len(regular_channels)}):**
-{await format_channels_display(regular_channels, "Подписки", 5)}
+📺 **Реальные подписки ({len(real_channels)}):**
+{await format_channels_display(real_channels, "Подписки", 10)}
+
+📋 **Каналы в БД ({len(db_channels)}):**
+{await format_channels_display(db_channels, "В базе", 5)}
 
 🔥 **Каналы прогрева ({len(warmup_list)}):**
-{await format_channels_display(warmup_list, "Прогрев", 5)}
+{await format_channels_display(warmup_list, "Прогрев", 10)}
 
 📅 **Время прогрева:**
 • Завершение: {account.get('warmup_end_at', 'N/A')}
