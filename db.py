@@ -200,6 +200,7 @@ async def init_db() -> None:
                 attempts INTEGER NOT NULL DEFAULT 0,
                 last_attempt_at TIMESTAMPTZ,
                 joined_at TIMESTAMPTZ,
+                added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE (account_id, channel)
