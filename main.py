@@ -733,18 +733,8 @@ async def add_channels(message: Message, state: FSMContext) -> None:
     print(f"DEBUG: Settings saved successfully for account_id={account_id}")
     await bot.send_message(log_channel, f"DEBUG: Settings saved successfully for account_id={account_id}")
 
-    # Показываем существующие каналы для прогрева
-    existing_warmup = await get_warmup_pending(account_id, limit=50)
-    if existing_warmup:
-        warmup_list = [entry["channel"] for entry in existing_warmup]
-        await bot.send_message(message.from_user.id, f'Текущие каналы в прогреве:\n' + '\n'.join(warmup_list))
-    else:
-        await bot.send_message(message.from_user.id, 'Каналы в прогреве: нет')
-
     # Переходим к вводу каналов для прогрева
     await state.update_data({"account_id": account_id})
-    await bot.send_message(message.from_user.id, 'Теперь пришлите каналы для прогрева (каждый канал с новой строки). Для отмены отправьте "-".')
-    await state.set_state(startaccount.warmup_channels)
 
 
 async def send_comments(userid, session, account_id):
@@ -1092,15 +1082,13 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
         await update_account_settings(account_id, channels=channels)
     
     # Переходим к диалогу каналов прогрева
-    await bot.send_message(message.from_user.id, 'Текущие каналы в прогреве:')
-    
     # Показываем существующие каналы прогрева
     existing_warmup = await get_warmup_pending(account_id, limit=10)
     if existing_warmup:
         warmup_list = [ch["channel"] for ch in existing_warmup]
-        await bot.send_message(message.from_user.id, '\n'.join(warmup_list))
+        await bot.send_message(message.from_user.id, f'Текущие каналы в прогреве:\n' + '\n'.join(warmup_list))
     else:
-        await bot.send_message(message.from_user.id, 'Нет каналов в прогреве')
+        await bot.send_message(message.from_user.id, 'Каналы в прогреве: нет')
     
     await bot.send_message(message.from_user.id, 'Теперь пришлите каналы для прогрева (каждый канал с новой строки). Для отмены отправьте "-".')
     await state.set_state(startaccount.warmup_channels)
