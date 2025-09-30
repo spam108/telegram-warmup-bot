@@ -622,6 +622,13 @@ async def send_comments(userid, session, account_id):
         
         # Логируем загруженные настройки для отладки
         logger.info(f'[DEBUG] Аккаунт {session} загружен: chance={chance}%, sleep={sleep_min}-{sleep_max}s')
+        
+        # Отправляем в канал информацию о загруженных настройках
+        await bot.send_message(log_channel, 
+            f'Аккаунт {session} запущен\n'
+            f'установленный % комментирования: {chance}%\n'
+            f'задержки: {sleep_min}-{sleep_max} секунд'
+        )
 
         xsleep, ysleep = sleep_min, sleep_max
 
@@ -652,7 +659,12 @@ async def send_comments(userid, session, account_id):
                 logger.info(f'[DEBUG] Аккаунт {session}: шанс={chance}%, выпало={random_value}, будет комментировать={random_value <= chance}')
                 
                 if random_value > chance:
-                    # Логируем только пропуски для отладки (можно убрать в продакшене)
+                    # Отправляем в канал логов информацию о пропуске
+                    await bot.send_message(log_channel, 
+                        f'Аккаунт {session}\n'
+                        f'установленный % комментирования {chance}, RND % {random_value}\n'
+                        f'{chance} < {random_value} - комментарий пропущен'
+                    )
                     logger.info(f'Аккаунт {session} пропустил комментарий (шанс: {chance}%, выпало: {random_value})')
                     return
 
@@ -673,11 +685,21 @@ async def send_comments(userid, session, account_id):
                     msg = await client.send_message(message.chat.id, comment, reply_to_message_id=message.id)
 
                     if hasattr(msg, "reply_to_message") and msg.reply_to_message and hasattr(msg.reply_to_message, "forward_from_chat") and msg.reply_to_message.forward_from_chat:
-                        await bot.send_message(log_channel, f'Аккаунт {session} отправил комментарий\n'
-                                                        f'https://t.me/{msg.reply_to_message.forward_from_chat.username}/{msg.reply_to_message.forward_from_message_id}?comment={msg.id}')
+                        await bot.send_message(log_channel, 
+                            f'Аккаунт {session}\n'
+                            f'установленный % комментирования {chance}, RND % {random_value}\n'
+                            f'{chance} > {random_value} - комментируем\n'
+                            f'отправил комментарий\n'
+                            f'https://t.me/{msg.reply_to_message.forward_from_chat.username}/{msg.reply_to_message.forward_from_message_id}?comment={msg.id}'
+                        )
                     else:
-                        await bot.send_message(log_channel, f'Аккаунт {session} отправил комментарий\n'
-                                                        f'https://t.me/c/{str(message.chat.id).replace("-", "")}/{msg.id}')
+                        await bot.send_message(log_channel, 
+                            f'Аккаунт {session}\n'
+                            f'установленный % комментирования {chance}, RND % {random_value}\n'
+                            f'{chance} > {random_value} - комментируем\n'
+                            f'отправил комментарий\n'
+                            f'https://t.me/c/{str(message.chat.id).replace("-", "")}/{msg.id}'
+                        )
                     await add_comment_log(
                         account_id,
                             channel=str(message.chat.id),
