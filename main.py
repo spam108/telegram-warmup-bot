@@ -167,7 +167,7 @@ def is_quiet_period(now: datetime | None = None) -> bool:
     if start > end:  # 21:30 > 04:30
         return current_time >= start or current_time < end
     else:
-    return start <= current_time < end
+        return start <= current_time < end
 
 
 def is_warmup_sleep_period(now: datetime | None = None) -> bool:
@@ -237,7 +237,7 @@ async def main_message(message):
             # Проверяем также файл .session.session
             session_file_alt = os.path.join(user_sessions_dir, f"{call}.session.session")
             if not os.path.exists(session_file_alt):
-            continue
+                continue
             session_file = session_file_alt
 
         key = make_session_key(user_id, call)
@@ -612,6 +612,7 @@ async def add_systempromt(message: Message, state: FSMContext) -> None:
 @dp.message(startaccount.sleeps)
 async def add_sleeps(message: Message, state: FSMContext) -> None:
     print(f"DEBUG: add_sleeps called with message: {message.text}")
+    await bot.send_message(log_channel, f"DEBUG: add_sleeps called with message: {message.text}")
 
     if '-' in str(message.text):
         try:
@@ -619,6 +620,7 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
             if len(sleeps) == 2 and all(sleep.isdigit() for sleep in sleeps):
                 await state.update_data({"sleeps": message.text})
                 print(f"DEBUG: sleeps saved to state: {message.text}")
+                await bot.send_message(log_channel, f"DEBUG: sleeps saved to state: {message.text}")
             else:
                 await bot.send_message(message.from_user.id, "Неверный формат. Используйте формат: 10-20")
                 return
@@ -627,31 +629,31 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
             return
     else:
         await bot.send_message(message.from_user.id, "Неверный формат. Используйте формат: 10-20")
-            return
+        return
 
-        session = (await state.get_data()).get("account")
+    session = (await state.get_data()).get("account")
 
-        channels = []
+    channels = []
 
-        app = Client(
-            name=f"sessions/{message.from_user.id}/{session}",
-            api_id=API_ID,
-            api_hash=API_HASH)
-        
-        if await check_account(message.from_user.id, session):
-            async with app:
-                async for dialog in app.get_dialogs():
-                    chat = dialog.chat
-                    if str(chat.type) == "ChatType.CHANNEL":
-                        if chat.username is not None:
-                            channels.append(f"@{chat.username}")
+    app = Client(
+        name=f"sessions/{message.from_user.id}/{session}",
+        api_id=API_ID,
+        api_hash=API_HASH)
+    
+    if await check_account(message.from_user.id, session):
+        async with app:
+            async for dialog in app.get_dialogs():
+                chat = dialog.chat
+                if str(chat.type) == "ChatType.CHANNEL":
+                    if chat.username is not None:
+                        channels.append(f"@{chat.username}")
 
-            await bot.send_message(message.from_user.id,
-                                f'Аккаунт подписан на каналы:\n{channels}\n\nПришлите каналы на которые нужно подписаться\n(если не нужно пришлите -)')
+        await bot.send_message(message.from_user.id,
+                            f'Аккаунт подписан на каналы:\n{channels}\n\nПришлите каналы на которые нужно подписаться\n(если не нужно пришлите -)')
         await state.set_state(startaccount.regular_channels)
-        else:
-            await state.clear()
-            await main_message(message)
+    else:
+        await state.clear()
+        await main_message(message)
 
 
 @dp.message(startaccount.channels)
@@ -716,6 +718,9 @@ async def add_channels(message: Message, state: FSMContext) -> None:
         except ValueError:
             pass
 
+    print(f"DEBUG: About to save settings - account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, system_promt={system_promt}")
+    await bot.send_message(log_channel, f"DEBUG: About to save settings - account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, system_promt={system_promt}")
+
     await update_account_settings(
         account_id,
         channels=channels,
@@ -724,6 +729,9 @@ async def add_channels(message: Message, state: FSMContext) -> None:
         chance=chance,
         system_prompt=system_promt
     )
+    
+    print(f"DEBUG: Settings saved successfully for account_id={account_id}")
+    await bot.send_message(log_channel, f"DEBUG: Settings saved successfully for account_id={account_id}")
 
     # Показываем существующие каналы для прогрева
     existing_warmup = await get_warmup_pending(account_id, limit=50)
@@ -968,16 +976,16 @@ async def process_warmup_accounts():
                 session_file = os.path.join("sessions", str(user_id), f"{session_key}.session")
                 if not os.path.exists(session_file):
                     await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) - файл сессии не найден: {session_file}")
-                        # Переключаем в стандартный режим если нет сессии
-                        await set_account_mode(account["id"], "standard", warmup_days=None)
-                        continue
+                    # Переключаем в стандартный режим если нет сессии
+                    await set_account_mode(account["id"], "standard", warmup_days=None)
+                    continue
 
                 # Используем единую функцию для вступления в канал прогрева
                 success = await join_channel(channel, account["id"], session_key, user_id, is_warmup=True)
                 
                 if not success:
                     # Если сессия истекла - переключаем в стандартный режим
-                        await set_account_mode(account["id"], "standard", warmup_days=None)
+                    await set_account_mode(account["id"], "standard", warmup_days=None)
 
         except Exception as e:
             logging.exception("Warmup loop error: %s", e)
@@ -1282,10 +1290,10 @@ async def main():
                 if os.path.exists(session_file):
                     # Запускаем только аккаунты в стандартном режиме
                     if account.get("mode") == "standard":
-                    active_sessions[key] = True
-                    active_account_ids[key] = account["id"]
-                    asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
-                    log_file.write(f"Started account {phone}\n")
+                        active_sessions[key] = True
+                        active_account_ids[key] = account["id"]
+                        asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
+                        log_file.write(f"Started account {phone}\n")
                     else:
                         # Аккаунты в режиме прогрева не запускаем автоматически
                         log_file.write(f"Account {phone} in warmup mode - not started automatically\n")
