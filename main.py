@@ -118,8 +118,8 @@ WARMUP_CHANNELS_PER_DAY = 15
 WARMUP_DELAY_SECONDS = 10 * 60  # 10 минут между добавлениями
 WARMUP_SCAN_INTERVAL_SECONDS = 60  # Проверка каждую минуту
 WARMUP_DEFAULT_DAYS = 7
-WARMUP_SLEEP_START_HOUR = 4  # Начало периода сна (4:00)
-WARMUP_SLEEP_END_HOUR = 6    # Конец периода сна (6:00)
+WARMUP_SLEEP_START_HOUR = 9  # Начало периода сна (9:00) - ТЕСТ
+WARMUP_SLEEP_END_HOUR = 11   # Конец периода сна (11:00) - ТЕСТ
 
 # Ограничение одновременных подключений
 MAX_CONCURRENT_ACCOUNTS = 5
@@ -777,13 +777,13 @@ async def process_warmup_accounts():
                 if account.get("mode") != "warmup":
                     continue
 
-                # Проверяем, что основной процесс комментирования не запущен
+                # Получаем данные аккаунта
                 session_key = account["phone"]
                 user_id = account["user_id"]
                 key = make_session_key(user_id, session_key)
                 
-                if active_sessions.get(key):
-                    continue
+                # ПРИМЕЧАНИЕ: Прогрев работает ПАРАЛЛЕЛЬНО с комментированием
+                # Аккаунт может комментировать И прогреваться одновременно
 
                 # Проверяем, не истек ли период прогрева
                 warmup_end = account.get("warmup_end_at")
