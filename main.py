@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import asyncio
 import logging
@@ -261,6 +261,13 @@ async def main_message(message):
         types.InlineKeyboardButton(text="Добавить аккаунт", callback_data="add_account"),
         types.InlineKeyboardButton(text="Добавить прогрев", callback_data="add_warmup"),
     )
+    
+    # Добавляем кнопку настроек, если есть запущенные аккаунты
+    running_accounts = [acc for acc in db_accounts if acc.get("status") == "running"]
+    if running_accounts:
+        builder.row(
+            types.InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings_menu"),
+        )
 
     await bot.send_message(message.from_user.id, 'Ваши аккаунты', reply_markup=builder.as_markup())
 
@@ -389,6 +396,133 @@ async def fix_mode_command(message: Message) -> None:
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
         logging.exception("Error in fix_mode_command: %s", e)
+
+
+@dp.message(Command("sleep"))
+async def change_sleep_command(message: Message) -> None:
+    """Команда для изменения задержки комментирования"""
+    try:
+        # Получаем все аккаунты пользователя
+        accounts = await get_accounts_for_user(message.from_user.id)
+        running_accounts = [acc for acc in accounts if acc.get("status") == "running"]
+        
+        if not running_accounts:
+            await message.answer("❌ У вас нет запущенных аккаунтов")
+            return
+        
+        # Парсим команду: /sleep 10-20
+        parts = message.text.split()
+        if len(parts) != 2 or '-' not in parts[1]:
+            await message.answer("❌ Неверный формат. Используйте: /sleep 10-20")
+            return
+        
+        try:
+            sleep_parts = parts[1].split('-')
+            if len(sleep_parts) != 2:
+                raise ValueError()
+            sleep_min = int(sleep_parts[0])
+            sleep_max = int(sleep_parts[1])
+            
+            if sleep_min < 1 or sleep_max < sleep_min:
+                raise ValueError()
+                
+        except ValueError:
+            await message.answer("❌ Неверный формат. Используйте: /sleep 10-20 (минимальная задержка-максимальная задержка в секундах)")
+            return
+        
+        # Обновляем настройки для всех запущенных аккаунтов
+        updated_count = 0
+        for account in running_accounts:
+            await update_account_settings(
+                account["id"],
+                sleep_min=sleep_min,
+                sleep_max=sleep_max
+            )
+            updated_count += 1
+        
+        await message.answer(f"✅ Задержка комментирования изменена на {sleep_min}-{sleep_max} секунд для {updated_count} аккаунтов")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+        logging.exception("Error in change_sleep_command: %s", e)
+
+
+@dp.message(Command("chance"))
+async def change_chance_command(message: Message) -> None:
+    """Команда для изменения шанса комментирования"""
+    try:
+        # Получаем все аккаунты пользователя
+        accounts = await get_accounts_for_user(message.from_user.id)
+        running_accounts = [acc for acc in accounts if acc.get("status") == "running"]
+        
+        if not running_accounts:
+            await message.answer("❌ У вас нет запущенных аккаунтов")
+            return
+        
+        # Парсим команду: /chance 30
+        parts = message.text.split()
+        if len(parts) != 2:
+            await message.answer("❌ Неверный формат. Используйте: /chance 30")
+            return
+        
+        try:
+            chance = int(parts[1])
+            if chance < 1 or chance > 100:
+                raise ValueError()
+        except ValueError:
+            await message.answer("❌ Неверный формат. Используйте: /chance 30 (число от 1 до 100)")
+            return
+        
+        # Обновляем настройки для всех запущенных аккаунтов
+        updated_count = 0
+        for account in running_accounts:
+            await update_account_settings(
+                account["id"],
+                chance=chance
+            )
+            updated_count += 1
+        
+        await message.answer(f"✅ Шанс комментирования изменен на {chance}% для {updated_count} аккаунтов")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+        logging.exception("Error in change_chance_command: %s", e)
+
+
+@dp.message(Command("prompt"))
+async def change_prompt_command(message: Message) -> None:
+    """Команда для изменения системного промпта"""
+    try:
+        # Получаем все аккаунты пользователя
+        accounts = await get_accounts_for_user(message.from_user.id)
+        running_accounts = [acc for acc in accounts if acc.get("status") == "running"]
+        
+        if not running_accounts:
+            await message.answer("❌ У вас нет запущенных аккаунтов")
+            return
+        
+        # Парсим команду: /prompt Новый промпт
+        parts = message.text.split(' ', 1)
+        if len(parts) != 2:
+            await message.answer("❌ Неверный формат. Используйте: /prompt Ваш новый промпт")
+            return
+        
+        new_prompt = parts[1]
+        
+        # Обновляем настройки для всех запущенных аккаунтов
+        updated_count = 0
+        for account in running_accounts:
+            await update_account_settings(
+                account["id"],
+                system_prompt=new_prompt
+            )
+            updated_count += 1
+        
+        await message.answer(f"✅ Системный промпт изменен для {updated_count} аккаунтов")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+        logging.exception("Error in change_prompt_command: %s", e)
 
 
 @dp.message(AuthState.waiting_for_password)
@@ -643,6 +777,37 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
         except Exception as e:
             await bot.send_message(callback_query.from_user.id, f"Ошибка: {str(e)}")
             await main_message(callback_query)
+
+    elif call == 'settings_menu':
+        # Показываем меню настроек
+        accounts = await get_accounts_for_user(callback_query.from_user.id)
+        running_accounts = [acc for acc in accounts if acc.get("status") == "running"]
+        
+        if not running_accounts:
+            await bot.send_message(callback_query.from_user.id, "❌ У вас нет запущенных аккаунтов")
+            await main_message(callback_query)
+            return
+        
+        # Показываем текущие настройки
+        settings_text = "⚙️ **Текущие настройки для всех запущенных аккаунтов:**\n\n"
+        
+        # Берем настройки первого аккаунта (все должны быть одинаковые)
+        first_account = running_accounts[0]
+        settings_text += f"🕐 **Задержка комментирования:** {first_account.get('sleep_min', 'не установлено')}-{first_account.get('sleep_max', 'не установлено')} сек\n"
+        settings_text += f"🎯 **Шанс комментирования:** {first_account.get('chance', 'не установлено')}%\n"
+        settings_text += f"📝 **Системный промпт:** {first_account.get('system_prompt', 'не установлено')[:50]}{'...' if len(first_account.get('system_prompt', '')) > 50 else ''}\n\n"
+        
+        settings_text += "**Доступные команды:**\n"
+        settings_text += "• `/sleep 10-20` - изменить задержку (секунды)\n"
+        settings_text += "• `/chance 30` - изменить шанс комментирования (%)\n"
+        settings_text += "• `/prompt Новый промпт` - изменить системный промпт\n\n"
+        settings_text += "**Примеры:**\n"
+        settings_text += "• `/sleep 30-60` - комментировать каждые 30-60 секунд\n"
+        settings_text += "• `/chance 50` - комментировать в 50% случаев\n"
+        settings_text += "• `/prompt Пиши короткие комментарии` - новый промпт"
+        
+        await bot.send_message(callback_query.from_user.id, settings_text)
+        await main_message(callback_query)
 
 @dp.message(startaccount.chance)
 async def add_chance(message: Message, state: FSMContext) -> None:
