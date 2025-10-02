@@ -278,6 +278,16 @@ async def start(message: types.Message, state: FSMContext):
     else:
         await main_message(message)
 
+@dp.message(Command("Start"))
+async def start_uppercase(message: types.Message, state: FSMContext):
+    """Обработчик для /Start с заглавной буквы"""
+    await ensure_user(message.from_user.id)
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Введите пароль для доступа:")
+        await state.set_state(AuthState.waiting_for_password)
+    else:
+        await main_message(message)
+
 @dp.message(lambda message: message.text and message.text.startswith('/summary'))
 async def show_account_summary(message: types.Message, state: FSMContext):
     """Показывает резюме аккаунта по номеру телефона"""
