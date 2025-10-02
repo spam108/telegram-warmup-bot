@@ -1465,7 +1465,13 @@ async def main():
             log_file.flush()
             
             await init_db()
-            log_file.write("Database initialized successfully\n")
+    from aiogram import types
+    commands = [
+        types.BotCommand(command="start", description="Старт"),
+        types.BotCommand(command="channels", description="Каналы"),
+    ]
+    await bot.set_my_commands(commands)
+\n    # Устанавливаем команды бота\n    from aiogram import types\n    commands = [\n        types.BotCommand(command="start", description="Запуск бота"),\n        types.BotCommand(command="showchannels", description="Показать каналы"),\n        types.BotCommand(command="testwarmup", description="Тест прогрева"),\n    ]\n    await bot.set_my_commands(commands)\n\n            log_file.write("Database initialized successfully\n")
             log_file.flush()
             
             await bot.delete_webhook(drop_pending_updates=True)
@@ -1515,3 +1521,83 @@ async def main():
 asyncio.run(main())
 # asyncio.run(bot.run())
 
+
+@dp.message(Command("showchannels"))
+async def show_channels_command(message: types.Message):
+    """Показать каналы прогрева"""
+    try:
+        from db import get_accounts_for_user, get_warmup_pending
+        
+        # Получаем аккаунты пользователя
+        accounts = await get_accounts_for_user(message.from_user.id)
+        if not accounts:
+            await message.answer("Нет аккаунтов")
+            return
+        
+        # Ищем аккаунты в режиме прогрева
+        warmup_accounts = []
+        for acc in accounts:
+            if acc.get("mode") == "warmup":
+                warmup_accounts.append(acc)
+        
+        if not warmup_accounts:
+            await message.answer("Нет аккаунтов в режиме прогрева")
+            return
+        
+        # Берем первый аккаунт в прогреве
+        account = warmup_accounts[0]
+        
+        # Получаем каналы
+        channels = await get_warmup_pending(account["id"], limit=10)
+        if not channels:
+            await message.answer("Нет каналов для прогрева")
+            return
+        
+        # Формируем ответ
+        response_lines = []
+        response_lines.append("Каналы для прогрева:")
+        response_lines.append("")
+        response_lines.append(f"Аккаунт: {account['phone']}")
+        response_lines.append("")
+        
+        for i, channel in enumerate(channels, 1):
+            channel_name = channel.get("channel", "N/A")
+            response_lines.append(f"{i}. {channel_name}")
+        
+        response_lines.append("")
+        response_lines.append(f"Всего: {len(channels)} каналов")
+        
+        await message.answer("\n".join(response_lines))
+        
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+
+@dp.message(Command("channels"))
+async def simple_channels(message: types.Message):
+    try:
+        from db import get_accounts_for_user, get_warmup_pending
+        
+        accounts = await get_accounts_for_user(message.from_user.id)
+        if not accounts:
+            await message.answer("Нет аккаунтов")
+            return
+        
+        account = accounts[0]
+        channels = await get_warmup_pending(account["id"], limit=10)
+        
+        if not channels:
+            await message.answer("Нет каналов")
+            return
+        
+        response = "Каналы для прогрева"
+        response += "Аккаунт: " + account['phone']
+        
+        for i, channel in enumerate(channels, 1):
+            response += str(i) + ". " + channel.get("channel", "N/A")
+        
+        response += "Всего: " + str(len(channels)) + " каналов"
+        
+        await message.answer(response)
+        
+    except Exception as e:
+        await message.answer("Ошибка: " + str(e))
