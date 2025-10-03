@@ -41,7 +41,7 @@ pip install -r requirements.txt
 
 ### 4. Настройка базы данных
 
-Бот использует файл базы данных SQLite. По умолчанию он создаётся автоматически в каталоге `data/commentbot.db`. Убедитесь, что у приложения есть права на запись в выбранную директорию или измените путь через переменную `DATABASE_URL`.
+Бот использует файл базы данных SQLite. По умолчанию он создаётся автоматически в каталоге `data/CDXBOT0310.db`. Убедитесь, что у приложения есть права на запись в выбранную директорию или измените путь через переменную `DATABASE_URL`.
 
 ### 5. Настройка переменных окружения
 
@@ -59,7 +59,7 @@ API_ID=your_api_id_here
 API_HASH=your_api_hash_here
 OPENAI_API_KEY=your_openai_api_key_here
 PASSWORD=your_secure_password_here
-DATABASE_URL=sqlite:///data/commentbot.db
+DATABASE_URL=sqlite:///data/CDXBOT0310.db
 
 # Настройки времени теперь в файле schedule.json
 # Отредактируйте schedule.json под ваши нужды
@@ -202,10 +202,10 @@ pip install -r requirements.txt
 
 3. **Настройка systemd сервиса**:
 ```bash
-sudo cp commentbot.service /etc/systemd/system/
+sudo cp CDXBOT0310.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable commentbot
-sudo systemctl start commentbot
+sudo systemctl enable CDXBOT0310
+sudo systemctl start CDXBOT0310
 ```
 
 ### Управление ботом
@@ -220,11 +220,11 @@ sudo systemctl start commentbot
 ./manage.sh update     # Обновление
 
 # Или через systemd
-sudo systemctl start commentbot
-sudo systemctl stop commentbot
-sudo systemctl restart commentbot
-sudo systemctl status commentbot
-sudo journalctl -u commentbot -f
+sudo systemctl start CDXBOT0310
+sudo systemctl stop CDXBOT0310
+sudo systemctl restart CDXBOT0310
+sudo systemctl status CDXBOT0310
+sudo journalctl -u CDXBOT0310 -f
 ```
 
 📖 **Подробное руководство по развертыванию**: [DEPLOYMENT.md](DEPLOYMENT.md)
@@ -270,7 +270,7 @@ sudo journalctl -u commentbot -f
 
 ```bash
 # Просмотр логов systemd
-sudo journalctl -u commentbot -f
+sudo journalctl -u CDXBOT0310 -f
 
 # Просмотр логов Docker
 docker-compose logs -f

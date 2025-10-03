@@ -90,7 +90,7 @@ log "Создаем директории для данных..."
 mkdir -p sessions logs data
 
 log "Настраиваем systemd сервис..."
-sudo tee /etc/systemd/system/commentbot.service > /dev/null <<EOF
+sudo tee /etc/systemd/system/CDXBOT0310.service > /dev/null <<EOF
 [Unit]
 Description=Telegram Comment Bot
 After=network.target
@@ -120,7 +120,7 @@ log "Перезагружаем systemd..."
 sudo systemctl daemon-reload
 
 log "Включаем автозапуск сервиса..."
-sudo systemctl enable commentbot
+sudo systemctl enable CDXBOT0310
 
 log "Создаем скрипт управления..."
 cat > manage.sh << 'EOF'
@@ -129,28 +129,28 @@ cat > manage.sh << 'EOF'
 case "$1" in
     start)
         echo "Запускаем бота..."
-        sudo systemctl start commentbot
+        sudo systemctl start CDXBOT0310
         ;;
     stop)
         echo "Останавливаем бота..."
-        sudo systemctl stop commentbot
+        sudo systemctl stop CDXBOT0310
         ;;
     restart)
         echo "Перезапускаем бота..."
-        sudo systemctl restart commentbot
+        sudo systemctl restart CDXBOT0310
         ;;
     status)
-        sudo systemctl status commentbot
+        sudo systemctl status CDXBOT0310
         ;;
     logs)
-        sudo journalctl -u commentbot -f
+        sudo journalctl -u CDXBOT0310 -f
         ;;
     update)
         echo "Обновляем код..."
         git pull
         source venv/bin/activate
         pip install -r requirements.txt
-        sudo systemctl restart commentbot
+        sudo systemctl restart CDXBOT0310
         ;;
     *)
         echo "Использование: $0 {start|stop|restart|status|logs|update}"
