@@ -10,6 +10,8 @@ import os
 # Добавляем текущую директорию в путь для импорта
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+os.environ.setdefault("DATABASE_URL", "sqlite:///commentbot.db")
+
 from db import init_db, update_account_settings, get_account_by_id
 
 async def test_settings_save():

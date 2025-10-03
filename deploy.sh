@@ -42,7 +42,7 @@ log "Обновляем систему..."
 sudo apt update && sudo apt upgrade -y
 
 log "Устанавливаем необходимые пакеты..."
-sudo apt install -y curl wget git python3 python3-pip python3-venv postgresql postgresql-contrib
+sudo apt install -y curl wget git python3 python3-pip python3-venv sqlite3
 
 log "Устанавливаем Docker..."
 if ! command -v docker &> /dev/null; then
@@ -81,27 +81,19 @@ if [ ! -f ".env" ]; then
     echo "- API_ID и API_HASH"
     echo "- OPENAI_API_KEY"
     echo "- PASSWORD"
-    echo "- DATABASE_URL (если используете внешнюю БД)"
+    echo "- DATABASE_URL (если хотите изменить путь к файлу SQLite)"
 else
     log ".env файл уже существует"
 fi
 
 log "Создаем директории для данных..."
-mkdir -p sessions logs
-
-log "Настраиваем PostgreSQL..."
-sudo systemctl start postgresql
-sudo systemctl enable postgresql
-
-# Создаем базу данных
-sudo -u postgres psql -c "CREATE DATABASE commentbot;" 2>/dev/null || log "База данных уже существует"
-sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';" 2>/dev/null || log "Пароль уже установлен"
+mkdir -p sessions logs data
 
 log "Настраиваем systemd сервис..."
 sudo tee /etc/systemd/system/commentbot.service > /dev/null <<EOF
 [Unit]
 Description=Telegram Comment Bot
-After=network.target postgresql.service
+After=network.target
 
 [Service]
 Type=simple

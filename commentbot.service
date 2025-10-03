@@ -1,6 +1,6 @@
 [Unit]
 Description=Telegram Comment Bot
-After=network.target postgresql.service
+After=network.target
 
 [Service]
 Type=simple
@@ -23,6 +23,7 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/telegram-comment-bot/sessions
 ReadWritePaths=/opt/telegram-comment-bot/logs
+ReadWritePaths=/opt/telegram-comment-bot/data
 
 [Install]
 WantedBy=multi-user.target

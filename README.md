@@ -8,7 +8,7 @@
 - 🧠 **ИИ-генерация комментариев** через OpenAI API
 - 🔄 **Режим прогрева** для новых аккаунтов (постепенное добавление каналов)
 - ⏰ **Циркадные ритмы** (настраиваемая пауза комментирования через переменные окружения)
-- 💾 **PostgreSQL база данных** для надежного хранения данных
+- 💾 **SQLite база данных** для надежного хранения данных без отдельного сервера
 - 🔐 **Безопасная авторизация** через пароль
 - 📊 **Статистика и мониторинг** работы аккаунтов
 
@@ -41,11 +41,7 @@ pip install -r requirements.txt
 
 ### 4. Настройка базы данных
 
-Установите PostgreSQL и создайте базу данных:
-
-```sql
-CREATE DATABASE commentbot;
-```
+Бот использует файл базы данных SQLite. По умолчанию он создаётся автоматически в каталоге `data/commentbot.db`. Убедитесь, что у приложения есть права на запись в выбранную директорию или измените путь через переменную `DATABASE_URL`.
 
 ### 5. Настройка переменных окружения
 
@@ -63,7 +59,7 @@ API_ID=your_api_id_here
 API_HASH=your_api_hash_here
 OPENAI_API_KEY=your_openai_api_key_here
 PASSWORD=your_secure_password_here
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/commentbot
+DATABASE_URL=sqlite:///data/commentbot.db
 
 # Настройки времени теперь в файле schedule.json
 # Отредактируйте schedule.json под ваши нужды
@@ -141,7 +137,7 @@ python main.py
 ### Основные компоненты
 
 - `main.py` - Основная логика бота и обработчики команд
-- `db.py` - Работа с базой данных PostgreSQL
+- `db.py` - Работа с базой данных SQLite
 - `comment_engine.py` - Генерация комментариев через OpenAI
 - `requirements.txt` - Зависимости Python
 
@@ -192,16 +188,10 @@ docker-compose logs -f
 1. **Установка зависимостей**:
 ```bash
 sudo apt update
-sudo apt install python3 python3-pip postgresql postgresql-contrib git
+sudo apt install python3 python3-pip git
 ```
 
-2. **Настройка PostgreSQL**:
-```bash
-sudo -u postgres createdb commentbot
-sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'your_password';"
-```
-
-3. **Клонирование и настройка**:
+2. **Клонирование и настройка**:
 ```bash
 git clone https://github.com/yourusername/telegram-comment-bot.git
 cd telegram-comment-bot
@@ -210,7 +200,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-4. **Настройка systemd сервиса**:
+3. **Настройка systemd сервиса**:
 ```bash
 sudo cp commentbot.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -268,7 +258,7 @@ sudo journalctl -u commentbot -f
 
 2. **Ошибки подключения к БД**
    - Проверьте `DATABASE_URL` в `.env`
-   - Убедитесь, что PostgreSQL запущен
+   - Убедитесь, что путь указывает на доступный файл SQLite и у процесса есть права на запись
 
 3. **"Account is in warmup mode"**
    - Используйте команду `/fixmode` для переключения в стандартный режим
