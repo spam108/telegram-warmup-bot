@@ -2,6 +2,7 @@ import json
 import os
 import asyncio
 import logging
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, time, timezone, timedelta
 from typing import Dict, List, Optional, Set, Any, Union, Tuple
@@ -1530,14 +1531,29 @@ async def join_channel(
     """
     try:
         # Создаем клиент
-        session_file = os.path.join("sessions", str(user_id), f"{session_key}.session")
+        session_dir = os.path.join("sessions", str(user_id))
+        session_name = os.path.join(session_dir, session_key)
+        session_file = f"{session_name}.session"
+
         if not os.path.exists(session_file):
-            error_message = f"Аккаунт {session_key} - файл сессии не найден: {session_file}"
-            await bot.send_message(log_channel, error_message)
-            return False, error_message
+            session_file_alt = f"{session_file}.session"
+            if os.path.exists(session_file_alt):
+                try:
+                    shutil.copy2(session_file_alt, session_file)
+                except Exception as copy_error:
+                    error_message = (
+                        f"Аккаунт {session_key} - не удалось подготовить файл сессии: "
+                        f"{copy_error}"
+                    )
+                    await bot.send_message(log_channel, error_message)
+                    return False, error_message
+            else:
+                error_message = f"Аккаунт {session_key} - файл сессии не найден: {session_file}"
+                await bot.send_message(log_channel, error_message)
+                return False, error_message
 
         client = Client(
-            name=session_file,
+            name=session_name,
             api_id=API_ID,
             api_hash=API_HASH,
         )
