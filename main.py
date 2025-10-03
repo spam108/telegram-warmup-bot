@@ -101,6 +101,10 @@ class startaccount(StatesGroup):
     regular_channels = State()
     warmup_channels = State()
 
+
+class WarmupManage(StatesGroup):
+    channels = State()
+
 active_sessions: Dict[str, bool] = {}  # Глобальный словарь для хранения активных сессий
 active_account_ids: Dict[str, int] = {}
 quiet_sessions_notified: Set[str] = set()
@@ -302,11 +306,12 @@ async def main_message(message):
         button_status = types.InlineKeyboardButton(text=status_button_text, callback_data=status_button_callback)
         button_delete = types.InlineKeyboardButton(text="Удалить", callback_data=f"del_{call}")
         button_mode = types.InlineKeyboardButton(text="Режим", callback_data=f"mode_{call}")
+        button_warmup = types.InlineKeyboardButton(text="Прогрев", callback_data=f"warmup_{call}")
 
         if is_running:
-            builder.row(button_info, button_status, button_mode)
+            builder.row(button_info, button_status, button_mode, button_warmup)
         else:
-            builder.row(button_info, button_status, button_mode, button_delete)
+            builder.row(button_info, button_status, button_mode, button_warmup, button_delete)
 
 
     builder.row(
@@ -456,7 +461,13 @@ async def process_password(message: types.Message, state: FSMContext):
 
 @dp.callback_query()
 async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
-    call = callback_query.data
+    call = callback_query.data or ""
+
+    try:
+        await callback_query.answer()
+    except Exception as ack_error:
+        logging.debug("Failed to answer callback query: %s", ack_error)
+
     await callback_query.message.delete()
 
     if call == 'add_account':
@@ -468,6 +479,34 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
         await bot.send_message(callback_query.from_user.id, 'Пришлите номер телефона для прогрева\nПример: 79999999999')
         await state.set_state(addsession.number)
         await state.update_data({"warmup_only": True})
+
+
+    elif call.startswith('warmup_'):
+        phone = call.split('_', 1)[1]
+        accounts = await get_accounts_for_user(callback_query.from_user.id)
+        account_row = next((acc for acc in accounts if acc.get('phone') == phone), None)
+
+        if not account_row:
+            await bot.send_message(callback_query.from_user.id, f"Аккаунт {phone} не найден")
+            await main_message(callback_query)
+            return
+
+        account_id = account_row["id"]
+        warmup_channels = await get_warmup_pending(account_id, limit=100)
+        warmup_list = [ch["channel"] for ch in warmup_channels] if warmup_channels else []
+        warmup_display = await format_channels_display(warmup_list, "Очередь прогрева", 10)
+
+        await bot.send_message(callback_query.from_user.id, warmup_display)
+        await bot.send_message(
+            callback_query.from_user.id,
+            "Пришлите новые каналы для прогрева (по одному в строке) или '-' для отключения прогрева.",
+        )
+
+        await state.set_state(WarmupManage.channels)
+        await state.update_data({
+            "manage_account_id": account_id,
+            "manage_account_phone": phone,
+        })
 
 
     elif 'info_' in call:
@@ -1409,6 +1448,58 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
     
     await main_message(message)
     asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Запускаем комментирование
+
+
+@dp.message(WarmupManage.channels)
+async def manage_warmup_channels(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    account_id = data.get("manage_account_id")
+    phone = data.get("manage_account_phone")
+
+    if not account_id:
+        await bot.send_message(message.from_user.id, "Не удалось определить аккаунт для обновления прогрева.")
+        await state.clear()
+        await main_message(message)
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        await bot.send_message(message.from_user.id, "Отправьте список каналов или '-' для отключения прогрева.")
+        return
+
+    try:
+        if text == '-':
+            await sync_warmup_channels(account_id, [])
+            await set_account_mode(account_id, "standard", warmup_days=None)
+            await bot.send_message(message.from_user.id, f"Прогрев для {phone} отключен. Очередь очищена.")
+        else:
+            channels = [line.strip() for line in text.splitlines() if line.strip()]
+            warmup_channels = [chl for chl in channels if not chl.startswith('-')]
+
+            seen: Set[str] = set()
+            warmup_channels = [x for x in warmup_channels if not (x in seen or seen.add(x))]
+
+            if not warmup_channels:
+                await bot.send_message(
+                    message.from_user.id,
+                    "Не удалось распознать каналы. Отправьте каналы по одному в строке или '-' для отключения прогрева.",
+                )
+                return
+
+            await sync_warmup_channels(account_id, warmup_channels)
+            await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
+
+            warmup_display = await format_channels_display(warmup_channels, "Новая очередь прогрева", 10)
+            await bot.send_message(message.from_user.id, warmup_display)
+            await bot.send_message(message.from_user.id, f"Прогрев для {phone} обновлён. Режим активен.")
+
+    except Exception as exc:
+        await bot.send_message(message.from_user.id, f"Не удалось обновить прогрев: {exc}")
+        await bot.send_message(log_channel, f"Ошибка управления прогревом для {phone}: {exc}")
+        return
+
+    await state.clear()
+    await main_message(message)
 
 
 async def safe_send_comments(user_id, phone, account_id):
