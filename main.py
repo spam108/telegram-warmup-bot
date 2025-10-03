@@ -1619,18 +1619,17 @@ async def process_warmup_accounts():
                 await bot.send_message(log_channel, f"Warmup: Processing account {session_key}, active: {active_sessions.get(key)}")
 
                 # Проверяем, не истек ли период прогрева
-                warmup_end = account.get("warmup_end_at")
+                warmup_end = _parse_warmup_datetime(account.get("warmup_end_at"))
                 if warmup_end:
-                    if warmup_end.tzinfo is None:
-                        warmup_end = warmup_end.replace(tzinfo=timezone.utc)
+                    account["warmup_end_at"] = warmup_end
                     if warmup_end <= now:
                         await set_account_mode(account["id"], "standard", warmup_days=None)
                         continue
 
                 # Сбрасываем дневной счетчик если новый день
-                warmup_last_join_at = account.get("warmup_last_join_at")
-                if warmup_last_join_at and warmup_last_join_at.tzinfo is None:
-                    warmup_last_join_at = warmup_last_join_at.replace(tzinfo=timezone.utc)
+                warmup_last_join_at = _parse_warmup_datetime(account.get("warmup_last_join_at"))
+                if warmup_last_join_at:
+                    account["warmup_last_join_at"] = warmup_last_join_at
 
                 if warmup_last_join_at and warmup_last_join_at.date() < now.date():
                     await reset_warmup_daily_state(account["id"])
