@@ -2,8 +2,8 @@ import json
 import os
 import asyncio
 import logging
-from datetime import datetime, time, timezone, timedelta
-from typing import Dict, List, Optional, Set, Any
+from datetime import date, datetime, time, timezone, timedelta
+from typing import Dict, List, Optional, Set, Any, Tuple
 import random
 from pyrogram import Client, filters
 from pyrogram.errors import UserAlreadyParticipant
@@ -176,36 +176,48 @@ def _get_human_delay_seconds() -> int:
     return random.randint(WARMUP_MIN_DELAY_MINUTES * 60, WARMUP_MAX_DELAY_MINUTES * 60)
 
 
-def _next_join_window_start(reference: datetime) -> datetime:
+def _ensure_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _warmup_interval_for_date(day: date) -> Tuple[datetime, datetime]:
     start = datetime.combine(
-        reference.date(),
-        time(WARMUP_SLEEP_START_HOUR, WARMUP_SLEEP_START_MINUTE),
-    ).replace(tzinfo=timezone.utc)
-    if start <= reference:
-        start = datetime.combine(
-            reference.date() + timedelta(days=1),
-            time(WARMUP_SLEEP_START_HOUR, WARMUP_SLEEP_START_MINUTE),
-        ).replace(tzinfo=timezone.utc)
-    return start
+        day,
+        time(WARMUP_SLEEP_START_HOUR, WARMUP_SLEEP_START_MINUTE, tzinfo=timezone.utc),
+    )
+    end = datetime.combine(
+        day,
+        time(WARMUP_SLEEP_END_HOUR, WARMUP_SLEEP_END_MINUTE, tzinfo=timezone.utc),
+    )
+    if end <= start:
+        end += timedelta(days=1)
+    return start, end
 
 
-def _get_next_warmup_join(now: datetime) -> datetime:
-    candidate = now + timedelta(seconds=_get_human_delay_seconds())
-    if is_warmup_join_period(candidate):
-        return candidate
+def plan_next_warmup_join(pointer: datetime, *, earliest: Optional[datetime] = None) -> datetime:
+    pointer = _ensure_aware(pointer)
+    if earliest is not None:
+        earliest = _ensure_aware(earliest)
+        if pointer < earliest:
+            pointer = earliest
 
-    window_start = _next_join_window_start(now)
-    window_end = datetime.combine(
-        window_start.date(),
-        time(WARMUP_SLEEP_END_HOUR, WARMUP_SLEEP_END_MINUTE),
-    ).replace(tzinfo=timezone.utc)
+    while True:
+        window_start, window_end = _warmup_interval_for_date(pointer.date())
 
-    if window_end <= window_start:
-        window_end = window_start + timedelta(hours=1)
+        if pointer < window_start:
+            pointer = window_start
+        elif pointer >= window_end:
+            next_start, _ = _warmup_interval_for_date(window_start.date() + timedelta(days=1))
+            pointer = next_start
+            continue
 
-    available_seconds = max(int((window_end - window_start).total_seconds()), 60)
-    jitter = random.randint(0, available_seconds - 1)
-    return window_start + timedelta(seconds=jitter)
+        candidate = pointer + timedelta(seconds=_get_human_delay_seconds())
+        if candidate < window_end:
+            return candidate
+
+        pointer = window_end
 
 
 def is_quiet_period(now: datetime | None = None) -> bool:
@@ -1059,8 +1071,13 @@ async def process_warmup_accounts():
 
                 if joined_today >= WARMUP_CHANNELS_PER_DAY:
                     await bot.send_message(log_channel, f"Warmup: Account {session_key} reached daily limit, skipping")
-                    next_time = _get_next_warmup_join(_next_join_window_start(now))
+                    next_window_start, _ = _warmup_interval_for_date((now + timedelta(days=1)).date())
+                    next_time = plan_next_warmup_join(now, earliest=next_window_start)
                     await db_update_warmup_schedule(account["id"], next_join=next_time)
+                    await bot.send_message(
+                        log_channel,
+                        f"Warmup: Account {session_key} next join scheduled at {next_time:%Y-%m-%d %H:%M} UTC (daily limit)",
+                    )
                     account["warmup_next_join_at"] = next_time
                     continue
 
@@ -1070,8 +1087,12 @@ async def process_warmup_accounts():
 
                 if not pending_channels:
                     await bot.send_message(log_channel, f"Warmup: Account {session_key} no pending channels, skipping")
-                    next_time = _get_next_warmup_join(now)
+                    next_time = plan_next_warmup_join(now)
                     await db_update_warmup_schedule(account["id"], next_join=next_time)
+                    await bot.send_message(
+                        log_channel,
+                        f"Warmup: Account {session_key} next join scheduled at {next_time:%Y-%m-%d %H:%M} UTC (no pending)",
+                    )
                     account["warmup_next_join_at"] = next_time
                     continue
 
@@ -1095,8 +1116,12 @@ async def process_warmup_accounts():
                     continue
 
                 post_join_now = datetime.now(timezone.utc)
-                next_time = _get_next_warmup_join(post_join_now)
+                next_time = plan_next_warmup_join(post_join_now)
                 await db_update_warmup_schedule(account["id"], next_join=next_time)
+                await bot.send_message(
+                    log_channel,
+                    f"Warmup: Account {session_key} next join scheduled at {next_time:%Y-%m-%d %H:%M} UTC (post join)",
+                )
                 account["warmup_next_join_at"] = next_time
 
         except Exception as e:
