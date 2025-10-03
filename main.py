@@ -139,13 +139,15 @@ QUIET_END_MINUTE = SCHEDULE_CONFIG["quiet_period"]["end_minute"]
 
 WARMUP_CHANNELS_PER_DAY = SCHEDULE_CONFIG["warmup_settings"]["channels_per_day"]
 WARMUP_DELAY_MINUTES = SCHEDULE_CONFIG["warmup_settings"]["delay_minutes"]
-WARMUP_DELAY_SECONDS = WARMUP_DELAY_MINUTES * 60
 WARMUP_SCAN_INTERVAL_SECONDS = 60  # Проверка каждую минуту
 WARMUP_DEFAULT_DAYS = SCHEDULE_CONFIG["warmup_settings"]["default_days"]
 WARMUP_SLEEP_START_HOUR = SCHEDULE_CONFIG["warmup_period"]["start_hour"]
 WARMUP_SLEEP_START_MINUTE = SCHEDULE_CONFIG["warmup_period"]["start_minute"]
 WARMUP_SLEEP_END_HOUR = SCHEDULE_CONFIG["warmup_period"]["end_hour"]
 WARMUP_SLEEP_END_MINUTE = SCHEDULE_CONFIG["warmup_period"]["end_minute"]
+
+WARMUP_MIN_DELAY_MINUTES = max(2, int(WARMUP_DELAY_MINUTES * 0.6))
+WARMUP_MAX_DELAY_MINUTES = max(WARMUP_MIN_DELAY_MINUTES + 1, int(WARMUP_DELAY_MINUTES * 1.8))
 
 # Ограничение одновременных подключений
 MAX_CONCURRENT_ACCOUNTS = 5
@@ -154,6 +156,56 @@ account_semaphore = asyncio.Semaphore(MAX_CONCURRENT_ACCOUNTS)
 
 def make_session_key(user_id: int, phone: str) -> str:
     return f"{user_id}:{phone}"
+
+
+def _parse_warmup_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _get_human_delay_seconds() -> int:
+    return random.randint(WARMUP_MIN_DELAY_MINUTES * 60, WARMUP_MAX_DELAY_MINUTES * 60)
+
+
+def _next_join_window_start(reference: datetime) -> datetime:
+    start = datetime.combine(
+        reference.date(),
+        time(WARMUP_SLEEP_START_HOUR, WARMUP_SLEEP_START_MINUTE),
+    ).replace(tzinfo=timezone.utc)
+    if start <= reference:
+        start = datetime.combine(
+            reference.date() + timedelta(days=1),
+            time(WARMUP_SLEEP_START_HOUR, WARMUP_SLEEP_START_MINUTE),
+        ).replace(tzinfo=timezone.utc)
+    return start
+
+
+def _get_next_warmup_join(now: datetime) -> datetime:
+    candidate = now + timedelta(seconds=_get_human_delay_seconds())
+    if is_warmup_join_period(candidate):
+        return candidate
+
+    window_start = _next_join_window_start(now)
+    window_end = datetime.combine(
+        window_start.date(),
+        time(WARMUP_SLEEP_END_HOUR, WARMUP_SLEEP_END_MINUTE),
+    ).replace(tzinfo=timezone.utc)
+
+    if window_end <= window_start:
+        window_end = window_start + timedelta(hours=1)
+
+    available_seconds = max(int((window_end - window_start).total_seconds()), 60)
+    jitter = random.randint(0, available_seconds - 1)
+    return window_start + timedelta(seconds=jitter)
 
 
 def is_quiet_period(now: datetime | None = None) -> bool:
@@ -962,6 +1014,7 @@ async def process_warmup_accounts():
             
             all_accounts = await get_running_accounts()
             accounts = [acc for acc in all_accounts if acc.get("mode") == "warmup"]
+            random.shuffle(accounts)
             
             await bot.send_message(log_channel, f"Warmup: Found {len(all_accounts)} running accounts, {len(accounts)} in warmup mode")
             await bot.send_message(log_channel, f"Warmup: Active sessions: {list(active_sessions.keys())}")
@@ -996,20 +1049,30 @@ async def process_warmup_accounts():
                     await reset_warmup_daily_state(account["id"])
                     account["warmup_joined_today"] = 0
 
+                next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
+                if next_join_at and next_join_at > now:
+                    continue
+
                 # Проверяем, не достигли ли дневного лимита
                 joined_today = account.get("warmup_joined_today", 0)
                 await bot.send_message(log_channel, f"Warmup: Account {session_key} joined today: {joined_today}/{WARMUP_CHANNELS_PER_DAY}")
-                
+
                 if joined_today >= WARMUP_CHANNELS_PER_DAY:
                     await bot.send_message(log_channel, f"Warmup: Account {session_key} reached daily limit, skipping")
+                    next_time = _get_next_warmup_join(_next_join_window_start(now))
+                    await db_update_warmup_schedule(account["id"], next_join=next_time)
+                    account["warmup_next_join_at"] = next_time
                     continue
 
                 # Получаем следующий канал для добавления
                 pending_channels = await get_warmup_pending(account["id"], limit=1, reset_if_empty=True)
                 await bot.send_message(log_channel, f"Warmup: Account {session_key} pending channels: {len(pending_channels)}")
-                
+
                 if not pending_channels:
                     await bot.send_message(log_channel, f"Warmup: Account {session_key} no pending channels, skipping")
+                    next_time = _get_next_warmup_join(now)
+                    await db_update_warmup_schedule(account["id"], next_join=next_time)
+                    account["warmup_next_join_at"] = next_time
                     continue
 
                 channel_entry = pending_channels[0]
@@ -1025,16 +1088,22 @@ async def process_warmup_accounts():
 
                 # Используем единую функцию для вступления в канал прогрева
                 success = await join_channel(channel, account["id"], session_key, user_id, is_warmup=True)
-                
+
                 if not success:
                     # Если сессия истекла - переключаем в стандартный режим
                     await set_account_mode(account["id"], "standard", warmup_days=None)
+                    continue
+
+                post_join_now = datetime.now(timezone.utc)
+                next_time = _get_next_warmup_join(post_join_now)
+                await db_update_warmup_schedule(account["id"], next_join=next_time)
+                account["warmup_next_join_at"] = next_time
 
         except Exception as e:
             logging.exception("Warmup loop error: %s", e)
 
-        # Ждем 10 минут до следующей попытки
-        await asyncio.sleep(WARMUP_DELAY_SECONDS)
+        # Ждем случайный интервал до следующей попытки, чтобы имитировать живое поведение
+        await asyncio.sleep(_get_human_delay_seconds())
 
 @dp.message(addsession.number)
 async def add_number(message: Message, state: FSMContext) -> None:
