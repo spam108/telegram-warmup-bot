@@ -2,8 +2,8 @@ import json
 import os
 import asyncio
 import logging
-from datetime import datetime, time, timezone, timedelta
-from typing import Dict, List, Optional, Set, Any
+from datetime import date, datetime, time, timezone, timedelta
+from typing import Dict, List, Optional, Set, Any, Tuple
 import random
 from pyrogram import Client, filters
 from pyrogram.errors import UserAlreadyParticipant
@@ -184,6 +184,98 @@ def is_warmup_join_period(now: datetime | None = None) -> bool:
     now = now or datetime.now(timezone.utc)
     # Вступаем в каналы в период прогрева (12:00-19:00 UTC)
     return is_warmup_sleep_period(now)
+
+
+def ensure_aware_datetime(value: Any | None) -> Optional[datetime]:
+    """Приводит значения из БД к timezone-aware datetime в UTC."""
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    return None
+
+
+def _warmup_window_duration() -> timedelta:
+    """Возвращает длительность окна прогрева как timedelta."""
+    start_minutes = WARMUP_SLEEP_START_HOUR * 60 + WARMUP_SLEEP_START_MINUTE
+    end_minutes = WARMUP_SLEEP_END_HOUR * 60 + WARMUP_SLEEP_END_MINUTE
+
+    if end_minutes == start_minutes:
+        minutes = 24 * 60
+    elif end_minutes > start_minutes:
+        minutes = end_minutes - start_minutes
+    else:
+        minutes = (24 * 60 - start_minutes) + end_minutes
+
+    return timedelta(minutes=minutes)
+
+
+def _warmup_interval_for_date(base_date: date, window_duration: timedelta) -> Tuple[datetime, datetime]:
+    start_time = time(WARMUP_SLEEP_START_HOUR, WARMUP_SLEEP_START_MINUTE)
+    start_dt = datetime.combine(base_date, start_time, tzinfo=timezone.utc)
+    end_dt = start_dt + window_duration
+    return start_dt, end_dt
+
+
+def plan_next_warmup_join(reference: datetime, *, earliest: Optional[datetime] = None) -> datetime:
+    """Назначает следующее вступление в канал в пределах доступного окна."""
+
+    window_duration = _warmup_window_duration()
+    reference_dt = ensure_aware_datetime(reference) or datetime.now(timezone.utc)
+    earliest_dt = ensure_aware_datetime(earliest) if earliest else reference_dt
+
+    intervals: List[Tuple[datetime, datetime]] = []
+    for offset in range(-1, 4):
+        start_dt, end_dt = _warmup_interval_for_date((reference_dt + timedelta(days=offset)).date(), window_duration)
+        if end_dt <= earliest_dt:
+            continue
+        intervals.append((start_dt, end_dt))
+
+    if not intervals:
+        intervals.append(
+            _warmup_interval_for_date((reference_dt + timedelta(days=1)).date(), window_duration)
+        )
+
+    intervals.sort(key=lambda pair: pair[0])
+
+    min_gap = timedelta(minutes=2)
+    daily_quota = max(WARMUP_CHANNELS_PER_DAY, 1)
+    base_interval_seconds = max(
+        window_duration.total_seconds() / daily_quota,
+        WARMUP_DELAY_SECONDS,
+        min_gap.total_seconds(),
+    )
+
+    pointer = earliest_dt
+
+    for start_dt, end_dt in intervals:
+        if pointer < start_dt:
+            pointer = start_dt
+        if pointer >= end_dt:
+            continue
+
+        jitter_factor = random.uniform(0.6, 1.4)
+        candidate = pointer + timedelta(seconds=base_interval_seconds * jitter_factor)
+
+        if candidate < pointer + min_gap:
+            candidate = pointer + min_gap
+
+        if candidate <= end_dt:
+            return candidate
+
+        pointer = end_dt + min_gap
+
+    next_start, _ = _warmup_interval_for_date((intervals[-1][0] + timedelta(days=1)).date(), window_duration)
+    return next_start + min_gap
 
 async def check_account(user_id, phone):
     try:
@@ -979,29 +1071,39 @@ async def process_warmup_accounts():
                 await bot.send_message(log_channel, f"Warmup: Processing account {session_key}, active: {active_sessions.get(key)}")
 
                 # Проверяем, не истек ли период прогрева
-                warmup_end = account.get("warmup_end_at")
-                if warmup_end:
-                    if warmup_end.tzinfo is None:
-                        warmup_end = warmup_end.replace(tzinfo=timezone.utc)
-                    if warmup_end <= now:
-                        await set_account_mode(account["id"], "standard", warmup_days=None)
-                        continue
+                warmup_end = ensure_aware_datetime(account.get("warmup_end_at"))
+                if warmup_end and warmup_end <= now:
+                    await set_account_mode(account["id"], "standard", warmup_days=None)
+                    continue
 
                 # Сбрасываем дневной счетчик если новый день
-                warmup_last_join_at = account.get("warmup_last_join_at")
-                if warmup_last_join_at and warmup_last_join_at.tzinfo is None:
-                    warmup_last_join_at = warmup_last_join_at.replace(tzinfo=timezone.utc)
+                warmup_last_join_at = ensure_aware_datetime(account.get("warmup_last_join_at"))
 
                 if warmup_last_join_at and warmup_last_join_at.date() < now.date():
                     await reset_warmup_daily_state(account["id"])
                     account["warmup_joined_today"] = 0
 
+                next_join_at = ensure_aware_datetime(account.get("warmup_next_join_at"))
+                if next_join_at and next_join_at > now:
+                    continue
+
                 # Проверяем, не достигли ли дневного лимита
                 joined_today = account.get("warmup_joined_today", 0)
                 await bot.send_message(log_channel, f"Warmup: Account {session_key} joined today: {joined_today}/{WARMUP_CHANNELS_PER_DAY}")
-                
+
                 if joined_today >= WARMUP_CHANNELS_PER_DAY:
                     await bot.send_message(log_channel, f"Warmup: Account {session_key} reached daily limit, skipping")
+                    future_reference = now + timedelta(days=1)
+                    next_attempt = plan_next_warmup_join(future_reference, earliest=future_reference)
+                    await db_update_warmup_schedule(account["id"], next_join=next_attempt)
+                    account["warmup_next_join_at"] = next_attempt
+                    await bot.send_message(
+                        log_channel,
+                        "Warmup: Account {} scheduled next join at {} UTC after daily limit".format(
+                            session_key,
+                            next_attempt.strftime("%Y-%m-%d %H:%M"),
+                        ),
+                    )
                     continue
 
                 # Получаем следующий канал для добавления
@@ -1029,6 +1131,23 @@ async def process_warmup_accounts():
                 if not success:
                     # Если сессия истекла - переключаем в стандартный режим
                     await set_account_mode(account["id"], "standard", warmup_days=None)
+                    continue
+
+                join_timestamp = datetime.now(timezone.utc)
+                next_attempt = plan_next_warmup_join(join_timestamp, earliest=join_timestamp)
+                await db_update_warmup_schedule(
+                    account["id"],
+                    next_join=next_attempt,
+                    last_join=join_timestamp,
+                )
+                account["warmup_next_join_at"] = next_attempt
+                await bot.send_message(
+                    log_channel,
+                    "Warmup: Account {} scheduled next join at {} UTC".format(
+                        session_key,
+                        next_attempt.strftime("%Y-%m-%d %H:%M"),
+                    ),
+                )
 
         except Exception as e:
             logging.exception("Warmup loop error: %s", e)
@@ -1197,10 +1316,10 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
         if existing_warmup:
             # Есть каналы в прогреве - запускаем в режиме прогрева
             await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
-            # Планируем следующее вступление в период сна (4:00-6:00)
+            # Планируем следующее вступление с учетом актуального окна
             now = datetime.now(timezone.utc)
-            tomorrow_4_30am = now.replace(hour=4, minute=30, second=0, microsecond=0) + timedelta(days=1)
-            await db_update_warmup_schedule(account_id, next_join=tomorrow_4_30am)
+            next_attempt = plan_next_warmup_join(now, earliest=now + timedelta(minutes=5))
+            await db_update_warmup_schedule(account_id, next_join=next_attempt)
             
             # Запускаем аккаунт в режиме прогрева (С комментированием + прогрев)
             key = make_session_key(message.from_user.id, session)
@@ -1260,10 +1379,10 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
         if existing_warmup:
             # Есть каналы в прогреве - запускаем в режиме прогрева
             await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
-            # Планируем следующее вступление в период сна (4:00-6:00)
+            # Планируем следующее вступление с учетом актуального окна
             now = datetime.now(timezone.utc)
-            tomorrow_4_30am = now.replace(hour=4, minute=30, second=0, microsecond=0) + timedelta(days=1)
-            await db_update_warmup_schedule(account_id, next_join=tomorrow_4_30am)
+            next_attempt = plan_next_warmup_join(now, earliest=now + timedelta(minutes=5))
+            await db_update_warmup_schedule(account_id, next_join=next_attempt)
             
             # Запускаем аккаунт в режиме прогрева (С комментированием + прогрев)
             key = make_session_key(message.from_user.id, session)
@@ -1312,10 +1431,10 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
     try:
         await sync_warmup_channels(account_id, warmup_channels)
         await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
-        # Планируем следующее вступление в период сна (4:00-6:00)
+        # Планируем следующее вступление с учетом актуального окна
         now = datetime.now(timezone.utc)
-        tomorrow_4_30am = now.replace(hour=4, minute=30, second=0, microsecond=0) + timedelta(days=1)
-        await db_update_warmup_schedule(account_id, next_join=tomorrow_4_30am)
+        next_attempt = plan_next_warmup_join(now, earliest=now + timedelta(minutes=5))
+        await db_update_warmup_schedule(account_id, next_join=next_attempt)
     except Exception as e:
         await bot.send_message(log_channel, f"Ошибка при сохранении каналов прогрева для {session}: {e}")
         await bot.send_message(message.from_user.id, f"Ошибка при сохранении каналов прогрева: {e}")
