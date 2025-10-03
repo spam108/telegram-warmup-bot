@@ -555,7 +555,16 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
 
                 # Все аккаунты проходят через диалог настройки
                 await state.update_data({"account": session, "account_id": account_row["id"]})
-                await bot.send_message(callback_query.from_user.id, 'Пришлите шанс комментирования\nПример: 50')
+                current_chance = account_row.get("chance")
+                chance_hint = (
+                    f"Текущий шанс комментирования: {current_chance}%"
+                    if current_chance is not None
+                    else "Текущий шанс комментирования: не задан"
+                )
+                await bot.send_message(
+                    callback_query.from_user.id,
+                    f"{chance_hint}. Отправьте новое значение или \"-\".",
+                )
                 await state.set_state(startaccount.chance)
             except Exception as e:
                 await bot.send_message(callback_query.from_user.id, f"Ошибка: {str(e)}")
@@ -698,42 +707,130 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
 
 @dp.message(startaccount.chance)
 async def add_chance(message: Message, state: FSMContext) -> None:
-    if str(message.text).isdigit():
-        await state.update_data({"chance": int(message.text)})
-        await bot.send_message(message.from_user.id, 'Пришлите системный промт:')
-        await state.set_state(startaccount.systempromt)
+    data = await state.get_data()
+    account_id = data.get("account_id")
+    if not account_id:
+        await message.answer("Ошибка: аккаунт не найден. Попробуйте снова.")
+        await state.clear()
+        await main_message(message)
+        return
+
+    account = await get_account_by_id(account_id)
+    current_chance = account.get("chance") if account else None
+    current_prompt = account.get("system_prompt") if account else None
+
+    text = str(message.text).strip()
+
+    if text == "-":
+        await state.update_data({"chance": current_chance})
+    elif text.isdigit():
+        await state.update_data({"chance": int(text)})
+    else:
+        chance_hint = (
+            f"Текущий шанс комментирования: {current_chance}%"
+            if current_chance is not None
+            else "Текущий шанс комментирования: не задан"
+        )
+        await bot.send_message(
+            message.from_user.id,
+            f"{chance_hint}. Отправьте новое значение или \"-\".",
+        )
+        return
+
+    prompt_hint = (
+        f"Текущий системный промт: {current_prompt}"
+        if current_prompt
+        else "Текущий системный промт: не задан"
+    )
+    await bot.send_message(
+        message.from_user.id,
+        f"{prompt_hint}. Отправьте новый текст или \"-\".",
+    )
+    await state.set_state(startaccount.systempromt)
         
 
 
 @dp.message(startaccount.systempromt)
 async def add_systempromt(message: Message, state: FSMContext) -> None:
-    await state.update_data({"systempromt": str(message.text)})
-    await bot.send_message(message.from_user.id, 'Отправьте задержку для аккаунта перед отправлением комментария\nПример: 10-20')
+    data = await state.get_data()
+    account_id = data.get("account_id")
+    if not account_id:
+        await message.answer("Ошибка: аккаунт не найден. Попробуйте снова.")
+        await state.clear()
+        await main_message(message)
+        return
+
+    account = await get_account_by_id(account_id)
+    current_prompt = account.get("system_prompt") if account else None
+    sleep_min = account.get("sleep_min") if account else None
+    sleep_max = account.get("sleep_max") if account else None
+
+    text = str(message.text)
+    if text.strip() == "-":
+        await state.update_data({"systempromt": current_prompt})
+    else:
+        await state.update_data({"systempromt": text})
+
+    if sleep_min is not None and sleep_max is not None:
+        sleep_hint = f"Текущая задержка: {sleep_min}-{sleep_max}"
+    else:
+        sleep_hint = "Текущая задержка: не задана"
+
+    await bot.send_message(
+        message.from_user.id,
+        f"{sleep_hint}. Отправьте новое значение в формате min-max или \"-\".",
+    )
     await state.set_state(startaccount.sleeps)
 
 
 
 @dp.message(startaccount.sleeps)
 async def add_sleeps(message: Message, state: FSMContext) -> None:
-    print(f"DEBUG: add_sleeps called with message: {message.text}")
-    await bot.send_message(log_channel, f"DEBUG: add_sleeps called with message: {message.text}")
-
-    if '-' in str(message.text):
-        try:
-            sleeps = str(message.text).split('-')
-            if len(sleeps) == 2 and all(sleep.isdigit() for sleep in sleeps):
-                await state.update_data({"sleeps": message.text})
-                print(f"DEBUG: sleeps saved to state: {message.text}")
-                await bot.send_message(log_channel, f"DEBUG: sleeps saved to state: {message.text}")
-            else:
-                await bot.send_message(message.from_user.id, "Неверный формат. Используйте формат: 10-20")
-                return
-        except Exception as e:
-            await bot.send_message(message.from_user.id, f"Ошибка: {str(e)}")
-            return
-    else:
-        await bot.send_message(message.from_user.id, "Неверный формат. Используйте формат: 10-20")
+    data = await state.get_data()
+    account_id = data.get("account_id")
+    if not account_id:
+        await message.answer("Ошибка: аккаунт не найден. Попробуйте снова.")
+        await state.clear()
+        await main_message(message)
         return
+
+    account = await get_account_by_id(account_id)
+    current_sleep_min = account.get("sleep_min") if account else None
+    current_sleep_max = account.get("sleep_max") if account else None
+
+    text = str(message.text).strip()
+    if text == "-":
+        if current_sleep_min is not None and current_sleep_max is not None:
+            await state.update_data({"sleeps": (current_sleep_min, current_sleep_max)})
+        else:
+            await state.update_data({"sleeps": None})
+    else:
+        if "-" in text:
+            parts = [part.strip() for part in text.split("-")]
+            if len(parts) == 2 and all(part.isdigit() for part in parts):
+                await state.update_data({"sleeps": (int(parts[0]), int(parts[1]))})
+            else:
+                hint = (
+                    f"Текущая задержка: {current_sleep_min}-{current_sleep_max}"
+                    if current_sleep_min is not None and current_sleep_max is not None
+                    else "Текущая задержка: не задана"
+                )
+                await bot.send_message(
+                    message.from_user.id,
+                    f"{hint}. Используйте формат: 10-20 или \"-\".",
+                )
+                return
+        else:
+            hint = (
+                f"Текущая задержка: {current_sleep_min}-{current_sleep_max}"
+                if current_sleep_min is not None and current_sleep_max is not None
+                else "Текущая задержка: не задана"
+            )
+            await bot.send_message(
+                message.from_user.id,
+                f"{hint}. Используйте формат: 10-20 или \"-\".",
+            )
+            return
 
     session = (await state.get_data()).get("account")
 
@@ -1184,18 +1281,48 @@ async def add_code(message: Message, state: FSMContext) -> None:
 @dp.message(startaccount.regular_channels)
 async def add_regular_channels(message: Message, state: FSMContext) -> None:
     """Обработчик для обычных каналов (немедленное вступление)"""
-    session = (await state.get_data()).get("account")
-    account_id = (await state.get_data()).get("account_id")
-    
+    data = await state.get_data()
+    session = data.get("account")
+    account_id = data.get("account_id")
+    chance = data.get("chance")
+    system_prompt_value = data.get("systempromt")
+    sleeps = data.get("sleeps")
+
     if not account_id:
         await bot.send_message(message.from_user.id, "Ошибка: аккаунт не найден. Попробуйте снова.")
         await state.clear()
         await main_message(message)
         return
-    
+
+    sleep_min: Optional[int] = None
+    sleep_max: Optional[int] = None
+    if isinstance(sleeps, (tuple, list)) and len(sleeps) == 2:
+        try:
+            sleep_min, sleep_max = int(sleeps[0]), int(sleeps[1])
+        except (TypeError, ValueError):
+            sleep_min = sleep_max = None
+    elif isinstance(sleeps, str) and "-" in sleeps:
+        parts = [part.strip() for part in sleeps.split("-")]
+        if len(parts) == 2 and all(part.isdigit() for part in parts):
+            sleep_min, sleep_max = int(parts[0]), int(parts[1])
+
+    chance_value = None
+    if isinstance(chance, int):
+        chance_value = chance
+    elif isinstance(chance, str) and chance.isdigit():
+        chance_value = int(chance)
+
+    await update_account_settings(
+        account_id,
+        chance=chance_value,
+        system_prompt=system_prompt_value,
+        sleep_min=sleep_min,
+        sleep_max=sleep_max,
+    )
+
     if str(message.text) != '-':
         channels = [line.strip() for line in message.text.splitlines() if line.strip()]
-        
+
         # Вступаем в обычные каналы сразу
         for channel in channels:
             await join_channel(channel, account_id, session, message.from_user.id, is_warmup=False)
@@ -1233,31 +1360,6 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
     
     # Помечаем как обработанное, чтобы избежать повторных вызовов
     await state.update_data({"warmup_processed": True})
-
-    # Сохраняем все настройки аккаунта в базу данных
-    sleeps = (await state.get_data()).get("sleeps")
-    system_promt = (await state.get_data()).get("systempromt")
-    chance = (await state.get_data()).get("chance")
-    
-    # Парсим sleeps
-    sleep_min, sleep_max = None, None
-    if sleeps and '-' in sleeps:
-        try:
-            sleep_parts = sleeps.split('-')
-            if len(sleep_parts) == 2:
-                sleep_min = int(sleep_parts[0])
-                sleep_max = int(sleep_parts[1])
-        except ValueError:
-            pass
-    
-    # Сохраняем все настройки
-    await update_account_settings(
-        account_id=account_id,
-        chance=chance,
-        system_prompt=system_promt,
-        sleep_min=sleep_min,
-        sleep_max=sleep_max
-    )
 
     if str(message.text) == '-':
         # Проверяем, есть ли уже каналы в прогреве
