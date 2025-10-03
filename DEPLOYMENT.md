@@ -42,7 +42,7 @@ API_ID=your_api_id
 API_HASH=your_api_hash
 OPENAI_API_KEY=your_openai_key
 PASSWORD=your_admin_password
-DATABASE_URL=sqlite:///data/commentbot.db
+DATABASE_URL=sqlite:///data/CDXBOT0310.db
 LOG_CHANNEL_ID=your_log_channel_id
 ```
 
@@ -125,7 +125,7 @@ docker-compose logs -f bot     # View bot logs
 ### Check bot status
 ```bash
 # Traditional
-sudo systemctl status commentbot
+sudo systemctl status CDXBOT0310
 
 # Docker
 docker-compose ps
@@ -134,7 +134,7 @@ docker-compose ps
 ### View logs
 ```bash
 # Traditional
-sudo journalctl -u commentbot -f
+sudo journalctl -u CDXBOT0310 -f
 
 # Docker
 docker-compose logs -f
@@ -143,10 +143,10 @@ docker-compose logs -f
 ### Check database
 ```bash
 # Traditional
-sqlite3 data/commentbot.db ".tables"
+sqlite3 data/CDXBOT0310.db ".tables"
 
 # Docker
-docker-compose exec bot sqlite3 data/commentbot.db ".tables"
+docker-compose exec bot sqlite3 data/CDXBOT0310.db ".tables"
 ```
 
 ## 🔒 Security Considerations
@@ -180,7 +180,7 @@ htop
 df -h
 
 # Database size
-du -h data/commentbot.db
+du -h data/CDXBOT0310.db
 ```
 
 ## 🔄 Updates and Maintenance
@@ -198,7 +198,7 @@ docker-compose up -d --build
 ### Backup data:
 ```bash
 # Backup database
-cp data/commentbot.db backups/commentbot_$(date +%Y%m%d).db
+cp data/CDXBOT0310.db backups/CDXBOT0310_$(date +%Y%m%d).db
 
 # Backup sessions
 tar -czf sessions_backup_$(date +%Y%m%d).tar.gz sessions/

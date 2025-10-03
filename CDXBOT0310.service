@@ -14,7 +14,7 @@ RestartSec=10
 # Логирование
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=commentbot
+SyslogIdentifier=CDXBOT0310
 
 # Безопасность
 NoNewPrivileges=true

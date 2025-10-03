@@ -3,9 +3,9 @@ version: '3.8'
 services:
   bot:
     build: .
-    container_name: commentbot
+    container_name: CDXBOT0310
     environment:
-      - DATABASE_URL=sqlite:///data/commentbot.db
+      - DATABASE_URL=sqlite:///data/CDXBOT0310.db
     env_file:
       - .env
     volumes:

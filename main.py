@@ -64,7 +64,7 @@ def load_env_file():
 env_vars = load_env_file()
 BOT_TOKEN = env_vars.get("BOT_TOKEN") or os.getenv("BOT_TOKEN")
 print(f"BOT_TOKEN loaded: {BOT_TOKEN}")
-#APcommentbot @AP_comment_bot
+#APCDXBOT0310 @AP_comment_bot
 log_channel = -1003123025616 # cloveend #-1002711973256 #-1002678984799
 
 API_ID = int(env_vars.get("API_ID") or os.getenv("API_ID"))
