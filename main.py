@@ -1789,12 +1789,17 @@ async def add_code(message: Message, state: FSMContext) -> None:
 @dp.message(startaccount.regular_channels)
 async def add_regular_channels(message: Message, state: FSMContext) -> None:
     """Обработчик для обычных каналов (немедленное вступление)"""
-    data = await state.get_data()
-    session = data.get("account")
-    account_id = data.get("account_id")
-    chance = data.get("chance")
-    system_prompt_value = data.get("systempromt")
-    sleeps = data.get("sleeps")
+    data, account_id, account = await _load_account_data(state)
+    session = data.get("account") if data else None
+    chance = data.get("chance") if data else None
+    system_prompt_value = data.get("systempromt") if data else None
+    sleeps = data.get("sleeps") if data else None
+
+    existing_channels_raw = []
+    if account and isinstance(account, dict):
+        stored_channels = account.get("channels")
+        if isinstance(stored_channels, list):
+            existing_channels_raw = [channel for channel in stored_channels if isinstance(channel, str)]
 
     if not account_id:
         await bot.send_message(message.from_user.id, "Ошибка: аккаунт не найден. Попробуйте снова.")
@@ -1828,7 +1833,29 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
 
         # Обновляем список обычных каналов в БД только успешными каналами
         if successful_channels:
-            channels_to_update = successful_channels
+            def _merge_channels(
+                existing: List[str], new: List[str]
+            ) -> Tuple[List[str], bool]:
+                seen: Set[str] = set()
+                merged_list: List[str] = []
+
+                for item in existing:
+                    if item not in seen:
+                        merged_list.append(item)
+                        seen.add(item)
+
+                added = False
+                for item in new:
+                    if item not in seen:
+                        merged_list.append(item)
+                        seen.add(item)
+                        added = True
+
+                return merged_list, added
+
+            merged_channels, has_new_channels = _merge_channels(existing_channels_raw, successful_channels)
+            if has_new_channels:
+                channels_to_update = merged_channels
     else:
         channels = []
 

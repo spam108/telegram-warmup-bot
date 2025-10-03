@@ -1,8 +1,7 @@
+import asyncio
 import os
 import types
 from typing import Any, Dict
-
-import pytest
 
 os.environ.setdefault("API_ID", "1")
 os.environ.setdefault("API_HASH", "test")
@@ -36,8 +35,7 @@ class DummyMessage:
         self.from_user = types.SimpleNamespace(id=user_id)
 
 
-@pytest.mark.asyncio
-async def test_add_regular_channels_success_and_failure(monkeypatch):
+def test_add_regular_channels_success_and_failure(monkeypatch):
     state_data = {
         "account": "test_session",
         "account_id": 123,
@@ -65,16 +63,20 @@ async def test_add_regular_channels_success_and_failure(monkeypatch):
         captured_update["account_id"] = account_id
         captured_update["kwargs"] = kwargs
 
+    async def fake_load_account_data(dummy_state):
+        return state_data, state_data["account_id"], {"channels": ["@existing"]}
+
     monkeypatch.setattr(main, "bot", DummyBot())
     monkeypatch.setattr(main, "log_channel", 999)
     monkeypatch.setattr(main, "join_channel", fake_join_channel)
     monkeypatch.setattr(main, "update_account_settings", fake_update_account_settings)
     monkeypatch.setattr(main, "startaccount", types.SimpleNamespace(warmup_channels="warmup_state"))
+    monkeypatch.setattr(main, "_load_account_data", fake_load_account_data)
 
-    await main.add_regular_channels(message, state)
+    asyncio.run(main.add_regular_channels(message, state))
 
     assert captured_update["account_id"] == 123
-    assert captured_update["kwargs"]["channels"] == ["@good"]
+    assert captured_update["kwargs"]["channels"] == ["@existing", "@good"]
     assert captured_update["kwargs"]["chance"] == 25
     assert captured_update["kwargs"]["system_prompt"] == "Test prompt"
     assert captured_update["kwargs"]["sleep_min"] == 5
