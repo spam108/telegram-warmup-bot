@@ -2038,12 +2038,49 @@ async def format_channels_display(channels, title="Каналы", max_display=10
     """Унифицированное отображение списка каналов"""
     if not channels:
         return f"{title}: нет"
-    
+
     if len(channels) <= max_display:
         return f"{title} ({len(channels)}):\n" + '\n'.join(channels)
     else:
         displayed = channels[:max_display]
         return f"{title} ({len(channels)}):\n" + '\n'.join(displayed) + f"\n... и еще {len(channels) - max_display} каналов"
+
+
+def escape_markdown_text(text: str) -> str:
+    """Экранирует спецсимволы для Telegram Markdown."""
+    if not text:
+        return ""
+
+    replacements = {
+        "\\": "\\\\",
+        "_": "\\_",
+        "*": "\\*",
+        "`": "\\`",
+        "[": "\\[",
+        "]": "\\]",
+    }
+
+    escaped = text
+    for symbol, replacement in replacements.items():
+        escaped = escaped.replace(symbol, replacement)
+
+    return escaped
+
+
+def build_prompt_preview(prompt: Optional[str], max_length: int = 200) -> Tuple[str, bool]:
+    """Возвращает укороченный текст промта и флаг, был ли он обрезан."""
+    if not prompt:
+        return "Не задан", False
+
+    normalized = str(prompt).strip()
+    if not normalized:
+        return "Не задан", False
+
+    if len(normalized) <= max_length:
+        return normalized, False
+
+    preview = normalized[:max_length].rstrip()
+    return f"{preview}...", True
 
 async def get_account_summary(account_id):
     """Получает полное резюме аккаунта из базы данных"""
@@ -2078,6 +2115,19 @@ async def get_account_summary(account_id):
     warmup_channels = await get_warmup_pending(account_id, limit=100)
     warmup_list = [ch["channel"] for ch in warmup_channels] if warmup_channels else []
     
+    # Формируем превью системного промта
+    PROMPT_PREVIEW_LIMIT = 200
+    prompt_preview, was_truncated = build_prompt_preview(account.get('system_prompt'), PROMPT_PREVIEW_LIMIT)
+    if prompt_preview == "Не задан":
+        prompt_block = "Промпт не задан."
+    else:
+        notice = (
+            f"Показана сокращённая версия промта (первые {PROMPT_PREVIEW_LIMIT} символов)."
+            if was_truncated
+            else "Показана сокращённая версия промта (полный текст помещается в лимит)."
+        )
+        prompt_block = f"{notice}\n{escape_markdown_text(prompt_preview)}"
+
     # Формируем резюме
     summary = f"""
 📊 **Резюме аккаунта {account.get('phone', 'N/A')}**
@@ -2088,8 +2138,8 @@ async def get_account_summary(account_id):
 • Режим: {account.get('mode', 'N/A')}
 • Статус: {account.get('status', 'N/A')}
 
-📝 **Системный промпт:**
-{account.get('system_prompt', 'Не задан')}
+📝 **Системный промпт (превью):**
+{prompt_block}
 
 📺 **Реальные подписки ({len(real_channels)}):**
 {await format_channels_display(real_channels, "Подписки", 10)}
