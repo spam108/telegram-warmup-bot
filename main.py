@@ -1195,13 +1195,39 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
     
     if str(message.text) != '-':
         channels = [line.strip() for line in message.text.splitlines() if line.strip()]
-        
+
+        successful_channels: List[str] = []
+        failed_channels: List[str] = []
+
         # Вступаем в обычные каналы сразу
         for channel in channels:
-            await join_channel(channel, account_id, session, message.from_user.id, is_warmup=False)
-        
-        # Обновляем список обычных каналов в БД
-        await update_account_settings(account_id, channels=channels)
+            joined = await join_channel(channel, account_id, session, message.from_user.id, is_warmup=False)
+            if joined:
+                successful_channels.append(channel)
+            else:
+                failed_channels.append(channel)
+
+        if failed_channels:
+            failed_list = "\n".join(failed_channels)
+            await bot.send_message(
+                message.from_user.id,
+                "Не удалось вступить в следующие каналы:\n" f"{failed_list}"
+            )
+
+        if successful_channels:
+            # Обновляем список обычных каналов в БД только успешными каналами
+            await update_account_settings(account_id, channels=successful_channels)
+            successful_display = await format_channels_display(
+                successful_channels,
+                "Успешно добавленные каналы",
+                10,
+            )
+            await bot.send_message(message.from_user.id, successful_display)
+        else:
+            await bot.send_message(
+                message.from_user.id,
+                "Не удалось вступить ни в один из указанных каналов. Список подписок не изменён."
+            )
     
     # Переходим к диалогу каналов прогрева
     await bot.send_message(message.from_user.id, 'Теперь пришлите каналы для прогрева (каждый канал с новой строки). Для отмены отправьте "-".')
