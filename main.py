@@ -122,25 +122,34 @@ quiet_sessions_notified: Set[str] = set()
 # Функция для загрузки настроек расписания
 def load_schedule_config():
     """Загружает настройки расписания из schedule.json"""
+
+    default_config = {
+        "quiet_period": {"start_hour": 8, "start_minute": 0, "end_hour": 20, "end_minute": 0},
+        "warmup_period": {"start_hour": 12, "start_minute": 0, "end_hour": 19, "end_minute": 0},
+        # Значения по умолчанию используются как резерв, реальные настройки читаются из БД
+        "warmup_settings": {"channels_per_day": 15, "delay_minutes": 7, "default_days": 7},
+    }
+
     try:
         with open('schedule.json', 'r', encoding='utf-8') as f:
-            config = json.load(f)
-        return config
+            file_config = json.load(f)
     except FileNotFoundError:
-        # Если файл не найден, используем значения по умолчанию
-        return {
-            "quiet_period": {"start_hour": 8, "start_minute": 0, "end_hour": 20, "end_minute": 0},
-            "warmup_period": {"start_hour": 12, "start_minute": 0, "end_hour": 19, "end_minute": 0},
-            "warmup_settings": {"channels_per_day": 15, "delay_minutes": 7, "default_days": 7}
-        }
+        return default_config
     except Exception as e:
         print(f"Ошибка загрузки schedule.json: {e}")
-        # Используем значения по умолчанию
-        return {
-            "quiet_period": {"start_hour": 8, "start_minute": 0, "end_hour": 20, "end_minute": 0},
-            "warmup_period": {"start_hour": 12, "start_minute": 0, "end_hour": 19, "end_minute": 0},
-            "warmup_settings": {"channels_per_day": 15, "delay_minutes": 7, "default_days": 7}
-        }
+        return default_config
+
+    if not isinstance(file_config, dict):
+        return default_config
+
+    merged = default_config.copy()
+    merged.update({k: v for k, v in file_config.items() if k in ("quiet_period", "warmup_period", "warmup_settings")})
+
+    warmup_defaults = merged.setdefault("warmup_settings", {})
+    for key, value in default_config["warmup_settings"].items():
+        warmup_defaults.setdefault(key, value)
+
+    return merged
 
 # Загружаем настройки расписания
 SCHEDULE_CONFIG = load_schedule_config()
@@ -204,6 +213,8 @@ DEFAULT_WARMUP_SETTINGS = WarmupSettingsData(
 )
 
 _current_warmup_settings: WarmupSettingsData = DEFAULT_WARMUP_SETTINGS
+_last_settings_refresh: Optional[datetime] = None
+WARMUP_SETTINGS_REFRESH_INTERVAL_SECONDS = 60
 
 
 def get_current_warmup_settings() -> WarmupSettingsData:
@@ -261,7 +272,24 @@ def _parse_window_input(value: str) -> Optional[tuple[tuple[int, int], tuple[int
 async def refresh_warmup_settings_from_db() -> WarmupSettingsData:
     settings = _make_warmup_settings(await get_warmup_settings())
     _set_current_warmup_settings(settings)
+    global _last_settings_refresh
+    _last_settings_refresh = datetime.now(timezone.utc)
     return settings
+
+
+async def ensure_latest_warmup_settings(force: bool = False) -> WarmupSettingsData:
+    """Периодически обновляет кеш настроек прогрева из БД."""
+
+    global _last_settings_refresh
+    now = datetime.now(timezone.utc)
+    if (
+        force
+        or _last_settings_refresh is None
+        or (now - _last_settings_refresh).total_seconds() >= WARMUP_SETTINGS_REFRESH_INTERVAL_SECONDS
+    ):
+        return await refresh_warmup_settings_from_db()
+
+    return get_current_warmup_settings()
 
 
 # Ограничение одновременных подключений
@@ -287,14 +315,14 @@ def _parse_warmup_datetime(value: Any) -> Optional[datetime]:
     return None
 
 
-def _get_human_delay_seconds() -> int:
-    settings = get_current_warmup_settings()
+def _get_human_delay_seconds(settings: Optional[WarmupSettingsData] = None) -> int:
+    settings = settings or get_current_warmup_settings()
     min_delay, max_delay = _get_delay_bounds(settings)
     return random.randint(min_delay * 60, max_delay * 60)
 
 
-def _next_join_window_start(reference: datetime) -> datetime:
-    settings = get_current_warmup_settings()
+def _next_join_window_start(reference: datetime, settings: Optional[WarmupSettingsData] = None) -> datetime:
+    settings = settings or get_current_warmup_settings()
     start_time = settings.window_start
     start = datetime.combine(reference.date(), start_time).replace(tzinfo=timezone.utc)
     if start <= reference:
@@ -305,13 +333,13 @@ def _next_join_window_start(reference: datetime) -> datetime:
     return start
 
 
-def _get_next_warmup_join(now: datetime) -> datetime:
-    candidate = now + timedelta(seconds=_get_human_delay_seconds())
+def _get_next_warmup_join(now: datetime, settings: Optional[WarmupSettingsData] = None) -> datetime:
+    settings = settings or get_current_warmup_settings()
+    candidate = now + timedelta(seconds=_get_human_delay_seconds(settings))
     if is_warmup_join_period(candidate):
         return candidate
 
-    window_start = _next_join_window_start(now)
-    settings = get_current_warmup_settings()
+    window_start = _next_join_window_start(now, settings)
     end_time = settings.window_end
     window_end = datetime.combine(window_start.date(), end_time).replace(tzinfo=timezone.utc)
     if settings.spans_midnight and window_end <= window_start:
@@ -485,11 +513,12 @@ async def show_account_summary(message: types.Message, state: FSMContext):
 async def test_warmup_command(message: Message) -> None:
     """Команда для тестирования режима прогрева"""
     try:
+        settings = await ensure_latest_warmup_settings()
         now = datetime.now(timezone.utc)
         is_quiet = is_quiet_period(now)
         is_warmup_join = is_warmup_join_period(now)
         is_warmup_sleep = is_warmup_sleep_period(now)
-        warmup_window = get_current_warmup_settings().format_window()
+        warmup_window = settings.format_window()
 
         text = f"""🕐 Текущее время UTC: {now.strftime('%H:%M:%S')}
 
@@ -1490,10 +1519,11 @@ async def join_channel(channel: str, account_id: int, session_key: str, user_id:
 async def process_warmup_accounts():
     """Фоновая задача для добавления каналов в режиме прогрева (во время сна)"""
     while True:
+        current_settings = get_current_warmup_settings()
         try:
+            current_settings = await ensure_latest_warmup_settings()
             now = datetime.now(timezone.utc)
             is_warmup_join_time = is_warmup_join_period(now)
-            current_settings = get_current_warmup_settings()
             daily_limit = current_settings.channels_per_day
             
             # Логируем каждые 10 минут для отладки
@@ -1552,7 +1582,7 @@ async def process_warmup_accounts():
 
                 if joined_today >= daily_limit:
                     await bot.send_message(log_channel, f"Warmup: Account {session_key} reached daily limit, skipping")
-                    next_time = _get_next_warmup_join(_next_join_window_start(now))
+                    next_time = _get_next_warmup_join(_next_join_window_start(now, current_settings), current_settings)
                     await db_update_warmup_schedule(account["id"], next_join=next_time)
                     account["warmup_next_join_at"] = next_time
                     continue
@@ -1563,7 +1593,7 @@ async def process_warmup_accounts():
 
                 if not pending_channels:
                     await bot.send_message(log_channel, f"Warmup: Account {session_key} no pending channels, skipping")
-                    next_time = _get_next_warmup_join(now)
+                    next_time = _get_next_warmup_join(now, current_settings)
                     await db_update_warmup_schedule(account["id"], next_join=next_time)
                     account["warmup_next_join_at"] = next_time
                     continue
@@ -1588,7 +1618,7 @@ async def process_warmup_accounts():
                     continue
 
                 post_join_now = datetime.now(timezone.utc)
-                next_time = _get_next_warmup_join(post_join_now)
+                next_time = _get_next_warmup_join(post_join_now, current_settings)
                 await db_update_warmup_schedule(account["id"], next_join=next_time)
                 account["warmup_next_join_at"] = next_time
 
@@ -1596,7 +1626,7 @@ async def process_warmup_accounts():
             logging.exception("Warmup loop error: %s", e)
 
         # Ждем случайный интервал до следующей попытки, чтобы имитировать живое поведение
-        await asyncio.sleep(_get_human_delay_seconds())
+        await asyncio.sleep(_get_human_delay_seconds(current_settings))
 
 @dp.message(addsession.number)
 async def add_number(message: Message, state: FSMContext) -> None:
@@ -2023,7 +2053,7 @@ async def main():
                 join_end_hour=DEFAULT_WARMUP_SETTINGS.join_end_hour,
                 join_end_minute=DEFAULT_WARMUP_SETTINGS.join_end_minute,
             )
-            await refresh_warmup_settings_from_db()
+            await ensure_latest_warmup_settings(force=True)
             log_file.write("Database initialized successfully\n")
             log_file.flush()
             
