@@ -111,6 +111,10 @@ class warmupsettings(StatesGroup):
     window = State()
     interval = State()
 
+
+class warmupmanage(StatesGroup):
+    channels = State()
+
 active_sessions: Dict[str, bool] = {}  # Глобальный словарь для хранения активных сессий
 active_account_ids: Dict[str, int] = {}
 quiet_sessions_notified: Set[str] = set()
@@ -416,11 +420,13 @@ async def main_message(message):
         button_status = types.InlineKeyboardButton(text=status_button_text, callback_data=status_button_callback)
         button_delete = types.InlineKeyboardButton(text="Удалить", callback_data=f"del_{call}")
         button_mode = types.InlineKeyboardButton(text="Режим", callback_data=f"mode_{call}")
+        button_warmup = types.InlineKeyboardButton(text="Прогрев", callback_data=f"warmup_{call}")
 
         if is_running:
-            builder.row(button_info, button_status, button_mode)
+            builder.row(button_info, button_status, button_mode, button_warmup)
         else:
-            builder.row(button_info, button_status, button_mode, button_delete)
+            builder.row(button_info, button_status, button_mode, button_warmup)
+            builder.row(button_delete)
 
 
     builder.row(
@@ -661,6 +667,39 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
 
         await bot.send_message(callback_query.from_user.id, "\n".join(info_lines))
         await main_message(callback_query)
+
+
+    elif call.startswith('warmup_'):
+        await callback_query.answer()
+        session = str(call).split('_', 1)[1]
+        account_row = await get_account_by_session(callback_query.from_user.id, session)
+        if not account_row:
+            await bot.send_message(callback_query.from_user.id, "Аккаунт не найден в базе данных")
+            await state.clear()
+            await main_message(callback_query)
+            return
+
+        account_id = account_row["id"]
+        warmup_records = await get_warmup_pending(account_id, limit=100)
+        warmup_list = [entry["channel"] for entry in warmup_records] if warmup_records else []
+        warmup_display = await format_channels_display(warmup_list, "Очередь прогрева", 10)
+
+        await state.update_data({"account": session, "account_id": account_id})
+        await state.set_state(warmupmanage.channels)
+
+        prompt_lines = [
+            f"Аккаунт {session}",
+            warmup_display,
+            "",
+            "Отправьте каналы для прогрева (каждый канал на новой строке).",
+            "Отправьте '-' чтобы очистить очередь и перевести аккаунт в стандартный режим.",
+        ]
+
+        await bot.send_message(
+            callback_query.from_user.id,
+            "\n".join(line for line in prompt_lines if line),
+        )
+        return
 
 
     elif 'start_' in call:
@@ -905,6 +944,59 @@ async def process_warmup_interval(message: Message, state: FSMContext) -> None:
         await message.answer(f"✅ Настройки прогрева обновлены.\n\n{summary}")
     else:
         await message.answer("Настройки прогрева не изменены.")
+
+    await state.clear()
+    await main_message(message)
+
+
+@dp.message(warmupmanage.channels)
+async def manage_warmup_channels(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    session = data.get("account")
+    account_id = data.get("account_id")
+
+    if not account_id or not session:
+        await message.answer("Не удалось определить аккаунт для управления прогревом. Попробуйте ещё раз.")
+        await state.clear()
+        await main_message(message)
+        return
+
+    incoming = (message.text or "").strip()
+    if not incoming:
+        await message.answer("Пришлите список каналов или '-' для очистки очереди.")
+        return
+
+    if incoming == "-":
+        channels: List[str] = []
+    else:
+        channels = [line.strip() for line in incoming.splitlines() if line.strip()]
+
+    seen: Set[str] = set()
+    unique_channels: List[str] = []
+    for channel in channels:
+        if channel not in seen:
+            seen.add(channel)
+            unique_channels.append(channel)
+
+    try:
+        await sync_warmup_channels(account_id, unique_channels)
+        if unique_channels:
+            await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
+            result_text = f"Очередь прогрева обновлена. Запланировано {len(unique_channels)} каналов."
+        else:
+            await set_account_mode(account_id, "standard", warmup_days=None)
+            result_text = "Очередь прогрева очищена. Аккаунт переведён в стандартный режим."
+    except Exception as exc:
+        await message.answer(f"Ошибка при обновлении каналов прогрева: {exc}")
+        await state.clear()
+        await main_message(message)
+        return
+
+    updated_records = await get_warmup_pending(account_id, limit=100)
+    updated_list = [entry["channel"] for entry in updated_records] if updated_records else []
+    display = await format_channels_display(updated_list, "Очередь прогрева", 10)
+
+    await message.answer(f"{result_text}\n\n{display}")
 
     await state.clear()
     await main_message(message)
