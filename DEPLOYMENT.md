@@ -42,7 +42,7 @@ API_ID=your_api_id
 API_HASH=your_api_hash
 OPENAI_API_KEY=your_openai_key
 PASSWORD=your_admin_password
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/commentbot
+DATABASE_URL=sqlite:///data/commentbot.db
 LOG_CHANNEL_ID=your_log_channel_id
 ```
 
@@ -84,7 +84,17 @@ nano .env  # Configure your variables
 docker-compose up -d --build
 ```
 
-### Step 4: Monitor
+### Step 4: Run commands inside the container
+```bash
+# open a shell inside the bot container
+docker-compose exec bot /bin/bash
+
+# from inside the container you can run maintenance utilities, e.g.
+python server_test_settings.py
+python fix_mode.py
+```
+
+### Step 5: Monitor
 ```bash
 docker-compose logs -f
 docker-compose ps
@@ -108,7 +118,6 @@ docker-compose up -d           # Start all services
 docker-compose down            # Stop all services
 docker-compose restart bot     # Restart only the bot
 docker-compose logs -f bot     # View bot logs
-docker-compose logs -f postgres # View database logs
 ```
 
 ## 🔍 Monitoring and Troubleshooting
@@ -134,10 +143,10 @@ docker-compose logs -f
 ### Check database
 ```bash
 # Traditional
-sudo -u postgres psql -d commentbot
+sqlite3 data/commentbot.db ".tables"
 
 # Docker
-docker-compose exec postgres psql -U postgres -d commentbot
+docker-compose exec bot sqlite3 data/commentbot.db ".tables"
 ```
 
 ## 🔒 Security Considerations
@@ -151,13 +160,13 @@ docker-compose exec postgres psql -U postgres -d commentbot
    ```
 
 2. **Environment Variables**: Never commit `.env` file to Git
-3. **Database**: Change default PostgreSQL password
+3. **Database**: Храните файл SQLite в каталоге с ограниченным доступом и выполняйте регулярные резервные копии
 4. **Sessions**: Keep session files secure and backed up
 
 ## 📊 Performance Optimization
 
 ### For high-load scenarios:
-1. Increase PostgreSQL memory settings
+1. Периодически запускайте `VACUUM`/`ANALYZE` для оптимизации базы SQLite
 2. Use Redis for caching (optional)
 3. Scale with multiple bot instances
 4. Monitor resource usage
@@ -171,7 +180,7 @@ htop
 df -h
 
 # Database size
-sudo -u postgres psql -c "SELECT pg_size_pretty(pg_database_size('commentbot'));"
+du -h data/commentbot.db
 ```
 
 ## 🔄 Updates and Maintenance
@@ -189,7 +198,7 @@ docker-compose up -d --build
 ### Backup data:
 ```bash
 # Backup database
-pg_dump -h localhost -U postgres commentbot > backup_$(date +%Y%m%d).sql
+cp data/commentbot.db backups/commentbot_$(date +%Y%m%d).db
 
 # Backup sessions
 tar -czf sessions_backup_$(date +%Y%m%d).tar.gz sessions/
@@ -204,9 +213,9 @@ tar -czf sessions_backup_$(date +%Y%m%d).tar.gz sessions/
 4. Ensure all dependencies are installed
 
 ### Database connection errors:
-1. Verify PostgreSQL is running
-2. Check database credentials
-3. Ensure database exists
+1. Проверьте переменную `DATABASE_URL`
+2. Убедитесь, что каталог для файла SQLite существует и доступен для записи
+3. Проверьте логи на наличие ошибок блокировки или повреждения файла
 
 ### Session errors:
 1. Check session file permissions

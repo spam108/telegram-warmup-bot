@@ -49,10 +49,8 @@ sudo docker-compose logs bot --tail=20
    - Каналы прогрева: введите каналы или "-"
 
 5. Проверьте в базе данных:
-```sql
-sudo docker-compose exec postgres psql -U postgres -d commentbot -c "
-SELECT id, phone, sleep_min, sleep_max, chance FROM accounts WHERE phone = 'YOUR_PHONE';
-"
+```bash
+sudo docker-compose exec bot sqlite3 data/commentbot.db "SELECT id, phone, sleep_min, sleep_max, chance FROM accounts WHERE phone = 'YOUR_PHONE';"
 ```
 
 Настройки должны быть сохранены (не NULL).

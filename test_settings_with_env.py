@@ -11,7 +11,7 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Устанавливаем переменные окружения
-os.environ["DATABASE_URL"] = "postgresql://postgres:postgres@postgres:5432/commentbot"
+os.environ["DATABASE_URL"] = "sqlite:///test_data/commentbot.db"
 os.environ["BOT_TOKEN"] = "8231470375:AAFcpq4Se_u1r8TdhzXTohjlFGI9jIUTbio"
 os.environ["API_ID"] = "20047744"
 os.environ["API_HASH"] = "09c81e1d266b98a8d82291abaa75bba7"
