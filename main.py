@@ -1517,15 +1517,25 @@ async def send_comments(userid, session, account_id):
             quiet_sessions_notified.discard(key)
 
 
-async def join_channel(channel: str, account_id: int, session_key: str, user_id: int, is_warmup: bool = False) -> bool:
-    """Единая функция для вступления в канал (обычный или прогрев)"""
+async def join_channel(
+    channel: str,
+    account_id: int,
+    session_key: str,
+    user_id: int,
+    is_warmup: bool = False,
+) -> Tuple[bool, Optional[str]]:
+    """Единая функция для вступления в канал (обычный или прогрев).
+
+    Возвращает кортеж `(успех, причина_ошибки)`.
+    """
     try:
         # Создаем клиент
         session_file = os.path.join("sessions", str(user_id), f"{session_key}.session")
         if not os.path.exists(session_file):
-            await bot.send_message(log_channel, f"Аккаунт {session_key} - файл сессии не найден: {session_file}")
-            return False
-            
+            error_message = f"Аккаунт {session_key} - файл сессии не найден: {session_file}"
+            await bot.send_message(log_channel, error_message)
+            return False, error_message
+
         client = Client(
             name=session_file,
             api_id=API_ID,
@@ -1544,29 +1554,30 @@ async def join_channel(channel: str, account_id: int, session_key: str, user_id:
                 else:
                     # Для обычных каналов - просто логируем
                     await bot.send_message(log_channel, f"Аккаунт {session_key} вступил в канал: {channel}")
-                
-                return True
-                
+
+                return True, None
+
             except UserAlreadyParticipant:
                 if is_warmup:
                     await mark_warmup_channel_joined(account_id, channel)
                 await bot.send_message(log_channel, f"Аккаунт {session_key} уже состоит в канале: {channel}")
-                return True
-                
+                return True, None
+
             except Exception as e:
+                error_message = str(e)
                 if is_warmup:
-                    await record_warmup_channel_error(account_id, channel, str(e))
+                    await record_warmup_channel_error(account_id, channel, error_message)
                 await bot.send_message(log_channel, f"Аккаунт {session_key} ошибка вступления в канал {channel}: {e}")
-                return False
-                
+                return False, error_message
+
     except Exception as e:
         error_msg = str(e)
         if any(keyword in error_msg.lower() for keyword in ["phone number", "auth", "eof when reading", "session", "unauthorized"]):
             await bot.send_message(log_channel, f"Аккаунт {session_key} - сессия истекла или повреждена: {error_msg}")
-            return False
+            return False, error_msg
         else:
             await bot.send_message(log_channel, f"Аккаунт {session_key} ошибка подключения: {e}")
-            return False
+            return False, error_msg
 
 
 async def process_warmup_accounts():
@@ -1676,7 +1687,7 @@ async def process_warmup_accounts():
                     continue
 
                 # Используем единую функцию для вступления в канал прогрева
-                success = await join_channel(channel, account["id"], session_key, user_id, is_warmup=True)
+                success, error_reason = await join_channel(channel, account["id"], session_key, user_id, is_warmup=True)
 
                 if not success:
                     # Если сессия истекла - переключаем в стандартный режим
@@ -1792,16 +1803,35 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
         await main_message(message)
         return
 
-    channels_to_update = None
+    channels_to_update: Optional[List[str]] = None
+    successful_channels: List[str] = []
     if str(message.text) != '-':
         channels = [line.strip() for line in message.text.splitlines() if line.strip()]
 
         # Вступаем в обычные каналы сразу
         for channel in channels:
-            await join_channel(channel, account_id, session, message.from_user.id, is_warmup=False)
+            success, error_reason = await join_channel(
+                channel, account_id, session, message.from_user.id, is_warmup=False
+            )
 
-        # Обновляем список обычных каналов в БД
-        channels_to_update = channels
+            if success:
+                successful_channels.append(channel)
+            else:
+                reason_text = error_reason or "Неизвестная ошибка"
+                await bot.send_message(
+                    log_channel,
+                    f"Не удалось добавить канал {channel} для аккаунта {session}: {reason_text}",
+                )
+                await bot.send_message(
+                    message.from_user.id,
+                    f"Не удалось вступить в канал {channel}: {reason_text}",
+                )
+
+        # Обновляем список обычных каналов в БД только успешными каналами
+        if successful_channels:
+            channels_to_update = successful_channels
+    else:
+        channels = []
 
     sleep_min, sleep_max = None, None
     if sleeps:
@@ -1819,6 +1849,16 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
         update_kwargs["channels"] = channels_to_update
 
     await update_account_settings(account_id, **update_kwargs)
+
+    if successful_channels:
+        channels_summary = "\n".join(successful_channels)
+        summary_text = "Итоговый список успешно добавленных каналов:\n" + channels_summary
+    elif str(message.text) == '-':
+        summary_text = "Каналы не были добавлены."
+    else:
+        summary_text = "Не удалось добавить ни один канал."
+
+    await bot.send_message(message.from_user.id, summary_text)
 
     # Переходим к диалогу каналов прогрева
     await bot.send_message(message.from_user.id, 'Теперь пришлите каналы для прогрева (каждый канал с новой строки). Для отмены отправьте "-".')
@@ -2241,6 +2281,7 @@ async def main():
         raise
 
 
-asyncio.run(main())
-# asyncio.run(bot.run())
+if __name__ == "__main__":
+    asyncio.run(main())
+    # asyncio.run(bot.run())
 
