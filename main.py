@@ -1907,7 +1907,9 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
         await state.clear()
         await main_message(message)
         return
-    
+
+    warmup_settings = await ensure_latest_warmup_settings()
+
     # Показываем существующие каналы прогрева перед обработкой
     existing_warmup = await get_warmup_pending(account_id, limit=100)
     warmup_list = [ch["channel"] for ch in existing_warmup] if existing_warmup else []
@@ -1925,15 +1927,13 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
         if existing_warmup:
             # Есть каналы в прогреве - запускаем в режиме прогрева
             await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
-            # Планируем следующее вступление в период сна (4:00-6:00)
-            now = datetime.now(timezone.utc)
-            tomorrow_4_30am = now.replace(hour=4, minute=30, second=0, microsecond=0) + timedelta(days=1)
-            await db_update_warmup_schedule(account_id, next_join=tomorrow_4_30am)
+            next_join = plan_next_warmup_join(datetime.now(timezone.utc), warmup_settings)
+            await db_update_warmup_schedule(account_id, next_join=next_join)
             logging.info(
                 "Warmup schedule: account %s (%s) next join at %s",
                 account_id,
                 session,
-                tomorrow_4_30am.isoformat(),
+                next_join.isoformat(),
             )
             
             # Запускаем аккаунт в режиме прогрева (С комментированием + прогрев)
@@ -1994,15 +1994,13 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
         if existing_warmup:
             # Есть каналы в прогреве - запускаем в режиме прогрева
             await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
-            # Планируем следующее вступление в период сна (4:00-6:00)
-            now = datetime.now(timezone.utc)
-            tomorrow_4_30am = now.replace(hour=4, minute=30, second=0, microsecond=0) + timedelta(days=1)
-            await db_update_warmup_schedule(account_id, next_join=tomorrow_4_30am)
+            next_join = plan_next_warmup_join(datetime.now(timezone.utc), warmup_settings)
+            await db_update_warmup_schedule(account_id, next_join=next_join)
             logging.info(
                 "Warmup schedule: account %s (%s) next join at %s",
                 account_id,
                 session,
-                tomorrow_4_30am.isoformat(),
+                next_join.isoformat(),
             )
 
             # Запускаем аккаунт в режиме прогрева (С комментированием + прогрев)
@@ -2052,15 +2050,13 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
     try:
         await sync_warmup_channels(account_id, warmup_channels)
         await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
-        # Планируем следующее вступление в период сна (4:00-6:00)
-        now = datetime.now(timezone.utc)
-        tomorrow_4_30am = now.replace(hour=4, minute=30, second=0, microsecond=0) + timedelta(days=1)
-        await db_update_warmup_schedule(account_id, next_join=tomorrow_4_30am)
+        next_join = plan_next_warmup_join(datetime.now(timezone.utc), warmup_settings)
+        await db_update_warmup_schedule(account_id, next_join=next_join)
         logging.info(
             "Warmup schedule: account %s (%s) next join at %s",
             account_id,
             session,
-            tomorrow_4_30am.isoformat(),
+            next_join.isoformat(),
         )
     except Exception as e:
         await bot.send_message(log_channel, f"Ошибка при сохранении каналов прогрева для {session}: {e}")
