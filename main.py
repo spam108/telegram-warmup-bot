@@ -444,7 +444,7 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
                     api_hash=API_HASH
                 )
                 async with app:
-                    async for dialog in app.get_dialogs():
+                    # async for dialog in app.get_dialogs():  # ОТКЛЮЧЕНО из-за ChannelPrivate
                         chat = dialog.chat
                         if str(chat.type) == "ChatType.CHANNEL" and chat.username:
                             real_channels.append(f"@{chat.username}")
@@ -694,15 +694,12 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
     
     if await check_account(message.from_user.id, session):
         async with app:
-            async for dialog in app.get_dialogs():
-                chat = dialog.chat
-                if str(chat.type) == "ChatType.CHANNEL":
-                    if chat.username is not None:
-                        channels.append(f"@{chat.username}")
+            # Получение диалогов отключено из-за ChannelPrivate ошибок
+            pass
 
-        # Используем унифицированное отображение каналов
-        channels_display = await format_channels_display(channels, "Аккаунт подписан на каналы", 10)
-        await bot.send_message(message.from_user.id, f'{channels_display}\n\nПришлите каналы на которые нужно подписаться\n(если не нужно пришлите -)')
+        # Пропускаем показ каналов из-за отключения get_dialogs
+        print(f"DEBUG: Получение каналов отключено для {session}")
+        await bot.send_message(message.from_user.id, 'Аккаунт проверен. Пришлите каналы на которые нужно подписаться\n(если не нужно пришлите -)')
         await state.set_state(startaccount.regular_channels)
     else:
         await state.clear()
@@ -1382,7 +1379,7 @@ async def get_account_summary(account_id):
                 api_hash=API_HASH
             )
             async with app:
-                async for dialog in app.get_dialogs():
+                # async for dialog in app.get_dialogs():  # ОТКЛЮЧЕНО из-за ChannelPrivate
                     chat = dialog.chat
                     if str(chat.type) == "ChatType.CHANNEL" and chat.username:
                         real_channels.append(f"@{chat.username}")

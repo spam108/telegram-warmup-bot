@@ -1,4 +1,4 @@
-﻿version: '3.8'
+version: '3.8'
 
 services:
   telegram-bot:
@@ -8,6 +8,7 @@ services:
     volumes:
       - ./sessions:/app/sessions
       - ./schedule.json:/app/schedule.json
+      - ./bot.db:/app/bot.db  # Монтируем SQLite файл
     env_file:
       - .env
     environment:
