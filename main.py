@@ -1459,8 +1459,9 @@ async def send_comments(userid, session, account_id):
             if (message.chat.permissions.can_send_messages is True) and (
                     message.text is not None or message.caption is not None):
                 
-                if random.randint(1, 100) > chance:
-                    await bot.send_message(log_channel, f'Аккаунт {session} пропустил комментарий')
+                roll = random.randint(1, 100)
+                if roll > chance:
+                    await bot.send_message(log_channel, f'Аккаунт {session} пропустил комментарий (rnd {roll} > {chance})')
                     return
 
                 post_text = message.text or message.caption
