@@ -2,8 +2,9 @@ import json
 import os
 import asyncio
 import logging
+import re
 from datetime import datetime, time, timezone, timedelta
-from typing import Dict, List, Optional, Set, Any
+from typing import Dict, List, Optional, Set, Any, Tuple
 import random
 from pyrogram import Client, filters
 from pyrogram.errors import UserAlreadyParticipant
@@ -359,6 +360,38 @@ async def show_account_summary(message: types.Message, state: FSMContext):
     
     # Показываем резюме
     await send_account_summary_to_user(message.from_user.id, account['id'], phone)
+
+
+@dp.message(Command("prompt"))
+async def show_system_prompt(message: types.Message):
+    """Отправляет полный системный промт по номеру телефона аккаунта."""
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer("Использование: /prompt <номер_телефона>\nПример: /prompt 79991234567")
+        return
+
+    phone = parts[1].strip()
+
+    accounts = await get_accounts_for_user(message.from_user.id)
+    account = next((acc for acc in accounts if acc.get('phone') == phone), None)
+
+    if not account:
+        await message.answer(f"Аккаунт с номером {phone} не найден")
+        return
+
+    formatted_prompt = format_full_system_prompt(account.get('system_prompt'))
+
+    if formatted_prompt == "Не задан":
+        await message.answer(f"Для аккаунта {phone} системный промт не задан")
+        return
+
+    response = f"📝 **Полный системный промт для {escape_markdown_v1(phone)}:**\n{formatted_prompt}"
+    await message.answer(response, parse_mode="Markdown")
+
 
 @dp.message(Command("testwarmup"))
 async def test_warmup_command(message: Message) -> None:
@@ -1423,11 +1456,60 @@ async def safe_send_comments(user_id, phone, account_id):
         active_account_ids.pop(make_session_key(user_id, phone), None)
 
 
+def escape_markdown_v1(text: str) -> str:
+    """Экранирует спецсимволы Markdown V1."""
+    if text is None:
+        return ""
+    escape_chars = r"_*[]()~`>#+-=|{}.!"
+    pattern = rf"([{re.escape(escape_chars)}])"
+    return re.sub(pattern, lambda match: "\\" + match.group(1), text)
+
+
+SYSTEM_PROMPT_PREVIEW_LINES = 3
+
+
+def _normalize_system_prompt_lines(system_prompt: Optional[str]) -> List[str]:
+    """Возвращает строки системного промта без потери значащих пробелов."""
+    if not system_prompt:
+        return []
+
+    normalized = system_prompt.replace("\r\n", "\n").strip("\n")
+    if not normalized.strip():
+        return []
+
+    return normalized.split("\n")
+
+
+def build_system_prompt_preview(system_prompt: Optional[str], max_lines: int = SYSTEM_PROMPT_PREVIEW_LINES) -> Tuple[str, bool]:
+    """Возвращает экранированный превью-текст и флаг усечения."""
+    lines = _normalize_system_prompt_lines(system_prompt)
+    if not lines:
+        return "Не задан", False
+
+    escaped_lines = [escape_markdown_v1(line) for line in lines]
+    truncated = len(escaped_lines) > max_lines
+    preview_lines = escaped_lines[:max_lines]
+    preview_text = "\n".join(preview_lines)
+    if truncated:
+        preview_text += "\n…"
+
+    return preview_text, truncated
+
+
+def format_full_system_prompt(system_prompt: Optional[str]) -> str:
+    """Подготавливает полный системный промт для отправки."""
+    lines = _normalize_system_prompt_lines(system_prompt)
+    if not lines:
+        return "Не задан"
+
+    return "\n".join(escape_markdown_v1(line) for line in lines)
+
+
 async def format_channels_display(channels, title="Каналы", max_display=10):
     """Унифицированное отображение списка каналов"""
     if not channels:
         return f"{title}: нет"
-    
+
     if len(channels) <= max_display:
         return f"{title} ({len(channels)}):\n" + '\n'.join(channels)
     else:
@@ -1468,6 +1550,19 @@ async def get_account_summary(account_id):
     warmup_list = [ch["channel"] for ch in warmup_channels] if warmup_channels else []
     
     # Формируем резюме
+    raw_system_prompt = account.get('system_prompt')
+    normalized_prompt_lines = _normalize_system_prompt_lines(raw_system_prompt)
+    system_prompt_preview, prompt_truncated = build_system_prompt_preview(
+        raw_system_prompt, SYSTEM_PROMPT_PREVIEW_LINES
+    )
+    prompt_hint = ""
+    if normalized_prompt_lines:
+        if prompt_truncated and account.get('phone'):
+            command_text = escape_markdown_v1(f"/prompt {account.get('phone')}")
+            prompt_hint = f"\nℹ️ Полный текст: {command_text}"
+        else:
+            prompt_hint = "\nℹ️ Полный текст совпадает с фрагментом."
+
     summary = f"""
 📊 **Резюме аккаунта {account.get('phone', 'N/A')}**
 
@@ -1477,8 +1572,8 @@ async def get_account_summary(account_id):
 • Режим: {account.get('mode', 'N/A')}
 • Статус: {account.get('status', 'N/A')}
 
-📝 **Системный промпт:**
-{account.get('system_prompt', 'Не задан')}
+📝 **Системный промпт (фрагмент, первые {SYSTEM_PROMPT_PREVIEW_LINES} строки):**
+{system_prompt_preview}{prompt_hint}
 
 📺 **Реальные подписки ({len(real_channels)}):**
 {await format_channels_display(real_channels, "Подписки", 10)}
