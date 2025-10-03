@@ -145,6 +145,21 @@ async def init_db() -> None:
 
     await conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS warmup_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            channels_per_day INTEGER NOT NULL,
+            delay_minutes INTEGER NOT NULL,
+            join_start_hour INTEGER NOT NULL,
+            join_start_minute INTEGER NOT NULL,
+            join_end_hour INTEGER NOT NULL,
+            join_end_minute INTEGER NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    await conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_warmup_channels_pending
         ON warmup_channels (account_id, status, position)
         """
@@ -173,6 +188,125 @@ async def close_db() -> None:
     if _CONN is not None:
         await _CONN.close()
         _CONN = None
+
+
+async def ensure_warmup_settings(
+    *,
+    channels_per_day: int,
+    delay_minutes: int,
+    join_start_hour: int,
+    join_start_minute: int,
+    join_end_hour: int,
+    join_end_minute: int,
+) -> None:
+    """Ensure that a single warmup settings row exists in the database."""
+
+    conn = await _require_conn()
+    await conn.execute(
+        """
+        INSERT INTO warmup_settings (
+            id,
+            channels_per_day,
+            delay_minutes,
+            join_start_hour,
+            join_start_minute,
+            join_end_hour,
+            join_end_minute
+        )
+        VALUES (1, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO NOTHING
+        """,
+        (
+            channels_per_day,
+            delay_minutes,
+            join_start_hour,
+            join_start_minute,
+            join_end_hour,
+            join_end_minute,
+        ),
+    )
+    await conn.commit()
+
+
+async def get_warmup_settings() -> Dict[str, int]:
+    """Fetch the warmup settings row."""
+
+    conn = await _require_conn()
+    async with conn.execute(
+        """
+        SELECT channels_per_day,
+               delay_minutes,
+               join_start_hour,
+               join_start_minute,
+               join_end_hour,
+               join_end_minute
+        FROM warmup_settings
+        WHERE id = 1
+        """
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    if not row:
+        raise RuntimeError("Warmup settings are not initialised")
+
+    return {
+        "channels_per_day": int(row["channels_per_day"]),
+        "delay_minutes": int(row["delay_minutes"]),
+        "join_start_hour": int(row["join_start_hour"]),
+        "join_start_minute": int(row["join_start_minute"]),
+        "join_end_hour": int(row["join_end_hour"]),
+        "join_end_minute": int(row["join_end_minute"]),
+    }
+
+
+async def update_warmup_settings(
+    *,
+    channels_per_day: Optional[int] = None,
+    delay_minutes: Optional[int] = None,
+    join_start_hour: Optional[int] = None,
+    join_start_minute: Optional[int] = None,
+    join_end_hour: Optional[int] = None,
+    join_end_minute: Optional[int] = None,
+) -> None:
+    """Update warmup settings with the provided values."""
+
+    updates: List[str] = []
+    params: List[Any] = []
+
+    if channels_per_day is not None:
+        updates.append("channels_per_day = ?")
+        params.append(channels_per_day)
+    if delay_minutes is not None:
+        updates.append("delay_minutes = ?")
+        params.append(delay_minutes)
+    if join_start_hour is not None:
+        updates.append("join_start_hour = ?")
+        params.append(join_start_hour)
+    if join_start_minute is not None:
+        updates.append("join_start_minute = ?")
+        params.append(join_start_minute)
+    if join_end_hour is not None:
+        updates.append("join_end_hour = ?")
+        params.append(join_end_hour)
+    if join_end_minute is not None:
+        updates.append("join_end_minute = ?")
+        params.append(join_end_minute)
+
+    if not updates:
+        return
+
+    updates.append("updated_at = CURRENT_TIMESTAMP")
+    params.append(1)
+
+    query = f"""
+        UPDATE warmup_settings
+        SET {', '.join(updates)}
+        WHERE id = ?
+    """
+
+    conn = await _require_conn()
+    await conn.execute(query, tuple(params))
+    await conn.commit()
 
 
 async def ensure_user(user_id: int) -> None:
