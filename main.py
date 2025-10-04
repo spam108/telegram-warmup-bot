@@ -188,6 +188,20 @@ QUIET_START_MINUTE = SCHEDULE_CONFIG["quiet_period"]["start_minute"]
 QUIET_END_HOUR = SCHEDULE_CONFIG["quiet_period"]["end_hour"]
 QUIET_END_MINUTE = SCHEDULE_CONFIG["quiet_period"]["end_minute"]
 
+MOSCOW_UTC_OFFSET_MINUTES = 3 * 60
+
+
+def _format_time_with_offset(hour: int, minute: int, offset_minutes: int = 0) -> str:
+    total_minutes = (hour * 60 + minute + offset_minutes) % (24 * 60)
+    formatted_hour, formatted_minute = divmod(total_minutes, 60)
+    return f"{formatted_hour:02d}:{formatted_minute:02d}"
+
+
+QUIET_START_UTC_STR = f"{QUIET_START_HOUR:02d}:{QUIET_START_MINUTE:02d}"
+QUIET_END_UTC_STR = f"{QUIET_END_HOUR:02d}:{QUIET_END_MINUTE:02d}"
+QUIET_START_MSK_STR = _format_time_with_offset(QUIET_START_HOUR, QUIET_START_MINUTE, MOSCOW_UTC_OFFSET_MINUTES)
+QUIET_END_MSK_STR = _format_time_with_offset(QUIET_END_HOUR, QUIET_END_MINUTE, MOSCOW_UTC_OFFSET_MINUTES)
+
 WARMUP_SCAN_INTERVAL_SECONDS = 60  # Проверка каждую минуту
 WARMUP_DEFAULT_DAYS = SCHEDULE_CONFIG["warmup_settings"]["default_days"]
 
@@ -432,7 +446,8 @@ def _get_next_warmup_join(now: datetime, settings: Optional[WarmupSettingsData] 
 
 
 def is_quiet_period(now: datetime | None = None) -> bool:
-    """Проверяет, находимся ли мы в тихом периоде (00:30-07:30 МСК = 21:30-04:30 UTC)"""
+    f"""Проверяет, находимся ли мы в тихом периоде
+    ({QUIET_START_MSK_STR}-{QUIET_END_MSK_STR} МСК = {QUIET_START_UTC_STR}-{QUIET_END_UTC_STR} UTC)"""
     now = now or datetime.now(timezone.utc)
     current_time = now.time()
     start = time(QUIET_START_HOUR, QUIET_START_MINUTE)
@@ -1477,7 +1492,10 @@ async def send_comments(userid, session, account_id):
                     if is_quiet_period():
                         key = make_session_key(userid, session)
                         if key not in quiet_sessions_notified:
-                            await bot.send_message(log_channel, f'Аккаунт {session} приостановлен до 07:00 (циркадный режим)')
+                            await bot.send_message(
+                                log_channel,
+                                f'Аккаунт {session} приостановлен до {QUIET_END_MSK_STR} МСК (циркадный режим)'
+                            )
                             quiet_sessions_notified.add(key)
                         return
                     await asyncio.sleep(random.uniform(xsleep, ysleep))
