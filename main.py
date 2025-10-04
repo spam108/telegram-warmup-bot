@@ -119,6 +119,8 @@ class warmupmanage(StatesGroup):
 active_sessions: Dict[str, bool] = {}  # Глобальный словарь для хранения активных сессий
 active_account_ids: Dict[str, int] = {}
 quiet_sessions_notified: Set[str] = set()
+active_pyrogram_clients: Dict[str, Client] = {}
+active_client_locks: Dict[str, asyncio.Lock] = {}
 
 # Функция для загрузки настроек расписания
 def load_schedule_config():
@@ -1365,13 +1367,18 @@ async def add_channels(message: Message, state: FSMContext) -> None:
 
 async def send_comments(userid, session, account_id):
     async with account_semaphore:
+        key = make_session_key(userid, session)
         app = Client(
             name=f"sessions/{userid}/{session}",
             api_id=API_ID,
             api_hash=API_HASH)
-        
+        active_pyrogram_clients[key] = app
+        active_client_locks.setdefault(key, asyncio.Lock())
+
         account = await get_account_by_id(account_id)
         if not account:
+            active_pyrogram_clients.pop(key, None)
+            active_client_locks.pop(key, None)
             active_sessions.pop(make_session_key(userid, session), None)
             return
         
@@ -1464,6 +1471,8 @@ async def send_comments(userid, session, account_id):
                 await mark_account_stopped(account_id)
             active_sessions.pop(key, None)
             quiet_sessions_notified.discard(key)
+            active_pyrogram_clients.pop(key, None)
+            active_client_locks.pop(key, None)
 
 
 async def join_channel(
@@ -1500,16 +1509,12 @@ async def join_channel(
                 await bot.send_message(log_channel, error_message)
                 return False, error_message
 
-        client = Client(
-            name=session_name,
-            api_id=API_ID,
-            api_hash=API_HASH,
-        )
-        
-        async with client:
+        key = make_session_key(user_id, session_key)
+
+        async def _join_with_client(client_obj: Client) -> Tuple[bool, Optional[str]]:
             try:
-                await client.join_chat(channel)
-                
+                await client_obj.join_chat(channel)
+
                 if is_warmup:
                     # Для каналов прогрева - обновляем БД
                     await mark_warmup_channel_joined(account_id, channel)
@@ -1533,6 +1538,43 @@ async def join_channel(
                     await record_warmup_channel_error(account_id, channel, error_message)
                 await bot.send_message(log_channel, f"Аккаунт {session_key} ошибка вступления в канал {channel}: {e}")
                 return False, error_message
+
+        existing_client = active_pyrogram_clients.get(key)
+        session_active = active_sessions.get(key, False)
+
+        if existing_client and session_active:
+            lock = active_client_locks.setdefault(key, asyncio.Lock())
+            async with lock:
+                if not getattr(existing_client, "is_connected", False):
+                    # Ждем пока клиент запустится, чтобы избежать гонок с pyrogram.session
+                    for _ in range(40):
+                        if not active_sessions.get(key, False):
+                            break
+                        if getattr(existing_client, "is_connected", False):
+                            break
+                        await asyncio.sleep(0.25)
+
+                if getattr(existing_client, "is_connected", False):
+                    return await _join_with_client(existing_client)
+
+            if active_sessions.get(key, False):
+                busy_message = "Аккаунт занят, повторите попытку позже"
+                await bot.send_message(log_channel, f"Аккаунт {session_key}: {busy_message}")
+                return False, busy_message
+
+        if session_active and existing_client is None:
+            busy_message = "Аккаунт запускается, попробуйте позже"
+            await bot.send_message(log_channel, f"Аккаунт {session_key}: {busy_message}")
+            return False, busy_message
+
+        client = Client(
+            name=session_name,
+            api_id=API_ID,
+            api_hash=API_HASH,
+        )
+
+        async with client:
+            return await _join_with_client(client)
 
     except Exception as e:
         error_msg = str(e)
@@ -1653,6 +1695,15 @@ async def process_warmup_accounts():
                 success, error_reason = await join_channel(channel, account["id"], session_key, user_id, is_warmup=True)
 
                 if not success:
+                    if error_reason and any(
+                        phrase in error_reason.lower()
+                        for phrase in ("занят", "запускается")
+                    ):
+                        await bot.send_message(
+                            log_channel,
+                            f"Warmup: Account {session_key} занят ({error_reason}), повторим позже",
+                        )
+                        continue
                     # Если сессия истекла - переключаем в стандартный режим
                     await set_account_mode(account["id"], "standard", warmup_days=None)
                     continue
@@ -2056,8 +2107,11 @@ async def safe_send_comments(user_id, phone, account_id):
         logging.exception("Error in send_comments for account %s: %s", account_id, e)
         # Останавливаем аккаунт при критической ошибке
         await mark_account_stopped(account_id)
-        active_sessions.pop(make_session_key(user_id, phone), None)
-        active_account_ids.pop(make_session_key(user_id, phone), None)
+        key = make_session_key(user_id, phone)
+        active_sessions.pop(key, None)
+        active_account_ids.pop(key, None)
+        active_pyrogram_clients.pop(key, None)
+        active_client_locks.pop(key, None)
 
 
 async def format_channels_display(channels, title="Каналы", max_display=10):
