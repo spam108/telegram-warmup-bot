@@ -508,13 +508,12 @@ async def main_message(message):
         button_info = types.InlineKeyboardButton(text=f"{call}", callback_data=f"info_{call}")
         button_status = types.InlineKeyboardButton(text=status_button_text, callback_data=status_button_callback)
         button_delete = types.InlineKeyboardButton(text="Удалить", callback_data=f"del_{call}")
-        button_mode = types.InlineKeyboardButton(text="Режим", callback_data=f"mode_{call}")
         button_warmup = types.InlineKeyboardButton(text="Прогрев", callback_data=f"warmup_{call}")
 
         if is_running:
-            builder.row(button_info, button_status, button_mode, button_warmup)
+            builder.row(button_info, button_status, button_warmup)
         else:
-            builder.row(button_info, button_status, button_mode, button_warmup)
+            builder.row(button_info, button_status, button_warmup)
             builder.row(button_delete)
 
 
@@ -824,72 +823,6 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
         else:   
             await main_message(callback_query)
             return
-
-    elif 'mode_' in call:
-        session = str(call).split('_')[1]
-        account_row = await get_account_by_session(callback_query.from_user.id, session)
-        if not account_row:
-            await bot.send_message(callback_query.from_user.id, "Аккаунт не найден в базе данных")
-            await main_message(callback_query)
-            return
-
-        mode = account_row.get("mode", "warmup")
-        warmup_end = account_row.get("warmup_end_at")
-        warmup_joined_today = account_row.get("warmup_joined_today", 0)
-        warmup_last_join = account_row.get("warmup_last_join")
-
-        next_action_text = "Перевести в стандарт" if mode == "warmup" else "Вернуть в прогрев"
-        builder = InlineKeyboardBuilder()
-        builder.row(
-            types.InlineKeyboardButton(text=next_action_text, callback_data=f"togglemode_{session}"),
-            types.InlineKeyboardButton(text="Сбросить прогрев", callback_data=f"warmreset_{session}"),
-        )
-
-        text = [
-            f"Аккаунт {session}",
-            f"Текущий режим: {mode}",
-        ]
-        if warmup_end:
-            text.append(f"Окончание прогрева: {warmup_end:%Y-%m-%d %H:%M}")
-        text.append(f"Количество подписок сегодня: {warmup_joined_today}")
-        if warmup_last_join:
-            text.append(f"Последняя подписка: {warmup_last_join:%Y-%m-%d}")
-
-        await bot.send_message(callback_query.from_user.id, "\n".join(text), reply_markup=builder.as_markup())
-
-    elif 'togglemode_' in call:
-        session = str(call).split('_')[1]
-        account_row = await get_account_by_session(callback_query.from_user.id, session)
-        if not account_row:
-            await bot.send_message(callback_query.from_user.id, "Аккаунт не найден в базе данных")
-            await main_message(callback_query)
-            return
-
-        account_id = account_row["id"]
-        current_mode = account_row.get("mode", "warmup")
-        if current_mode == "warmup":
-            await set_account_mode(account_id, "standard", warmup_days=None)
-            await bot.send_message(callback_query.from_user.id, f"Аккаунт {session} переведён в стандартный режим")
-        else:
-            await set_account_mode(account_id, "warmup", warmup_days=7)
-            await bot.send_message(callback_query.from_user.id, f"Аккаунт {session} переведён в режим прогрева на 7 дней")
-
-        await main_message(callback_query)
-
-    elif 'warmreset_' in call:
-        session = str(call).split('_')[1]
-        account_row = await get_account_by_session(callback_query.from_user.id, session)
-        if not account_row:
-            await bot.send_message(callback_query.from_user.id, "Аккаунт не найден в базе данных")
-            await main_message(callback_query)
-            return
-
-        account_id = account_row["id"]
-        channels = account_row.get("channels") or []
-        await sync_warmup_channels(account_id, channels)
-        await set_account_mode(account_id, "warmup", warmup_days=7)
-        await bot.send_message(callback_query.from_user.id, f"Прогрев аккаунта {session} перезапущен на 7 дней")
-        await main_message(callback_query)
 
     elif 'del_' in call:
         session = str(call).split('_')[1]
