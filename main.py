@@ -783,7 +783,7 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
             warmup_display,
             "",
             "Отправьте каналы для прогрева (каждый канал на новой строке).",
-            "Отправьте '-' чтобы очистить очередь и перевести аккаунт в стандартный режим.",
+            "Отправьте '-' чтобы оставить очередь без изменений или 'clear' для очистки и перехода в стандартный режим.",
         ]
 
         await bot.send_message(
@@ -1054,29 +1054,42 @@ async def manage_warmup_channels(message: Message, state: FSMContext) -> None:
 
     incoming = (message.text or "").strip()
     if not incoming:
-        await message.answer("Пришлите список каналов или '-' для очистки очереди.")
+        await message.answer(
+            "Пришлите список каналов, '-' чтобы оставить очередь без изменений или 'clear' для очистки."
+        )
         return
 
+    normalized = incoming.lower()
     if incoming == "-":
-        channels: List[str] = []
+        channels: Optional[List[str]] = None
+    elif normalized == "clear":
+        channels = []
     else:
         channels = [line.strip() for line in incoming.splitlines() if line.strip()]
 
-    seen: Set[str] = set()
-    unique_channels: List[str] = []
-    for channel in channels:
-        if channel not in seen:
-            seen.add(channel)
-            unique_channels.append(channel)
+    unique_channels: Optional[List[str]]
+    if channels is None:
+        unique_channels = None
+    else:
+        seen: Set[str] = set()
+        deduped: List[str] = []
+        for channel in channels:
+            if channel not in seen:
+                seen.add(channel)
+                deduped.append(channel)
+        unique_channels = deduped
 
     try:
-        await sync_warmup_channels(account_id, unique_channels)
-        if unique_channels:
-            await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
-            result_text = f"Очередь прогрева обновлена. Запланировано {len(unique_channels)} каналов."
+        if unique_channels is None:
+            result_text = "Очередь прогрева не изменена."
         else:
-            await set_account_mode(account_id, "standard", warmup_days=None)
-            result_text = "Очередь прогрева очищена. Аккаунт переведён в стандартный режим."
+            await sync_warmup_channels(account_id, unique_channels)
+            if unique_channels:
+                await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
+                result_text = f"Очередь прогрева обновлена. Запланировано {len(unique_channels)} каналов."
+            else:
+                await set_account_mode(account_id, "standard", warmup_days=None)
+                result_text = "Очередь прогрева очищена. Аккаунт переведён в стандартный режим."
     except Exception as exc:
         await message.answer(f"Ошибка при обновлении каналов прогрева: {exc}")
         await state.clear()
