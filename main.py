@@ -28,7 +28,6 @@ from db import (
     get_accounts_for_user,
     get_running_accounts,
     get_warmup_pending,
-    get_warmup_queue_stats,
     get_warmup_settings,
     init_db,
     is_user_authenticated,
@@ -506,7 +505,7 @@ async def main_message(message):
         status_button_text = "Запустить" if not is_running else "Остановить"
         status_button_callback = f"start_{call}" if not is_running else f"stop_{call}"
 
-        button_info = types.InlineKeyboardButton(text=f"ℹ️ {call}", callback_data=f"info_{call}")
+        button_info = types.InlineKeyboardButton(text=f"{call}", callback_data=f"info_{call}")
         button_status = types.InlineKeyboardButton(text=status_button_text, callback_data=status_button_callback)
         button_delete = types.InlineKeyboardButton(text="Удалить", callback_data=f"del_{call}")
         button_mode = types.InlineKeyboardButton(text="Режим", callback_data=f"mode_{call}")
@@ -697,13 +696,7 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
 
 
     elif 'info_' in call:
-
-        session = str(call).split('_')[1]
-
-        key = make_session_key(callback_query.from_user.id, session)
-        if active_sessions.get(key):
-            await bot.send_message(callback_query.from_user.id, f"Аккаунт {session} в работе")
-            return
+        session = str(call).split('_', 1)[1]
 
         account_row = await get_account_by_session(callback_query.from_user.id, session)
         if not account_row:
@@ -711,53 +704,15 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
             await main_message(callback_query)
             return
 
-        # Получаем реальные подписки аккаунта из Telegram
-        real_channels = []
-        try:
-            session_path = account_row.get('session_path', '')
-            if session_path and os.path.exists(session_path):
-                app = Client(
-                    name=session_path.replace('.session', ''),
-                    api_id=API_ID,
-                    api_hash=API_HASH
-                )
-                async with app:
-                    async for dialog in app.get_dialogs():
-                        chat = dialog.chat
-                        if str(chat.type) == "ChatType.CHANNEL" and chat.username:
-                            real_channels.append(f"@{chat.username}")
-        except Exception as e:
-            print(f"Ошибка при получении подписок для аккаунта {session}: {e}")
-            # Если не удалось получить реальные подписки, используем из БД
-            real_channels = account_row.get("channels") or []
+        account_id = account_row.get("id")
+        if not account_id:
+            await bot.send_message(callback_query.from_user.id, f"Не удалось определить идентификатор аккаунта {session}")
+            await main_message(callback_query)
+            return
 
-        channels = account_row.get("channels") or []
-        warmup_stats = await get_warmup_queue_stats(account_row["id"])
-
-        info_lines = [f"Аккаунт {session}"]
-        
-        # Показываем реальные подписки
-        if real_channels:
-            info_lines.append(f"Активные каналы ({len(real_channels)}):\n" + "\n".join(real_channels[:20]))
-            if len(real_channels) > 20:
-                info_lines.append(f"... и ещё {len(real_channels) - 20}")
-        else:
-            info_lines.append("Активные каналы: нет")
-
-        pending_channels = await get_warmup_pending(account_row["id"], limit=20)
-        if pending_channels:
-            pending_list = [entry["channel"] for entry in pending_channels]
-            info_lines.append(f"Очередь прогрева ({warmup_stats['pending']}):\n" + "\n".join(pending_list))
-            if warmup_stats['pending'] > 20:
-                info_lines.append(f"... и ещё {warmup_stats['pending'] - 20}")
-        else:
-            info_lines.append("Очередь прогрева: пусто")
-
-        info_lines.append(f"Подписок добавлено в прогреве: {warmup_stats['joined']}")
-        info_lines.append(f"Количество ошибок прогрева: {warmup_stats['error']}")
-
-        await bot.send_message(callback_query.from_user.id, "\n".join(info_lines))
+        await send_account_summary_to_user(callback_query.from_user.id, account_id, session)
         await main_message(callback_query)
+        return
 
 
     elif call.startswith('warmup_'):
