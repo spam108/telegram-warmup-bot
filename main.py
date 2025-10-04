@@ -828,7 +828,9 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
         account_id = account_row["id"]
         warmup_records = await get_warmup_pending(account_id, limit=100)
         warmup_list = [entry["channel"] for entry in warmup_records] if warmup_records else []
-        warmup_display = await format_channels_display(warmup_list, "Очередь прогрева", 10)
+        warmup_display = await format_channels_display(
+            warmup_list, "Очередь прогрева", 10, use_markdown=False
+        )
 
         await state.update_data({"account": session, "account_id": account_id})
         await state.set_state(warmupmanage.channels)
@@ -1099,7 +1101,9 @@ async def manage_warmup_channels(message: Message, state: FSMContext) -> None:
     else:
         await set_account_mode(account_id, "standard", warmup_days=None)
     updated_list = [entry["channel"] for entry in updated_records] if updated_records else []
-    display = await format_channels_display(updated_list, "Очередь прогрева", 10)
+    display = await format_channels_display(
+        updated_list, "Очередь прогрева", 10, use_markdown=False
+    )
 
     await message.answer(f"{result_text}\n\n{display}")
 
@@ -1349,7 +1353,9 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
                         channels.append(f"@{chat.username}")
 
         # Используем унифицированное отображение каналов
-        channels_display = await format_channels_display(channels, "Аккаунт подписан на каналы", 10)
+        channels_display = await format_channels_display(
+            channels, "Аккаунт подписан на каналы", 10, use_markdown=False
+        )
         await bot.send_message(message.from_user.id, f'{channels_display}\n\nПришлите каналы на которые нужно подписаться\n(если не нужно пришлите -)')
         await state.set_state(startaccount.regular_channels)
     else:
@@ -2110,7 +2116,9 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
     existing_warmup = await get_warmup_pending(account_id, limit=100)
     warmup_list = [ch["channel"] for ch in existing_warmup] if existing_warmup else []
     if warmup_list:
-        warmup_display = await format_channels_display(warmup_list, "Текущие каналы в прогреве", 10)
+        warmup_display = await format_channels_display(
+            warmup_list, "Текущие каналы в прогреве", 10, use_markdown=False
+        )
         await bot.send_message(message.from_user.id, warmup_display)
     
     # Помечаем как обработанное, чтобы избежать повторных вызовов
@@ -2302,23 +2310,40 @@ async def safe_send_comments(user_id, phone, account_id):
         active_client_locks.pop(key, None)
 
 
-async def format_channels_display(channels, title="Каналы", max_display=10):
-    """Унифицированное отображение списка каналов"""
-    sanitized_title = escape_markdown_text(str(title)) if title is not None else "Каналы"
+async def format_channels_display(
+    channels,
+    title="Каналы",
+    max_display=10,
+    *,
+    use_markdown: bool = True,
+):
+    """Унифицированное отображение списка каналов."""
+
+    if title is None:
+        title_text = "Каналы"
+    else:
+        title_text = str(title)
+
+    sanitized_title = (
+        escape_markdown_text(title_text) if use_markdown else title_text
+    )
 
     if not channels:
         return f"{sanitized_title}: нет"
 
-    escaped_channels = [escape_markdown_text(str(channel)) for channel in channels]
-
-    if len(escaped_channels) <= max_display:
-        return f"{sanitized_title} ({len(escaped_channels)}):\n" + '\n'.join(escaped_channels)
+    if use_markdown:
+        prepared_channels = [escape_markdown_text(str(channel)) for channel in channels]
     else:
-        displayed = escaped_channels[:max_display]
+        prepared_channels = [str(channel) for channel in channels]
+
+    if len(prepared_channels) <= max_display:
+        return f"{sanitized_title} ({len(prepared_channels)}):\n" + "\n".join(prepared_channels)
+    else:
+        displayed = prepared_channels[:max_display]
         return (
-            f"{sanitized_title} ({len(escaped_channels)}):\n"
-            + '\n'.join(displayed)
-            + f"\n... и еще {len(escaped_channels) - max_display} каналов"
+            f"{sanitized_title} ({len(prepared_channels)}):\n"
+            + "\n".join(displayed)
+            + f"\n... и еще {len(prepared_channels) - max_display} каналов"
         )
 
 
