@@ -52,3 +52,19 @@ def test_get_account_summary_handles_markdown_special_chars(monkeypatch):
     assert "2024-01-02 10:00\\_utc\\*" in summary
     assert "Prompt with \\_star\\*" in summary
     assert "Prompt with \\\\_star" not in summary
+
+
+def test_format_channels_display_plain_text_has_no_extra_escaping():
+    channels = ["@plain_channel", "@channel_with_underscore_"]
+
+    result = asyncio.run(
+        main.format_channels_display(
+            channels,
+            "Список каналов",
+            10,
+            use_markdown=False,
+        )
+    )
+
+    assert "\\_" not in result
+    assert "@channel_with_underscore_" in result
