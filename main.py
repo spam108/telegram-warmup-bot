@@ -11,7 +11,7 @@ import random
 from pyrogram import Client, filters
 from pyrogram.errors import UserAlreadyParticipant
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
@@ -715,6 +715,32 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
         return
 
 
+    elif call.startswith('warmclear_'):
+        await callback_query.answer()
+        session = str(call).split('_', 1)[1]
+        account_row = await get_account_by_session(callback_query.from_user.id, session)
+        if not account_row:
+            await bot.send_message(callback_query.from_user.id, "Аккаунт не найден в базе данных")
+            await state.clear()
+            await main_message(callback_query)
+            return
+
+        account_id = account_row["id"]
+
+        try:
+            await sync_warmup_channels(account_id, [])
+            await set_account_mode(account_id, "standard", warmup_days=None)
+            confirmation_text = (
+                f"Очередь прогрева для {session} очищена. Аккаунт переведён в стандартный режим."
+            )
+        except Exception as exc:
+            confirmation_text = f"Не удалось очистить очередь прогрева: {exc}"
+
+        await bot.send_message(callback_query.from_user.id, confirmation_text)
+        await state.clear()
+        await main_message(callback_query)
+        return
+
     elif call.startswith('warmup_'):
         await callback_query.answer()
         session = str(call).split('_', 1)[1]
@@ -738,12 +764,19 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
             warmup_display,
             "",
             "Отправьте каналы для прогрева (каждый канал на новой строке).",
-            "Отправьте '-' чтобы оставить очередь без изменений или 'clear' для очистки и перехода в стандартный режим.",
+            "Отправьте '-' чтобы оставить очередь без изменений или воспользуйтесь кнопкой Clear для очистки и перехода в стандартный режим.",
         ]
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Clear", callback_data=f"warmclear_{session}")]
+            ]
+        )
 
         await bot.send_message(
             callback_query.from_user.id,
             "\n".join(line for line in prompt_lines if line),
+            reply_markup=keyboard,
         )
         return
 
@@ -1010,7 +1043,7 @@ async def manage_warmup_channels(message: Message, state: FSMContext) -> None:
     incoming = (message.text or "").strip()
     if not incoming:
         await message.answer(
-            "Пришлите список каналов, '-' чтобы оставить очередь и при наличии каналов перезапустить прогрев, или 'clear' для очистки."
+            "Пришлите список каналов, '-' чтобы оставить очередь и при наличии каналов перезапустить прогрев, или воспользуйтесь кнопкой Clear для очистки."
         )
         return
 
