@@ -1010,7 +1010,7 @@ async def manage_warmup_channels(message: Message, state: FSMContext) -> None:
     incoming = (message.text or "").strip()
     if not incoming:
         await message.answer(
-            "Пришлите список каналов, '-' чтобы оставить очередь без изменений или 'clear' для очистки."
+            "Пришлите список каналов, '-' чтобы оставить очередь и при наличии каналов перезапустить прогрев, или 'clear' для очистки."
         )
         return
 
@@ -1040,10 +1040,8 @@ async def manage_warmup_channels(message: Message, state: FSMContext) -> None:
         else:
             await sync_warmup_channels(account_id, unique_channels)
             if unique_channels:
-                await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
                 result_text = f"Очередь прогрева обновлена. Запланировано {len(unique_channels)} каналов."
             else:
-                await set_account_mode(account_id, "standard", warmup_days=None)
                 result_text = "Очередь прогрева очищена. Аккаунт переведён в стандартный режим."
     except Exception as exc:
         await message.answer(f"Ошибка при обновлении каналов прогрева: {exc}")
@@ -1052,6 +1050,13 @@ async def manage_warmup_channels(message: Message, state: FSMContext) -> None:
         return
 
     updated_records = await get_warmup_pending(account_id, limit=100)
+    if updated_records:
+        warmup_settings = await ensure_latest_warmup_settings()
+        await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
+        next_join = plan_next_warmup_join(datetime.now(timezone.utc), warmup_settings)
+        await db_update_warmup_schedule(account_id, next_join=next_join)
+    else:
+        await set_account_mode(account_id, "standard", warmup_days=None)
     updated_list = [entry["channel"] for entry in updated_records] if updated_records else []
     display = await format_channels_display(updated_list, "Очередь прогрева", 10)
 
