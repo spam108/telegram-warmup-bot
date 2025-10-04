@@ -693,33 +693,39 @@ async def get_warmup_stats(account_id: int) -> Optional[Dict[str, Any]]:
 
 
 async def mark_account_running(account_id: int) -> None:
-    conn = await _require_conn()
-    await conn.execute(
-        """
-        UPDATE accounts
-        SET status = 'running',
-            last_started_at = CURRENT_TIMESTAMP,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-        """,
-        (account_id,),
-    )
-    await conn.commit()
+    async def _execute_update() -> None:
+        conn = await _require_conn()
+        await conn.execute(
+            """
+            UPDATE accounts
+            SET status = 'running',
+                last_started_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (account_id,),
+        )
+        await conn.commit()
+
+    await _retry_db_operation(_execute_update)
 
 
 async def mark_account_stopped(account_id: int) -> None:
-    conn = await _require_conn()
-    await conn.execute(
-        """
-        UPDATE accounts
-        SET status = 'stopped',
-            last_stopped_at = CURRENT_TIMESTAMP,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-        """,
-        (account_id,),
-    )
-    await conn.commit()
+    async def _execute_update() -> None:
+        conn = await _require_conn()
+        await conn.execute(
+            """
+            UPDATE accounts
+            SET status = 'stopped',
+                last_stopped_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (account_id,),
+        )
+        await conn.commit()
+
+    await _retry_db_operation(_execute_update)
 
 
 async def delete_account(user_id: int, phone: str) -> None:
