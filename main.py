@@ -3,6 +3,7 @@ import os
 import asyncio
 import logging
 import shutil
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, time, timezone, timedelta
 from typing import Dict, List, Optional, Set, Any, Union, Tuple
@@ -438,26 +439,33 @@ def is_warmup_join_period(now: datetime | None = None) -> bool:
     return is_warmup_sleep_period(now)
 
 async def check_account(user_id, phone):
-    try:
-        client = Client(
-            name=f"sessions/{user_id}/{phone}",
-            api_id=API_ID,
-            api_hash=API_HASH)
+    client = Client(
+        name=f"sessions/{user_id}/{phone}",
+        api_id=API_ID,
+        api_hash=API_HASH,
+    )
 
+    try:
         await client.connect()
         await client.get_me()
-        await client.disconnect()
-    
         return True
+    except sqlite3.OperationalError as e:
+        if "database is locked" in str(e).lower():
+            await bot.send_message(user_id, f"Аккаунт {phone} сейчас используется, попробуйте позже")
+            return False
+        raise
     except Exception as e:
-        await client.disconnect()  # На случай, если connect() был успешным
         await asyncio.sleep(1)
-       
         await bot.send_message(user_id, f"Аккаунт удален ошибка: {str(e)}")
 
-        os.remove(f'sessions/{user_id}/{phone}.session')
+        session_path = f'sessions/{user_id}/{phone}.session'
+        if os.path.exists(session_path):
+            os.remove(session_path)
         await delete_account(user_id, phone)
         return False
+    finally:
+        if getattr(client, "is_connected", False):
+            await client.disconnect()
 
 async def main_message(message):
     user_id = message.from_user.id
