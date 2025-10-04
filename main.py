@@ -69,6 +69,17 @@ def load_env_file():
 
 # Load environment variables
 env_vars = load_env_file()
+
+
+def _get_bool_env(name: str, default: bool = False) -> bool:
+    value = env_vars.get(name)
+    if value is None:
+        value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 BOT_TOKEN = env_vars.get("BOT_TOKEN") or os.getenv("BOT_TOKEN")
 print(f"BOT_TOKEN loaded: {BOT_TOKEN}")
 #APCDXBOT0310 @AP_comment_bot
@@ -80,12 +91,14 @@ API_HASH = env_vars.get("API_HASH") or os.getenv("API_HASH")
 print(f"API_HASH loaded: {API_HASH}")
 #1823
 
+WARMUP_VERBOSE_LOGS = _get_bool_env("WARMUP_VERBOSE_LOGS", default=False)
+WARMUP_VERBOSE_NOTIFICATIONS = _get_bool_env("WARMUP_VERBOSE_NOTIFICATIONS", default=False)
 
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG if WARMUP_VERBOSE_LOGS else logging.INFO)
 
 
 
@@ -2106,6 +2119,12 @@ async def process_warmup_accounts():
     """Фоновая задача для добавления каналов в режиме прогрева (во время сна)"""
     while True:
         current_settings = get_current_warmup_settings()
+        iteration_notifications: List[Tuple[str, str]] = []
+
+        def add_summary(level: str, message: str) -> None:
+            if level in ("warning", "error") or WARMUP_VERBOSE_NOTIFICATIONS:
+                iteration_notifications.append((level, message))
+
         try:
             current_settings = await ensure_latest_warmup_settings()
             now = datetime.now(timezone.utc)
@@ -2114,7 +2133,12 @@ async def process_warmup_accounts():
             
             # Логируем каждые 10 минут для отладки
             if now.minute % 10 == 0:
-                await bot.send_message(log_channel, f"Warmup check: {now.strftime('%H:%M')} UTC, is_warmup_join_time: {is_warmup_join_time}")
+                message = (
+                    f"Warmup check: {now.strftime('%H:%M')} UTC, "
+                    f"is_warmup_join_time: {is_warmup_join_time}"
+                )
+                logging.debug(message)
+                add_summary("debug", message)
             
             # Проверяем, находимся ли мы в периоде для вступления в каналы (во время сна)
             if not is_warmup_join_time:
@@ -2125,8 +2149,14 @@ async def process_warmup_accounts():
             accounts = [acc for acc in all_accounts if acc.get("mode") == "warmup"]
             random.shuffle(accounts)
             
-            await bot.send_message(log_channel, f"Warmup: Found {len(all_accounts)} running accounts, {len(accounts)} in warmup mode")
-            await bot.send_message(log_channel, f"Warmup: Active sessions: {list(active_sessions.keys())}")
+            logging.debug(
+                "Warmup: Found %s running accounts, %s in warmup mode",
+                len(all_accounts),
+                len(accounts),
+            )
+            add_summary("info", f"Running accounts: {len(all_accounts)}, warmup: {len(accounts)}")
+            logging.debug("Warmup: Active sessions: %s", list(active_sessions.keys()))
+            add_summary("debug", f"Active sessions: {list(active_sessions.keys())}")
 
             for account in accounts:
                 if account.get("mode") != "warmup":
@@ -2138,7 +2168,8 @@ async def process_warmup_accounts():
                 user_id = account["user_id"]
                 key = make_session_key(user_id, session_key)
                 
-                await bot.send_message(log_channel, f"Warmup: Processing account {session_key}, active: {active_sessions.get(key)}")
+                logging.debug("Warmup: Processing account %s, active: %s", session_key, active_sessions.get(key))
+                add_summary("debug", f"Processing account {session_key}, active={active_sessions.get(key)}")
 
                 # Проверяем, не истек ли период прогрева
                 warmup_end = _parse_warmup_datetime(account.get("warmup_end_at"))
@@ -2163,10 +2194,13 @@ async def process_warmup_accounts():
 
                 # Проверяем, не достигли ли дневного лимита
                 joined_today = account.get("warmup_joined_today", 0)
-                await bot.send_message(log_channel, f"Warmup: Account {session_key} joined today: {joined_today}/{daily_limit}")
+                logging.debug("Warmup: Account %s joined today: %s/%s", session_key, joined_today, daily_limit)
+                add_summary("debug", f"{session_key}: {joined_today}/{daily_limit} joins")
 
                 if joined_today >= daily_limit:
-                    await bot.send_message(log_channel, f"Warmup: Account {session_key} reached daily limit, skipping")
+                    message = f"Account {session_key} reached daily limit, skipping"
+                    logging.info("Warmup: %s", message)
+                    add_summary("info", message)
                     next_window_start = _next_join_window_start(now, current_settings)
                     next_time = plan_next_warmup_join(next_window_start, current_settings)
                     await db_update_warmup_schedule(account["id"], next_join=next_time)
@@ -2181,10 +2215,13 @@ async def process_warmup_accounts():
 
                 # Получаем следующий канал для добавления
                 pending_channels = await get_warmup_pending(account["id"], limit=1, reset_if_empty=True)
-                await bot.send_message(log_channel, f"Warmup: Account {session_key} pending channels: {len(pending_channels)}")
+                logging.debug("Warmup: Account %s pending channels: %s", session_key, len(pending_channels))
+                add_summary("debug", f"{session_key}: pending channels {len(pending_channels)}")
 
                 if not pending_channels:
-                    await bot.send_message(log_channel, f"Warmup: Account {session_key} no pending channels, skipping")
+                    message = f"Account {session_key} has no pending channels, skipping"
+                    logging.info("Warmup: %s", message)
+                    add_summary("info", message)
                     next_time = _get_next_warmup_join(now, current_settings)
                     await db_update_warmup_schedule(account["id"], next_join=next_time)
                     logging.info(
@@ -2202,7 +2239,11 @@ async def process_warmup_accounts():
                 # Проверяем существование файла сессии
                 session_file = os.path.join("sessions", str(user_id), f"{session_key}.session")
                 if not os.path.exists(session_file):
-                    await bot.send_message(log_channel, f"Аккаунт {session_key} (прогрев) - файл сессии не найден: {session_file}")
+                    warning_message = (
+                        f"Аккаунт {session_key} (прогрев) - файл сессии не найден: {session_file}"
+                    )
+                    logging.warning("Warmup: %s", warning_message)
+                    add_summary("warning", warning_message)
                     # Переключаем в стандартный режим если нет сессии
                     await set_account_mode(account["id"], "standard", warmup_days=None)
                     continue
@@ -2214,10 +2255,11 @@ async def process_warmup_accounts():
                     )
                 except TransientJoinError as transient_error:
                     transient_message = transient_error.message if hasattr(transient_error, "message") else str(transient_error)
-                    await bot.send_message(
-                        log_channel,
-                        f"Warmup: Account {session_key} временная ошибка вступления в {channel}: {transient_message}. Повторим позже.",
+                    warning_message = (
+                        f"Account {session_key} временная ошибка вступления в {channel}: {transient_message}. Повторим позже."
                     )
+                    logging.warning("Warmup: %s", warning_message)
+                    add_summary("warning", warning_message)
                     backoff_seconds = random.uniform(15, 45)
                     retry_time = datetime.now(timezone.utc) + timedelta(seconds=backoff_seconds)
                     await db_update_warmup_schedule(account["id"], next_join=retry_time)
@@ -2230,14 +2272,17 @@ async def process_warmup_accounts():
                         phrase in error_reason.lower()
                         for phrase in ("занят", "запускается")
                     ):
-                        await bot.send_message(
-                            log_channel,
-                            f"Warmup: Account {session_key} занят ({error_reason}), повторим позже",
-                        )
+                        info_message = f"Account {session_key} занят ({error_reason}), повторим позже"
+                        logging.info("Warmup: %s", info_message)
+                        add_summary("info", info_message)
                         continue
                     # Если сессия истекла - переключаем в стандартный режим
                     await set_account_mode(account["id"], "standard", warmup_days=None)
                     continue
+
+                success_message = f"Account {session_key} joined {channel}"
+                logging.info("Warmup: %s", success_message)
+                add_summary("info", success_message)
 
                 post_join_now = datetime.now(timezone.utc)
                 next_time = _get_next_warmup_join(post_join_now, current_settings)
@@ -2252,8 +2297,20 @@ async def process_warmup_accounts():
 
         except Exception as e:
             logging.exception("Warmup loop error: %s", e)
+            add_summary("error", f"Warmup loop error: {e}")
 
         # Ждем случайный интервал до следующей попытки, чтобы имитировать живое поведение
+        if iteration_notifications:
+            summary_lines = [f"{level.upper()}: {message}" for level, message in iteration_notifications]
+            timestamp = datetime.now(timezone.utc).strftime('%H:%M:%S')
+            summary_text = f"Warmup summary ({timestamp} UTC):\n" + "\n".join(summary_lines)
+            if len(summary_text) > 3800:
+                summary_text = summary_text[:3797] + "..."
+            try:
+                await bot.send_message(log_channel, summary_text)
+            except Exception:
+                logging.exception("Failed to send warmup summary notification")
+
         await asyncio.sleep(_get_human_delay_seconds(current_settings))
 
 @dp.message(addsession.number)
