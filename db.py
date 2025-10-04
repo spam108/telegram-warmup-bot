@@ -771,3 +771,62 @@ async def add_comment_log(
         await conn.commit()
 
     await _retry_db_operation(_execute_log)
+
+
+async def get_global_statistics() -> Dict[str, Any]:
+    """Aggregate high-level metrics for accounts, comments and warmup channels."""
+
+    conn = await _require_conn()
+
+    async def _fetch_counts(query: str, params: Iterable[Any] = ()) -> Dict[str, int]:
+        async with conn.execute(query, tuple(params)) as cursor:
+            rows = await cursor.fetchall()
+        return {str(row[0]): int(row[1] or 0) for row in rows}
+
+    accounts_total = 0
+    async with conn.execute("SELECT COUNT(*) FROM accounts") as cursor:
+        row = await cursor.fetchone()
+        if row:
+            accounts_total = int(row[0] or 0)
+
+    accounts_by_status = await _fetch_counts(
+        "SELECT status, COUNT(*) FROM accounts GROUP BY status"
+    )
+    accounts_by_mode = await _fetch_counts(
+        "SELECT mode, COUNT(*) FROM accounts GROUP BY mode"
+    )
+    running_by_mode = await _fetch_counts(
+        "SELECT mode, COUNT(*) FROM accounts WHERE status = 'running' GROUP BY mode"
+    )
+
+    comment_counts = await _fetch_counts(
+        "SELECT status, COUNT(*) FROM comment_logs GROUP BY status"
+    )
+    comments_total = sum(comment_counts.values())
+
+    warmup_counts = await _fetch_counts(
+        "SELECT status, COUNT(*) FROM warmup_channels GROUP BY status"
+    )
+
+    warmup_attempts = 0
+    async with conn.execute("SELECT COALESCE(SUM(attempts), 0) FROM warmup_channels") as cursor:
+        row = await cursor.fetchone()
+        if row:
+            warmup_attempts = int(row[0] or 0)
+
+    return {
+        "accounts": {
+            "total": accounts_total,
+            "by_status": accounts_by_status,
+            "by_mode": accounts_by_mode,
+            "running_by_mode": running_by_mode,
+        },
+        "comments": {
+            "total": comments_total,
+            "by_status": comment_counts,
+        },
+        "warmup": {
+            "by_status": warmup_counts,
+            "total_attempts": warmup_attempts,
+        },
+    }
