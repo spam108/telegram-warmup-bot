@@ -33,6 +33,25 @@ class DummyMessage:
         self.answers.append(text)
 
 
+class DummyCallback:
+    def __init__(self, data: str, user_id: int = 1):
+        self.data = data
+        self.from_user = types.SimpleNamespace(id=user_id)
+        self._deleted = False
+        self.message = types.SimpleNamespace(delete=self._delete)
+        self.answered = False
+        self.answer_text = None
+        self.answer_kwargs: Dict[str, Any] = {}
+
+    async def _delete(self) -> None:
+        self._deleted = True
+
+    async def answer(self, text: str | None = None, **kwargs: Any) -> None:
+        self.answered = True
+        self.answer_text = text
+        self.answer_kwargs = kwargs
+
+
 def test_manage_warmup_channels_dash_keeps_queue_and_resets_schedule(monkeypatch):
     state = DummyState({"account": "session", "account_id": 42})
     message = DummyMessage("-")
@@ -144,3 +163,46 @@ def test_manage_warmup_channels_clear_switches_to_standard(monkeypatch):
     assert calls["mode"] == [(99, "standard", {"warmup_days": None})]
     assert calls["plan"] is False, "Не должно планироваться расписание при пустой очереди"
     assert calls["db_update"] is False, "Не должно обновляться расписание при пустой очереди"
+
+
+def test_warmclear_callback_clears_queue_and_state(monkeypatch):
+    state = DummyState({"account": "session", "account_id": 77})
+    callback = DummyCallback("warmclear_session")
+
+    calls: Dict[str, Any] = {
+        "sync": None,
+        "mode": None,
+        "messages": [],
+        "main_message": False,
+    }
+
+    async def fake_get_account_by_session(user_id: int, session: str):
+        assert session == "session"
+        return {"id": 77}
+
+    async def fake_sync(account_id: int, channels: Any) -> None:
+        calls["sync"] = (account_id, channels)
+
+    async def fake_set_mode(account_id: int, mode: str, **kwargs: Any) -> None:
+        calls["mode"] = (account_id, mode, kwargs)
+
+    async def fake_send_message(user_id: int, text: str, **kwargs: Any) -> None:
+        calls["messages"].append((user_id, text, kwargs))
+
+    async def fake_main_message(msg):
+        calls["main_message"] = True
+
+    monkeypatch.setattr(main, "get_account_by_session", fake_get_account_by_session)
+    monkeypatch.setattr(main, "sync_warmup_channels", fake_sync)
+    monkeypatch.setattr(main, "set_account_mode", fake_set_mode)
+    monkeypatch.setattr(main.bot, "send_message", fake_send_message)
+    monkeypatch.setattr(main, "main_message", fake_main_message)
+
+    asyncio.run(main.callbacks(callback, state))
+
+    assert state.cleared, "Состояние должно очищаться после очистки очереди"
+    assert calls["sync"] == (77, []), "Очередь должна очищаться через warmclear"
+    assert calls["mode"] == (77, "standard", {"warmup_days": None})
+    assert calls["main_message"], "После очистки должно обновляться главное меню"
+    assert calls["messages"], "Пользователь должен получать уведомление"
+    assert callback.answered, "Коллбек должен подтверждаться"
