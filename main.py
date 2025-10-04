@@ -122,6 +122,31 @@ quiet_sessions_notified: Set[str] = set()
 active_pyrogram_clients: Dict[str, Client] = {}
 active_client_locks: Dict[str, asyncio.Lock] = {}
 
+
+class TransientJoinError(Exception):
+    """Raised when a transient error occurs while joining a channel."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
+_TRANSIENT_JOIN_ERROR_KEYWORDS: Tuple[str, ...] = (
+    "database is locked",
+    "db is locked",
+    "temporary failure",
+    "temporarily unavailable",
+)
+
+
+def _is_transient_join_error(message: str) -> bool:
+    """Return True if the error message indicates a transient problem."""
+
+    if not message:
+        return False
+    lowered = message.lower()
+    return any(keyword in lowered for keyword in _TRANSIENT_JOIN_ERROR_KEYWORDS)
+
 # Функция для загрузки настроек расписания
 def load_schedule_config():
     """Загружает настройки расписания из schedule.json"""
@@ -1329,7 +1354,15 @@ async def add_channels(message: Message, state: FSMContext) -> None:
 
                     else:
                         # Обычные каналы - вступаем сразу
-                        await join_channel(chl, account_id, session, message.from_user.id, is_warmup=False)
+                        try:
+                            await join_channel(
+                                chl, account_id, session, message.from_user.id, is_warmup=False
+                            )
+                        except TransientJoinError as transient_error:
+                            await bot.send_message(
+                                log_channel,
+                                f"Аккаунт {session} временная ошибка при вступлении в канал {chl}: {transient_error}",
+                            )
         else:
             await state.clear()
             await main_message(message)
@@ -1534,6 +1567,12 @@ async def join_channel(
 
             except Exception as e:
                 error_message = str(e)
+                if _is_transient_join_error(error_message):
+                    await bot.send_message(
+                        log_channel,
+                        f"Аккаунт {session_key} временная ошибка при вступлении в канал {channel}: {error_message}",
+                    )
+                    raise TransientJoinError(error_message)
                 if is_warmup:
                     await record_warmup_channel_error(account_id, channel, error_message)
                 await bot.send_message(log_channel, f"Аккаунт {session_key} ошибка вступления в канал {channel}: {e}")
@@ -1576,8 +1615,16 @@ async def join_channel(
         async with client:
             return await _join_with_client(client)
 
+    except TransientJoinError:
+        raise
     except Exception as e:
         error_msg = str(e)
+        if _is_transient_join_error(error_msg):
+            await bot.send_message(
+                log_channel,
+                f"Аккаунт {session_key} временная ошибка подключения: {error_msg}",
+            )
+            raise TransientJoinError(error_msg)
         if any(keyword in error_msg.lower() for keyword in ["phone number", "auth", "eof when reading", "session", "unauthorized"]):
             await bot.send_message(log_channel, f"Аккаунт {session_key} - сессия истекла или повреждена: {error_msg}")
             return False, error_msg
@@ -1692,7 +1739,22 @@ async def process_warmup_accounts():
                     continue
 
                 # Используем единую функцию для вступления в канал прогрева
-                success, error_reason = await join_channel(channel, account["id"], session_key, user_id, is_warmup=True)
+                try:
+                    success, error_reason = await join_channel(
+                        channel, account["id"], session_key, user_id, is_warmup=True
+                    )
+                except TransientJoinError as transient_error:
+                    transient_message = transient_error.message if hasattr(transient_error, "message") else str(transient_error)
+                    await bot.send_message(
+                        log_channel,
+                        f"Warmup: Account {session_key} временная ошибка вступления в {channel}: {transient_message}. Повторим позже.",
+                    )
+                    backoff_seconds = random.uniform(15, 45)
+                    retry_time = datetime.now(timezone.utc) + timedelta(seconds=backoff_seconds)
+                    await db_update_warmup_schedule(account["id"], next_join=retry_time)
+                    account["warmup_next_join_at"] = retry_time
+                    await asyncio.sleep(min(backoff_seconds, 5))
+                    continue
 
                 if not success:
                     if error_reason and any(
@@ -1829,9 +1891,21 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
 
         # Вступаем в обычные каналы сразу
         for channel in channels:
-            success, error_reason = await join_channel(
-                channel, account_id, session, message.from_user.id, is_warmup=False
-            )
+            try:
+                success, error_reason = await join_channel(
+                    channel, account_id, session, message.from_user.id, is_warmup=False
+                )
+            except TransientJoinError as transient_error:
+                reason_text = transient_error.message if hasattr(transient_error, "message") else str(transient_error)
+                await bot.send_message(
+                    log_channel,
+                    f"Не удалось добавить канал {channel} для аккаунта {session} из-за временной ошибки: {reason_text}",
+                )
+                await bot.send_message(
+                    message.from_user.id,
+                    f"Временная ошибка при вступлении в канал {channel}. Попробуйте позже. Детали: {reason_text}",
+                )
+                continue
 
             if success:
                 successful_channels.append(channel)
