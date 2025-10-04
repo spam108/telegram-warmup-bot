@@ -2838,6 +2838,8 @@ def format_global_statistics_report(stats: Dict[str, Any]) -> str:
 
     comment_counts = comments.get("by_status", {})
     warmup_counts = warmup.get("by_status", {})
+    reaction_counts = comments.get("reactions", {})
+    reaction_total = comments.get("reactions_total", 0)
 
     def _format_additional(counts: Dict[str, Any], known_keys: Set[str]) -> Optional[str]:
         extra = [f"{key}: {counts[key]}" for key in sorted(counts) if key not in known_keys]
@@ -2885,6 +2887,23 @@ def format_global_statistics_report(stats: Dict[str, Any]) -> str:
     )
     if other_comment_statuses:
         lines.append(f"• Прочие статусы: {other_comment_statuses}")
+
+    lines.extend(
+        [
+            "",
+            "😊 *Реакции*",
+            f"• Всего: {reaction_total}",
+            f"• Успешные: {reaction_counts.get('success', 0)}",
+            f"• Ошибки: {reaction_counts.get('error', 0)}",
+            f"• Пропущено: {reaction_counts.get('skipped', 0)}",
+        ]
+    )
+
+    other_reaction_statuses = _format_additional(
+        reaction_counts, {"success", "error", "skipped"}
+    )
+    if other_reaction_statuses:
+        lines.append(f"• Прочие статусы: {other_reaction_statuses}")
 
     lines.extend(
         [

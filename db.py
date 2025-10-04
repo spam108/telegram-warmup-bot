@@ -878,6 +878,13 @@ async def get_global_statistics() -> Dict[str, Any]:
     )
     comments_total = sum(comment_counts.values())
 
+    reaction_counts = {
+        status[len("reaction_") :]: count
+        for status, count in comment_counts.items()
+        if status.startswith("reaction_")
+    }
+    reaction_total = sum(reaction_counts.values())
+
     warmup_counts = await _fetch_counts(
         "SELECT status, COUNT(*) FROM warmup_channels GROUP BY status"
     )
@@ -898,6 +905,8 @@ async def get_global_statistics() -> Dict[str, Any]:
         "comments": {
             "total": comments_total,
             "by_status": comment_counts,
+            "reactions": reaction_counts,
+            "reactions_total": reaction_total,
         },
         "warmup": {
             "by_status": warmup_counts,
