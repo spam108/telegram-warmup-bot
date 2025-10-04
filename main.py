@@ -2062,14 +2062,22 @@ async def safe_send_comments(user_id, phone, account_id):
 
 async def format_channels_display(channels, title="Каналы", max_display=10):
     """Унифицированное отображение списка каналов"""
-    if not channels:
-        return f"{title}: нет"
+    sanitized_title = escape_markdown_text(str(title)) if title is not None else "Каналы"
 
-    if len(channels) <= max_display:
-        return f"{title} ({len(channels)}):\n" + '\n'.join(channels)
+    if not channels:
+        return f"{sanitized_title}: нет"
+
+    escaped_channels = [escape_markdown_text(str(channel)) for channel in channels]
+
+    if len(escaped_channels) <= max_display:
+        return f"{sanitized_title} ({len(escaped_channels)}):\n" + '\n'.join(escaped_channels)
     else:
-        displayed = channels[:max_display]
-        return f"{title} ({len(channels)}):\n" + '\n'.join(displayed) + f"\n... и еще {len(channels) - max_display} каналов"
+        displayed = escaped_channels[:max_display]
+        return (
+            f"{sanitized_title} ({len(escaped_channels)}):\n"
+            + '\n'.join(displayed)
+            + f"\n... и еще {len(escaped_channels) - max_display} каналов"
+        )
 
 
 def escape_markdown_text(text: str) -> str:
@@ -2113,7 +2121,13 @@ async def get_account_summary(account_id):
     account = await get_account_by_id(account_id)
     if not account:
         return None
-    
+
+    def sanitize_field(value, default="N/A"):
+        """Подготавливает значение для безопасного отображения в Markdown."""
+        if value is None or value == "":
+            value = default
+        return escape_markdown_text(str(value))
+
     # Получаем реальные подписки аккаунта из Telegram
     real_channels = []
     try:
@@ -2155,14 +2169,27 @@ async def get_account_summary(account_id):
         prompt_block = f"{notice}\n{escape_markdown_text(prompt_preview)}"
 
     # Формируем резюме
+    phone = sanitize_field(account.get('phone', 'N/A'))
+    sleep_min = sanitize_field(account.get('sleep_min', 'N/A'))
+    sleep_max = sanitize_field(account.get('sleep_max', 'N/A'))
+    chance = sanitize_field(account.get('chance', 'N/A'))
+    mode = sanitize_field(account.get('mode', 'N/A'))
+    status = sanitize_field(account.get('status', 'N/A'))
+    warmup_end_at = sanitize_field(account.get('warmup_end_at', 'N/A'))
+    warmup_joined_today = sanitize_field(account.get('warmup_joined_today', 0))
+    warmup_next_join_at = sanitize_field(account.get('warmup_next_join_at', 'N/A'))
+    last_started_at = sanitize_field(account.get('last_started_at', 'N/A'))
+    last_stopped_at = sanitize_field(account.get('last_stopped_at', 'N/A'))
+    updated_at = sanitize_field(account.get('updated_at', 'N/A'))
+
     summary = f"""
-📊 **Резюме аккаунта {account.get('phone', 'N/A')}**
+📊 **Резюме аккаунта {phone}**
 
 ⚙️ **Настройки:**
-• Задержка: {account.get('sleep_min', 'N/A')}-{account.get('sleep_max', 'N/A')} сек
-• Шанс комментирования: {account.get('chance', 'N/A')}%
-• Режим: {account.get('mode', 'N/A')}
-• Статус: {account.get('status', 'N/A')}
+• Задержка: {sleep_min}-{sleep_max} сек
+• Шанс комментирования: {chance}%
+• Режим: {mode}
+• Статус: {status}
 
 📝 **Системный промпт (превью):**
 {prompt_block}
@@ -2177,14 +2204,14 @@ async def get_account_summary(account_id):
 {await format_channels_display(warmup_list, "Прогрев", 10)}
 
 📅 **Время прогрева:**
-• Завершение: {account.get('warmup_end_at', 'N/A')}
-• Вступлений сегодня: {account.get('warmup_joined_today', 0)}
-• Следующее вступление: {account.get('warmup_next_join_at', 'N/A')}
+• Завершение: {warmup_end_at}
+• Вступлений сегодня: {warmup_joined_today}
+• Следующее вступление: {warmup_next_join_at}
 
 🕐 **Время работы:**
-• Запущен: {account.get('last_started_at', 'N/A')}
-• Остановлен: {account.get('last_stopped_at', 'N/A')}
-• Обновлен: {account.get('updated_at', 'N/A')}
+• Запущен: {last_started_at}
+• Остановлен: {last_stopped_at}
+• Обновлен: {updated_at}
 """
     return summary
 
