@@ -2,9 +2,9 @@
   "quiet_period": {
     "start_hour": 21,
     "start_minute": 30,
-    "end_hour": 4,
-    "end_minute": 30,
-    "description": "Режим тишины - бот не комментирует в это время (00:30-07:30 МСК = 21:30-04:30 UTC)"
+    "end_hour": 3,
+    "end_minute": 40,
+    "description": "Режим тишины - бот не комментирует в это время (00:30-06:40 МСК = 21:30-03:40 UTC)"
   },
   "warmup_period": {
     "start_hour": 1,
