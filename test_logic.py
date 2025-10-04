@@ -92,11 +92,15 @@ def test_sql_generation():
     sleep_min = 15
     sleep_max = 25
     channels = ["@test1", "@test2"]
-    
+    reaction_chance = 40
+    reaction_sleep_min = 5
+    reaction_sleep_max = 12
+    reaction_emojis = ["🔥", "👍"]
+
     # Генерируем SQL как в функции
     updates = []
     values = []
-    
+
     if chance is not None:
         updates.append("chance = $%d" % (len(values) + 1))
         values.append(chance)
@@ -109,10 +113,22 @@ def test_sql_generation():
     if sleep_max is not None:
         updates.append("sleep_max = $%d" % (len(values) + 1))
         values.append(sleep_max)
+    if reaction_chance is not None:
+        updates.append("reaction_chance = $%d" % (len(values) + 1))
+        values.append(reaction_chance)
+    if reaction_sleep_min is not None:
+        updates.append("reaction_sleep_min = $%d" % (len(values) + 1))
+        values.append(reaction_sleep_min)
+    if reaction_sleep_max is not None:
+        updates.append("reaction_sleep_max = $%d" % (len(values) + 1))
+        values.append(reaction_sleep_max)
+    if reaction_emojis is not None:
+        updates.append("reaction_emojis = $%d" % (len(values) + 1))
+        values.append(reaction_emojis)
     if channels is not None:
         updates.append("channels = $%d" % (len(values) + 1))
         values.append(channels)
-    
+
     values.append(account_id)
     assignments = ", ".join(updates)
     
@@ -124,9 +140,19 @@ def test_sql_generation():
     
     print(f"SQL запрос: {query}")
     print(f"Параметры: {values}")
-    
+
     # Проверяем, что все поля включены
-    expected_fields = ["chance", "system_prompt", "sleep_min", "sleep_max", "channels"]
+    expected_fields = [
+        "chance",
+        "system_prompt",
+        "sleep_min",
+        "sleep_max",
+        "reaction_chance",
+        "reaction_sleep_min",
+        "reaction_sleep_max",
+        "reaction_emojis",
+        "channels",
+    ]
     for field in expected_fields:
         if field in query:
             print(f"OK: Поле {field} найдено в запросе")

@@ -293,8 +293,9 @@ def test_add_sleeps_syncs_subscriptions(monkeypatch, tmp_path):
 
     updated_account = asyncio.run(db.get_account_by_id(account["id"]))
     assert updated_account is not None
-    assert recorded_calls == [{"account_id": account["id"], "channels": ["@alpha", "@beta"]}], (recorded_calls, format_calls, sent_messages)
-    assert format_calls == [["@alpha", "@beta"]], format_calls
-    assert updated_account["channels"] == ["@alpha", "@beta"], updated_account["channels"]
+    assert recorded_calls == [], (recorded_calls, format_calls, sent_messages)
+    assert format_calls == [], format_calls
+    assert sent_messages, "Ожидалось, что пользователю будет отправлено сообщение о настройке реакций"
+    assert "шанс реакции" in sent_messages[-1][1].lower()
 
     asyncio.run(db.close_db())

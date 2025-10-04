@@ -36,6 +36,10 @@ async def test_settings_save(tmp_path, monkeypatch):
         system_prompt="Тестовый промпт для проверки",
         sleep_min=15,
         sleep_max=25,
+        reaction_chance=70,
+        reaction_sleep_min=3,
+        reaction_sleep_max=6,
+        reaction_emojis=["🔥", "👍"],
     )
 
     stored = await db.get_account_by_id(account["id"])
@@ -43,5 +47,9 @@ async def test_settings_save(tmp_path, monkeypatch):
     assert stored["system_prompt"] == "Тестовый промпт для проверки"
     assert stored["sleep_min"] == 15
     assert stored["sleep_max"] == 25
+    assert stored["reaction_chance"] == 70
+    assert stored["reaction_sleep_min"] == 3
+    assert stored["reaction_sleep_max"] == 6
+    assert stored["reaction_emojis"] == ["🔥", "👍"]
 
     await db.close_db()

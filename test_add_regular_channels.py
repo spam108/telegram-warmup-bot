@@ -42,6 +42,9 @@ def test_add_regular_channels_success_and_failure(monkeypatch):
         "chance": 25,
         "systempromt": "Test prompt",
         "sleeps": "5-10",
+        "reaction_chance": 60,
+        "reaction_sleeps": "3-7",
+        "reaction_emojis": ["🔥", "👍"],
     }
     state = DummyState(state_data)
     message = DummyMessage("@good\n@bad", user_id=42)
@@ -81,6 +84,10 @@ def test_add_regular_channels_success_and_failure(monkeypatch):
     assert captured_update["kwargs"]["system_prompt"] == "Test prompt"
     assert captured_update["kwargs"]["sleep_min"] == 5
     assert captured_update["kwargs"]["sleep_max"] == 10
+    assert captured_update["kwargs"]["reaction_chance"] == 60
+    assert captured_update["kwargs"]["reaction_sleep_min"] == 3
+    assert captured_update["kwargs"]["reaction_sleep_max"] == 7
+    assert captured_update["kwargs"]["reaction_emojis"] == ["🔥", "👍"]
 
     failure_notifications = [msg for msg in recorded_messages if "Не удалось вступить" in msg[1]]
     assert failure_notifications, "Пользователь должен получать уведомление об ошибке"

@@ -104,6 +104,10 @@ async def init_db() -> None:
             system_prompt TEXT,
             sleep_min INTEGER,
             sleep_max INTEGER,
+            reaction_emojis TEXT,
+            reaction_chance INTEGER,
+            reaction_sleep_min INTEGER,
+            reaction_sleep_max INTEGER,
             channels TEXT,
             warmup_channels TEXT,
             status TEXT NOT NULL DEFAULT 'stopped',
@@ -178,6 +182,18 @@ async def init_db() -> None:
         )
         """
     )
+
+    async def _ensure_column(table: str, column: str, definition: str) -> None:
+        try:
+            await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError as exc:  # pragma: no cover - defensive branch
+            if "duplicate column name" not in str(exc).lower():
+                raise
+
+    await _ensure_column("accounts", "reaction_emojis", "TEXT")
+    await _ensure_column("accounts", "reaction_chance", "INTEGER")
+    await _ensure_column("accounts", "reaction_sleep_min", "INTEGER")
+    await _ensure_column("accounts", "reaction_sleep_max", "INTEGER")
 
     await conn.commit()
     _CONN = conn
@@ -370,6 +386,7 @@ def _convert_account_row(row: aiosqlite.Row) -> Dict[str, Any]:
     data = dict(row)
     data["channels"] = _deserialize_list(data.get("channels"))
     data["warmup_channels"] = _deserialize_list(data.get("warmup_channels"))
+    data["reaction_emojis"] = _deserialize_list(data.get("reaction_emojis"))
     return data
 
 
@@ -430,6 +447,10 @@ async def update_account_settings(
     system_prompt: Optional[str] = None,
     sleep_min: Optional[int] = None,
     sleep_max: Optional[int] = None,
+    reaction_chance: Optional[int] = None,
+    reaction_sleep_min: Optional[int] = None,
+    reaction_sleep_max: Optional[int] = None,
+    reaction_emojis: Optional[List[str]] = None,
     channels: Optional[List[str]] = None,
 ) -> None:
     print(
@@ -453,6 +474,18 @@ async def update_account_settings(
     if sleep_max is not None:
         updates.append("sleep_max = ?")
         values.append(sleep_max)
+    if reaction_chance is not None:
+        updates.append("reaction_chance = ?")
+        values.append(reaction_chance)
+    if reaction_sleep_min is not None:
+        updates.append("reaction_sleep_min = ?")
+        values.append(reaction_sleep_min)
+    if reaction_sleep_max is not None:
+        updates.append("reaction_sleep_max = ?")
+        values.append(reaction_sleep_max)
+    if reaction_emojis is not None:
+        updates.append("reaction_emojis = ?")
+        values.append(_serialize_list(reaction_emojis))
     if channels is not None:
         updates.append("channels = ?")
         values.append(_serialize_list(channels))
@@ -473,6 +506,47 @@ async def update_account_settings(
     await conn.execute(query, tuple(values))
     await conn.commit()
     print(f"DEBUG: SQL update completed successfully for account_id={account_id}")
+
+
+async def bulk_update_reaction_settings(
+    user_id: int,
+    *,
+    reaction_chance: Optional[int] = None,
+    reaction_sleep_min: Optional[int] = None,
+    reaction_sleep_max: Optional[int] = None,
+    reaction_emojis: Optional[List[str]] = None,
+) -> None:
+    updates: List[str] = []
+    values: List[Any] = []
+
+    if reaction_chance is not None:
+        updates.append("reaction_chance = ?")
+        values.append(reaction_chance)
+    if reaction_sleep_min is not None:
+        updates.append("reaction_sleep_min = ?")
+        values.append(reaction_sleep_min)
+    if reaction_sleep_max is not None:
+        updates.append("reaction_sleep_max = ?")
+        values.append(reaction_sleep_max)
+    if reaction_emojis is not None:
+        updates.append("reaction_emojis = ?")
+        values.append(_serialize_list(reaction_emojis))
+
+    if not updates:
+        return
+
+    updates.append("updated_at = CURRENT_TIMESTAMP")
+
+    conn = await _require_conn()
+    values.append(user_id)
+    query = f"""
+        UPDATE accounts
+        SET {', '.join(updates)}
+        WHERE user_id = ?
+    """
+
+    await conn.execute(query, tuple(values))
+    await conn.commit()
 
 
 async def set_account_mode(account_id: int, mode: str, warmup_days: Optional[int] = None) -> None:
