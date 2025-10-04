@@ -1520,7 +1520,14 @@ async def send_comments(userid, session, account_id):
             key = make_session_key(userid, session)
             account_id = active_account_ids.pop(key, None)
             if account_id:
-                await mark_account_stopped(account_id)
+                try:
+                    await mark_account_stopped(account_id)
+                except sqlite3.OperationalError as db_exc:
+                    logging.error(
+                        "Failed to mark account %s stopped after retries: %s",
+                        account_id,
+                        db_exc,
+                    )
             active_sessions.pop(key, None)
             quiet_sessions_notified.discard(key)
             active_pyrogram_clients.pop(key, None)
@@ -2199,7 +2206,14 @@ async def safe_send_comments(user_id, phone, account_id):
     except Exception as e:
         logging.exception("Error in send_comments for account %s: %s", account_id, e)
         # Останавливаем аккаунт при критической ошибке
-        await mark_account_stopped(account_id)
+        try:
+            await mark_account_stopped(account_id)
+        except sqlite3.OperationalError as db_exc:
+            logging.error(
+                "Failed to mark account %s stopped after retries: %s",
+                account_id,
+                db_exc,
+            )
         key = make_session_key(user_id, phone)
         active_sessions.pop(key, None)
         active_account_ids.pop(key, None)

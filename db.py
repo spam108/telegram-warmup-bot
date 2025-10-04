@@ -707,7 +707,7 @@ async def mark_account_running(account_id: int) -> None:
         )
         await conn.commit()
 
-    await _retry_db_operation(_execute_update)
+    await _retry_db_operation(_execute_update, max_retries=5)
 
 
 async def mark_account_stopped(account_id: int) -> None:
@@ -725,7 +725,7 @@ async def mark_account_stopped(account_id: int) -> None:
         )
         await conn.commit()
 
-    await _retry_db_operation(_execute_update)
+    await _retry_db_operation(_execute_update, max_retries=5)
 
 
 async def delete_account(user_id: int, phone: str) -> None:
