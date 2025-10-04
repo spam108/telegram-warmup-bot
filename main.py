@@ -582,10 +582,10 @@ async def main_message(message):
     builder.row(
         types.InlineKeyboardButton(text="Добавить аккаунт", callback_data="add_account"),
         types.InlineKeyboardButton(text="Добавить прогрев", callback_data="add_warmup"),
-        types.InlineKeyboardButton(text="Настройки прогрева", callback_data="warmup_settings"),
     )
     builder.row(
-        types.InlineKeyboardButton(text="Общая статистика", callback_data="global_stats"),
+        types.InlineKeyboardButton(text="📊 Общая статистика", callback_data="global_stats"),
+        types.InlineKeyboardButton(text="⚙️ Настройки прогрева", callback_data="warmup_settings"),
     )
 
     await bot.send_message(message.from_user.id, 'Ваши аккаунты', reply_markup=builder.as_markup())
