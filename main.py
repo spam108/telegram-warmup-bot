@@ -46,6 +46,7 @@ from db import (
     increment_warmup_joined,
     update_warmup_settings,
     _require_pool,
+    bulk_update_reaction_settings,
 )
 from dotenv import load_dotenv
 
@@ -104,6 +105,9 @@ class startaccount(StatesGroup):
     systempromt = State()
     sleeps = State()
     chance = State()
+    reaction_chance = State()
+    reaction_sleeps = State()
+    reaction_emojis = State()
     regular_channels = State()
     warmup_channels = State()
 
@@ -733,6 +737,16 @@ async def process_password(message: types.Message, state: FSMContext):
 @dp.callback_query()
 async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
     call = callback_query.data
+
+    if call == "reaction_apply_all":
+        await state.update_data({"apply_reactions_to_all": True})
+        await callback_query.answer("Настройки реакций будут применены ко всем аккаунтам")
+        await bot.send_message(
+            callback_query.from_user.id,
+            "После завершения ввода текущие настройки реакций будут сохранены для всех аккаунтов."
+        )
+        return
+
     await callback_query.message.delete()
 
     if call == 'add_account':
@@ -879,6 +893,7 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
                 # Все аккаунты проходят через диалог настройки
                 account_id = account_row["id"]
                 await state.update_data({"account": session, "account_id": account_id})
+                await state.update_data({"apply_reactions_to_all": False})
 
                 current_chance = account_row.get("chance")
                 if current_chance is None:
@@ -1187,6 +1202,245 @@ async def _prompt_sleeps(message: Message, state: FSMContext) -> None:
     )
 
 
+async def _prompt_reaction_chance(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+    stored = account.get("reaction_chance") if account else None
+    if stored is None:
+        stored = data.get("reaction_chance")
+
+    display = _format_chance(stored)
+    await bot.send_message(
+        message.from_user.id,
+        (
+            f"Текущий шанс реакции: {display}.\n"
+            "Отправьте значение от 0 до 100 или '-' для сохранения текущего."
+        ),
+    )
+
+
+async def _prompt_reaction_sleeps(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+
+    stored_range: Optional[str] = None
+    if account:
+        reaction_min = account.get("reaction_sleep_min")
+        reaction_max = account.get("reaction_sleep_max")
+        stored_range = _format_sleep_range(reaction_min, reaction_max)
+
+    if stored_range is None:
+        stored_range = data.get("reaction_sleeps")
+
+    if stored_range:
+        display = stored_range
+        suffix = ""
+    else:
+        display = "не заданы"
+        suffix = " (используются задержки комментирования)"
+
+    await bot.send_message(
+        message.from_user.id,
+        (
+            f"Текущая задержка перед реакцией: {display}{suffix}.\n"
+            "Отправьте диапазон в формате 5-15 или '-' для сохранения текущего."
+        ),
+    )
+
+
+async def _prompt_reaction_emojis(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+
+    stored_emojis: Optional[List[str]] = None
+    if account:
+        stored_emojis = account.get("reaction_emojis")
+    if stored_emojis is None:
+        stored_emojis = data.get("reaction_emojis")
+
+    display = " ".join(stored_emojis) if stored_emojis else "не заданы"
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Применить всем аккаунтам", callback_data="reaction_apply_all")
+    builder.adjust(1)
+
+    await bot.send_message(
+        message.from_user.id,
+        (
+            f"Текущий набор эмодзи для реакций: {display}.\n"
+            "Отправьте эмодзи через пробел или в столбик. Используйте '-' для сохранения текущего."
+        ),
+        reply_markup=builder.as_markup(),
+    )
+
+
+async def _prepare_regular_channels_prompt(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    session = data.get("account")
+    account_id = data.get("account_id")
+
+    channels: List[str] = []
+    seen_channels: Set[str] = set()
+
+    app = Client(
+        name=f"sessions/{message.from_user.id}/{session}",
+        api_id=API_ID,
+        api_hash=API_HASH)
+
+    if await check_account(message.from_user.id, session):
+        async with app:
+            async for dialog in app.get_dialogs():
+                chat = dialog.chat
+                if str(chat.type) == "ChatType.CHANNEL" and chat.username is not None:
+                    channel_handle = f"@{chat.username}"
+                    if channel_handle not in seen_channels:
+                        channels.append(channel_handle)
+                        seen_channels.add(channel_handle)
+
+        if account_id:
+            await update_account_settings(account_id, channels=channels)
+
+        channels_display = await format_channels_display(
+            channels, "Аккаунт подписан на каналы", 10, use_markdown=False
+        )
+        await bot.send_message(
+            message.from_user.id,
+            f'{channels_display}\n\nПришлите каналы на которые нужно подписаться\n(если не нужно пришлите -)'
+        )
+        await state.set_state(startaccount.regular_channels)
+    else:
+        await state.clear()
+        await main_message(message)
+
+
+@dp.message(startaccount.reaction_chance)
+async def add_reaction_chance(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+
+    stored_chance: Optional[Union[int, str]] = None
+    if account:
+        stored_chance = account.get("reaction_chance")
+    if stored_chance is None:
+        stored_chance = data.get("reaction_chance")
+
+    incoming = (message.text or "").strip()
+
+    if incoming == "-":
+        if stored_chance is None:
+            await bot.send_message(
+                message.from_user.id,
+                "Текущий шанс реакции не задан. Укажите значение от 0 до 100.",
+            )
+            await _prompt_reaction_chance(message, state)
+            return
+        try:
+            reaction_chance_value = int(stored_chance)
+        except (TypeError, ValueError):
+            await bot.send_message(
+                message.from_user.id,
+                "Не удалось определить сохранённый шанс реакции. Введите значение от 0 до 100.",
+            )
+            await _prompt_reaction_chance(message, state)
+            return
+    elif incoming.isdigit():
+        reaction_chance_value = int(incoming)
+        if reaction_chance_value < 0 or reaction_chance_value > 100:
+            await bot.send_message(
+                message.from_user.id,
+                "Шанс реакции должен быть в диапазоне от 0 до 100.",
+            )
+            await _prompt_reaction_chance(message, state)
+            return
+    else:
+        current_display = _format_chance(stored_chance)
+        await bot.send_message(
+            message.from_user.id,
+            (
+                f"Некорректное значение. Текущий шанс реакции: {current_display}.\n"
+                "Отправьте число от 0 до 100 или '-' для сохранения текущего."
+            ),
+        )
+        await _prompt_reaction_chance(message, state)
+        return
+
+    await state.update_data({"reaction_chance": reaction_chance_value})
+
+    await _prompt_reaction_sleeps(message, state)
+    await state.set_state(startaccount.reaction_sleeps)
+
+
+@dp.message(startaccount.reaction_sleeps)
+async def add_reaction_sleeps(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+
+    stored_range: Optional[str] = None
+    if account:
+        reaction_min = account.get("reaction_sleep_min")
+        reaction_max = account.get("reaction_sleep_max")
+        stored_range = _format_sleep_range(reaction_min, reaction_max)
+    if stored_range is None:
+        stored_range = data.get("reaction_sleeps")
+
+    incoming = (message.text or "").strip()
+
+    if incoming == "-":
+        await state.update_data({"reaction_sleeps": stored_range})
+    else:
+        parsed_range = _parse_sleep_range_input(incoming)
+        if not parsed_range:
+            current_display = stored_range if stored_range else "не заданы"
+            await bot.send_message(
+                message.from_user.id,
+                (
+                    f"Неверный формат задержки реакции: {current_display}.\n"
+                    "Отправьте диапазон в формате 5-15 или '-' для сохранения текущего."
+                ),
+            )
+            await _prompt_reaction_sleeps(message, state)
+            return
+
+        reaction_min, reaction_max = parsed_range
+        await state.update_data({"reaction_sleeps": f"{reaction_min}-{reaction_max}"})
+
+    await _prompt_reaction_emojis(message, state)
+    await state.set_state(startaccount.reaction_emojis)
+
+
+@dp.message(startaccount.reaction_emojis)
+async def add_reaction_emojis(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+
+    stored_emojis: Optional[List[str]] = None
+    if account:
+        stored_emojis = account.get("reaction_emojis")
+    if stored_emojis is None:
+        stored_emojis = data.get("reaction_emojis")
+
+    incoming = (message.text or "").strip()
+
+    if incoming == "-":
+        emoji_list = stored_emojis or []
+    else:
+        normalized = incoming.replace("\n", " ").replace(",", " ")
+        tokens = [token for token in normalized.split(" ") if token]
+        unique_emojis: List[str] = []
+        seen: Set[str] = set()
+        for token in tokens:
+            if token not in seen:
+                unique_emojis.append(token)
+                seen.add(token)
+
+        if not unique_emojis:
+            await bot.send_message(
+                message.from_user.id,
+                "Не удалось распознать эмодзи. Отправьте эмодзи через пробел или '-' для сохранения текущего набора.",
+            )
+            await _prompt_reaction_emojis(message, state)
+            return
+
+        emoji_list = unique_emojis
+
+    await state.update_data({"reaction_emojis": emoji_list})
+
+    await _prepare_regular_channels_prompt(message, state)
+
+
 def _parse_sleep_range_input(text: str) -> Optional[Tuple[int, int]]:
     parts = [part.strip() for part in text.split('-')]
     if len(parts) != 2 or not all(part.isdigit() for part in parts):
@@ -1334,53 +1588,27 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
         sleep_min, sleep_max = parsed_range
         await state.update_data({"sleeps": f"{sleep_min}-{sleep_max}"})
 
-    data = await state.get_data()
-    session = data.get("account")
-
-    channels: List[str] = []
-    seen_channels: Set[str] = set()
-
-    app = Client(
-        name=f"sessions/{message.from_user.id}/{session}",
-        api_id=API_ID,
-        api_hash=API_HASH)
-
-    if await check_account(message.from_user.id, session):
-        async with app:
-            async for dialog in app.get_dialogs():
-                chat = dialog.chat
-                if str(chat.type) == "ChatType.CHANNEL" and chat.username is not None:
-                    channel_handle = f"@{chat.username}"
-                    if channel_handle not in seen_channels:
-                        channels.append(channel_handle)
-                        seen_channels.add(channel_handle)
-
-        if account_id:
-            await update_account_settings(account_id, channels=channels)
-
-        # Используем унифицированное отображение каналов
-        channels_display = await format_channels_display(
-            channels, "Аккаунт подписан на каналы", 10, use_markdown=False
-        )
-        await bot.send_message(message.from_user.id, f'{channels_display}\n\nПришлите каналы на которые нужно подписаться\n(если не нужно пришлите -)')
-        await state.set_state(startaccount.regular_channels)
-    else:
-        await state.clear()
-        await main_message(message)
+    await _prompt_reaction_chance(message, state)
+    await state.set_state(startaccount.reaction_chance)
 
 
 @dp.message(startaccount.channels)
 async def add_channels(message: Message, state: FSMContext) -> None:
     print(f"DEBUG: add_channels called with message: {message.text}")
     
-    session = (await state.get_data()).get("account")
-    sleeps = (await state.get_data()).get("sleeps")
-    system_promt = (await state.get_data()).get("systempromt")
-    chance = (await state.get_data()).get("chance")
+    state_data = await state.get_data()
+    session = state_data.get("account")
+    sleeps = state_data.get("sleeps")
+    system_promt = state_data.get("systempromt")
+    chance = state_data.get("chance")
+    reaction_sleeps = state_data.get("reaction_sleeps")
+    reaction_chance = state_data.get("reaction_chance")
+    reaction_emojis = state_data.get("reaction_emojis")
+    apply_reactions_to_all = state_data.get("apply_reactions_to_all")
 
     print(f"DEBUG: State data - sleeps: {sleeps}, system_promt: {system_promt}, chance: {chance}")
 
-    account_id = (await state.get_data()).get("account_id")
+    account_id = state_data.get("account_id")
     warmup_channels = []
     channels = []
 
@@ -1430,6 +1658,7 @@ async def add_channels(message: Message, state: FSMContext) -> None:
 
     # Сохраняем все настройки в базу данных
     sleep_min, sleep_max = None, None
+    reaction_sleep_min, reaction_sleep_max = None, None
     if sleeps and '-' in sleeps:
         try:
             sleep_parts = sleeps.split('-')
@@ -1439,8 +1668,30 @@ async def add_channels(message: Message, state: FSMContext) -> None:
         except ValueError:
             pass
 
-    print(f"DEBUG: About to save settings - account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, system_promt={system_promt}")
-    await bot.send_message(log_channel, f"DEBUG: About to save settings - account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, system_promt={system_promt}")
+    if isinstance(reaction_sleeps, str) and '-' in reaction_sleeps:
+        try:
+            reaction_parts = reaction_sleeps.split('-')
+            if len(reaction_parts) == 2:
+                reaction_sleep_min = int(reaction_parts[0])
+                reaction_sleep_max = int(reaction_parts[1])
+        except ValueError:
+            pass
+
+    print(
+        "DEBUG: About to save settings - "
+        f"account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, "
+        f"system_promt={system_promt}, reaction_sleep_min={reaction_sleep_min}, "
+        f"reaction_sleep_max={reaction_sleep_max}, reaction_chance={reaction_chance}, "
+        f"reaction_emojis={reaction_emojis}"
+    )
+    await bot.send_message(
+        log_channel,
+        "DEBUG: About to save settings - "
+        f"account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, "
+        f"system_promt={system_promt}, reaction_sleep_min={reaction_sleep_min}, "
+        f"reaction_sleep_max={reaction_sleep_max}, reaction_chance={reaction_chance}, "
+        f"reaction_emojis={reaction_emojis}"
+    )
 
     await update_account_settings(
         account_id,
@@ -1448,9 +1699,31 @@ async def add_channels(message: Message, state: FSMContext) -> None:
         sleep_min=sleep_min,
         sleep_max=sleep_max,
         chance=chance,
-        system_prompt=system_promt
+        system_prompt=system_promt,
+        reaction_sleep_min=reaction_sleep_min,
+        reaction_sleep_max=reaction_sleep_max,
+        reaction_chance=reaction_chance,
+        reaction_emojis=reaction_emojis,
     )
-    
+
+    if apply_reactions_to_all:
+        await bulk_update_reaction_settings(
+            message.from_user.id,
+            reaction_sleep_min=reaction_sleep_min,
+            reaction_sleep_max=reaction_sleep_max,
+            reaction_chance=reaction_chance,
+            reaction_emojis=reaction_emojis,
+        )
+        await bot.send_message(
+            message.from_user.id,
+            "Настройки реакций применены ко всем вашим аккаунтам."
+        )
+        await bot.send_message(
+            log_channel,
+            f"Аккаунт {session}: настройки реакций применены ко всем аккаунтам пользователя."
+        )
+        await state.update_data({"apply_reactions_to_all": False})
+
     print(f"DEBUG: Settings saved successfully for account_id={account_id}")
     await bot.send_message(log_channel, f"DEBUG: Settings saved successfully for account_id={account_id}")
 
@@ -1483,6 +1756,16 @@ async def send_comments(userid, session, account_id):
         chance = account.get("chance") or 100
 
         xsleep, ysleep = sleep_min, sleep_max
+        reaction_emojis: List[str] = account.get("reaction_emojis") or []
+        reaction_chance = account.get("reaction_chance") or 0
+        reaction_sleep_min = account.get("reaction_sleep_min")
+        reaction_sleep_max = account.get("reaction_sleep_max")
+        if reaction_sleep_min is None:
+            reaction_sleep_min = sleep_min
+        if reaction_sleep_max is None:
+            reaction_sleep_max = sleep_max
+        if reaction_sleep_min > reaction_sleep_max:
+            reaction_sleep_min, reaction_sleep_max = reaction_sleep_max, reaction_sleep_min
 
         @app.on_message(filters.channel)
         async def channel_handler(client: Client, message: Message):
@@ -1497,15 +1780,28 @@ async def send_comments(userid, session, account_id):
             except Exception as ex:
                 print(ex)
 
-        @app.on_message(filters.linked_channel)
+        def _is_discussion_reply(_: Client, __, incoming_message: Message) -> bool:
+            reply = getattr(incoming_message, "reply_to_message", None)
+            if not reply:
+                return False
+            forward_chat = getattr(reply, "forward_from_chat", None)
+            return forward_chat is not None
+
+        discussion_filter = filters.create(_is_discussion_reply)
+
+        @app.on_message(filters.linked_channel | discussion_filter)
         async def linked_channel_handler(client: Client, message: Message):
             key = make_session_key(userid, session)
             if not active_sessions.get(key, False):
                 return
-            
+
+            if _is_discussion_reply(client, None, message):
+                logging.debug("Обнаружен комментарий в обсуждении для %s", session)
+                return
+
             if (message.chat.permissions.can_send_messages is True) and (
                     message.text is not None or message.caption is not None):
-                
+
                 roll = random.randint(1, 100)
                 if roll > chance:
                     await bot.send_message(log_channel, f'Аккаунт {session} пропустил комментарий (rnd {roll} > {chance})')
@@ -1556,12 +1852,25 @@ async def send_comments(userid, session, account_id):
                     comment = generate_comment(post_text, system_promt)
                     msg = await client.send_message(message.chat.id, comment, reply_to_message_id=message.id)
 
-                    if hasattr(msg, "reply_to_message") and msg.reply_to_message and hasattr(msg.reply_to_message, "forward_from_chat") and msg.reply_to_message.forward_from_chat:
-                        await bot.send_message(log_channel, f'Аккаунт {session} отправил комментарий\n'
-                                                        f'https://t.me/{msg.reply_to_message.forward_from_chat.username}/{msg.reply_to_message.forward_from_message_id}?comment={msg.id}')
+                    post_base_link: Optional[str] = None
+                    if (
+                        hasattr(msg, "reply_to_message")
+                        and msg.reply_to_message
+                        and hasattr(msg.reply_to_message, "forward_from_chat")
+                        and msg.reply_to_message.forward_from_chat
+                    ):
+                        post_base_link = (
+                            f'https://t.me/{msg.reply_to_message.forward_from_chat.username}/'
+                            f'{msg.reply_to_message.forward_from_message_id}'
+                        )
                     else:
-                        await bot.send_message(log_channel, f'Аккаунт {session} отправил комментарий\n'
-                                                        f'https://t.me/c/{str(message.chat.id).replace("-", "")}/{msg.id}')
+                        post_base_link = f'https://t.me/c/{str(message.chat.id).replace("-", "")}/{message.id}'
+
+                    comment_link = f"{post_base_link}?comment={msg.id}"
+                    await bot.send_message(
+                        log_channel,
+                        f'Аккаунт {session} отправил комментарий\n{comment_link}'
+                    )
                     # Небольшая пауза перед записью в БД
                     await asyncio.sleep(0.2)
                     await add_comment_log(
@@ -1570,6 +1879,47 @@ async def send_comments(userid, session, account_id):
                         message_id=msg.id,
                         status='success',
                     )
+
+                    if reaction_emojis and reaction_chance > 0:
+                        reaction_roll = random.randint(1, 100)
+                        if reaction_roll <= reaction_chance:
+                            await asyncio.sleep(random.uniform(reaction_sleep_min, reaction_sleep_max))
+                            reaction_emoji = random.choice(reaction_emojis)
+                            try:
+                                await client.send_reaction(message.chat.id, message.id, reaction_emoji)
+                                await bot.send_message(
+                                    log_channel,
+                                    f'Аккаунт {session} поставил реакцию {reaction_emoji}\n{post_base_link}'
+                                )
+                                await asyncio.sleep(0.2)
+                                await add_comment_log(
+                                    account_id,
+                                    channel=str(message.chat.id),
+                                    message_id=message.id,
+                                    status='reaction_success',
+                                )
+                            except Exception as reaction_error:
+                                await bot.send_message(
+                                    log_channel,
+                                    f'Аккаунт {session} ошибка при установке реакции: {reaction_error}'
+                                )
+                                await asyncio.sleep(0.2)
+                                await add_comment_log(
+                                    account_id,
+                                    channel=str(message.chat.id),
+                                    message_id=message.id,
+                                    status='reaction_error',
+                                    error=str(reaction_error),
+                                )
+                        else:
+                            await asyncio.sleep(0.2)
+                            await add_comment_log(
+                                account_id,
+                                channel=str(message.chat.id),
+                                message_id=message.id,
+                                status='reaction_skipped',
+                                error=f'reaction random {reaction_roll} > chance {reaction_chance}',
+                            )
 
 
                 except ChatWriteForbidden as e:
@@ -2086,10 +2436,17 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
         channels = []
 
     sleep_min, sleep_max = None, None
+    reaction_sleep_min, reaction_sleep_max = None, None
     if sleeps:
         parsed_range = _parse_sleep_range_input(str(sleeps))
         if parsed_range:
             sleep_min, sleep_max = parsed_range
+
+    reaction_range_raw = data.get("reaction_sleeps") if data else None
+    if reaction_range_raw:
+        parsed_reaction = _parse_sleep_range_input(str(reaction_range_raw))
+        if parsed_reaction:
+            reaction_sleep_min, reaction_sleep_max = parsed_reaction
 
     update_kwargs = {
         "chance": chance,
@@ -2097,6 +2454,11 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
         "sleep_min": sleep_min,
         "sleep_max": sleep_max,
     }
+    if data is not None:
+        update_kwargs["reaction_chance"] = data.get("reaction_chance")
+        update_kwargs["reaction_sleep_min"] = reaction_sleep_min
+        update_kwargs["reaction_sleep_max"] = reaction_sleep_max
+        update_kwargs["reaction_emojis"] = data.get("reaction_emojis")
     if channels_to_update is not None:
         update_kwargs["channels"] = channels_to_update
 
@@ -2541,6 +2903,19 @@ async def get_account_summary(account_id):
     sleep_min = sanitize_field(account.get('sleep_min', 'N/A'))
     sleep_max = sanitize_field(account.get('sleep_max', 'N/A'))
     chance = sanitize_field(account.get('chance', 'N/A'))
+    reaction_chance_value = account.get('reaction_chance')
+    reaction_chance_display = _format_chance(reaction_chance_value)
+    reaction_sleep_min_value = account.get('reaction_sleep_min')
+    reaction_sleep_max_value = account.get('reaction_sleep_max')
+    if reaction_sleep_min_value is None or reaction_sleep_max_value is None:
+        reaction_delay_display = "не заданы"
+    else:
+        reaction_delay_display = f"{reaction_sleep_min_value}-{reaction_sleep_max_value}"
+    reaction_emojis_list = account.get('reaction_emojis') or []
+    reaction_emojis_display = " ".join(reaction_emojis_list) if reaction_emojis_list else "не заданы"
+    reaction_chance = escape_markdown_text(reaction_chance_display)
+    reaction_delay = escape_markdown_text(reaction_delay_display)
+    reaction_emojis = escape_markdown_text(reaction_emojis_display)
     mode = sanitize_field(account.get('mode', 'N/A'))
     status = sanitize_field(account.get('status', 'N/A'))
     warmup_end_at = sanitize_field(account.get('warmup_end_at', 'N/A'))
@@ -2556,6 +2931,9 @@ async def get_account_summary(account_id):
 ⚙️ **Настройки:**
 • Задержка: {sleep_min}-{sleep_max} сек
 • Шанс комментирования: {chance}%
+• Шанс реакции: {reaction_chance}
+• Задержка реакции: {reaction_delay}
+• Эмодзи реакций: {reaction_emojis}
 • Режим: {mode}
 • Статус: {status}
 
