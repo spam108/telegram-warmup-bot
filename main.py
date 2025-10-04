@@ -9,7 +9,7 @@ from datetime import datetime, time, timezone, timedelta
 from typing import Dict, List, Optional, Set, Any, Union, Tuple
 import random
 from pyrogram import Client, filters
-from pyrogram.errors import UserAlreadyParticipant
+from pyrogram.errors import ChatWriteForbidden, UserAlreadyParticipant
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -27,6 +27,7 @@ from db import (
     get_account_by_session,
     get_accounts_for_user,
     get_running_accounts,
+    get_global_statistics,
     get_warmup_pending,
     get_warmup_settings,
     init_db,
@@ -583,6 +584,9 @@ async def main_message(message):
         types.InlineKeyboardButton(text="Добавить прогрев", callback_data="add_warmup"),
         types.InlineKeyboardButton(text="Настройки прогрева", callback_data="warmup_settings"),
     )
+    builder.row(
+        types.InlineKeyboardButton(text="Общая статистика", callback_data="global_stats"),
+    )
 
     await bot.send_message(message.from_user.id, 'Ваши аккаунты', reply_markup=builder.as_markup())
 
@@ -752,6 +756,16 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
         )
         await bot.send_message(callback_query.from_user.id, prompt)
         await state.set_state(warmupsettings.limit)
+        return
+
+    elif call == 'global_stats':
+        await callback_query.answer()
+        stats = await get_global_statistics()
+        report = format_global_statistics_report(stats)
+        await bot.send_message(callback_query.from_user.id, report, parse_mode="Markdown")
+        if callback_query.from_user.id != log_channel:
+            await bot.send_message(log_channel, report, parse_mode="Markdown")
+        await main_message(callback_query)
         return
 
 
@@ -1483,12 +1497,40 @@ async def send_comments(userid, session, account_id):
                 roll = random.randint(1, 100)
                 if roll > chance:
                     await bot.send_message(log_channel, f'Аккаунт {session} пропустил комментарий (rnd {roll} > {chance})')
+                    await add_comment_log(
+                        account_id,
+                        channel=str(message.chat.id),
+                        message_id=message.id,
+                        status='skipped',
+                        error=f'random {roll} > chance {chance}',
+                    )
                     return
 
                 post_text = message.text or message.caption
-                comment = generate_comment(post_text, system_promt)
 
                 try:
+                    permissions = getattr(message.chat, "permissions", None)
+                    if permissions and permissions.can_send_messages is False:
+                        reason = "comments disabled"
+                        await add_comment_log(
+                            account_id,
+                            channel=str(message.chat.id),
+                            message_id=message.id,
+                            status='no_comments',
+                            error=reason,
+                        )
+                        return
+
+                    if post_text is None:
+                        await add_comment_log(
+                            account_id,
+                            channel=str(message.chat.id),
+                            message_id=message.id,
+                            status='no_comments',
+                            error='no text or caption',
+                        )
+                        return
+
                     if is_quiet_period():
                         key = make_session_key(userid, session)
                         if key not in quiet_sessions_notified:
@@ -1499,6 +1541,7 @@ async def send_comments(userid, session, account_id):
                             quiet_sessions_notified.add(key)
                         return
                     await asyncio.sleep(random.uniform(xsleep, ysleep))
+                    comment = generate_comment(post_text, system_promt)
                     msg = await client.send_message(message.chat.id, comment, reply_to_message_id=message.id)
 
                     if hasattr(msg, "reply_to_message") and msg.reply_to_message and hasattr(msg.reply_to_message, "forward_from_chat") and msg.reply_to_message.forward_from_chat:
@@ -1511,12 +1554,22 @@ async def send_comments(userid, session, account_id):
                     await asyncio.sleep(0.2)
                     await add_comment_log(
                         account_id,
-                            channel=str(message.chat.id),
-                            message_id=msg.id,
-                            status='success',
-                        )
+                        channel=str(message.chat.id),
+                        message_id=msg.id,
+                        status='success',
+                    )
 
-                    
+
+                except ChatWriteForbidden as e:
+                    await bot.send_message(log_channel, f'Аккаунт {session} не может оставить комментарий: {e}')
+                    await asyncio.sleep(0.2)
+                    await add_comment_log(
+                        account_id,
+                        channel=str(message.chat.id),
+                        message_id=message.id,
+                        status='no_comments',
+                        error=str(e),
+                    )
                 except Exception as e:
                     await bot.send_message(log_channel, f'Аккаунт {session} ошибка комментирования: {e}')
                     # Пауза перед записью ошибки в БД
@@ -1602,6 +1655,16 @@ async def join_channel(
                     await bot.send_message(log_channel, f"Аккаунт {session_key} вступил в канал: {channel}")
 
                 return True, None
+
+            except ChatWriteForbidden as e:
+                error_message = str(e)
+                if is_warmup:
+                    await record_warmup_channel_error(account_id, channel, error_message)
+                await bot.send_message(
+                    log_channel,
+                    f"Аккаунт {session_key} не может вступить в {channel}: {error_message}",
+                )
+                return False, error_message
 
             except UserAlreadyParticipant:
                 if is_warmup:
@@ -2294,6 +2357,83 @@ def build_prompt_preview(prompt: Optional[str], max_length: int = 200) -> Tuple[
 
     preview = normalized[:max_length].rstrip()
     return f"{preview}...", True
+
+
+def format_global_statistics_report(stats: Dict[str, Any]) -> str:
+    accounts = stats.get("accounts", {})
+    comments = stats.get("comments", {})
+    warmup = stats.get("warmup", {})
+
+    accounts_by_status = accounts.get("by_status", {})
+    accounts_by_mode = accounts.get("by_mode", {})
+    running_by_mode = accounts.get("running_by_mode", {})
+
+    comment_counts = comments.get("by_status", {})
+    warmup_counts = warmup.get("by_status", {})
+
+    def _format_additional(counts: Dict[str, Any], known_keys: Set[str]) -> Optional[str]:
+        extra = [f"{key}: {counts[key]}" for key in sorted(counts) if key not in known_keys]
+        if extra:
+            return ", ".join(extra)
+        return None
+
+    lines = [
+        "📊 *Общая статистика*",
+        "",
+        "👥 *Аккаунты*",
+        f"• Всего: {accounts.get('total', 0)}",
+        f"• Активны: {accounts_by_status.get('running', 0)}",
+        f"• Остановлены: {accounts_by_status.get('stopped', 0)}",
+    ]
+
+    other_account_statuses = _format_additional(accounts_by_status, {"running", "stopped"})
+    if other_account_statuses:
+        lines.append(f"• Прочие статусы: {other_account_statuses}")
+
+    if accounts_by_mode:
+        lines.append("• Режимы:")
+        for mode, count in sorted(accounts_by_mode.items()):
+            lines.append(f"   ◦ {mode}: {count}")
+
+    if running_by_mode:
+        lines.append("• Активные по режимам:")
+        for mode, count in sorted(running_by_mode.items()):
+            lines.append(f"   ◦ {mode}: {count}")
+
+    lines.extend(
+        [
+            "",
+            "💬 *Комментарии*",
+            f"• Всего: {comments.get('total', 0)}",
+            f"• Успешные: {comment_counts.get('success', 0)}",
+            f"• Ошибки: {comment_counts.get('error', 0)}",
+            f"• Пропущено: {comment_counts.get('skipped', 0)}",
+            f"• Нет ветки/запрещено: {comment_counts.get('no_comments', 0)}",
+        ]
+    )
+
+    other_comment_statuses = _format_additional(
+        comment_counts, {"success", "error", "skipped", "no_comments"}
+    )
+    if other_comment_statuses:
+        lines.append(f"• Прочие статусы: {other_comment_statuses}")
+
+    lines.extend(
+        [
+            "",
+            "🔥 *Прогрев*",
+            f"• Вступлений: {warmup_counts.get('joined', 0)}",
+            f"• В очереди: {warmup_counts.get('pending', 0)}",
+            f"• Ошибок: {warmup_counts.get('error', 0)}",
+            f"• Попыток вступления: {warmup.get('total_attempts', 0)}",
+        ]
+    )
+
+    other_warmup_statuses = _format_additional(warmup_counts, {"joined", "pending", "error"})
+    if other_warmup_statuses:
+        lines.append(f"• Прочие статусы: {other_warmup_statuses}")
+
+    return "\n".join(lines)
 
 async def get_account_summary(account_id):
     """Получает полное резюме аккаунта из базы данных"""
