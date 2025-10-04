@@ -465,6 +465,25 @@ def is_warmup_join_period(now: datetime | None = None) -> bool:
     return is_warmup_sleep_period(now)
 
 async def check_account(user_id, phone):
+    key = make_session_key(user_id, phone)
+    existing_client = active_pyrogram_clients.get(key)
+
+    if active_sessions.get(key) and existing_client:
+        lock = active_client_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            if not getattr(existing_client, "is_connected", False):
+                await bot.send_message(user_id, f"Аккаунт {phone} сейчас используется, попробуйте позже")
+                return False
+
+            try:
+                await existing_client.get_me()
+                return True
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e).lower():
+                    await bot.send_message(user_id, f"Аккаунт {phone} сейчас используется, попробуйте позже")
+                    return False
+                raise
+
     client = Client(
         name=f"sessions/{user_id}/{phone}",
         api_id=API_ID,
