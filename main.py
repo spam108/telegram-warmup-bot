@@ -1296,7 +1296,7 @@ async def add_systempromt(message: Message, state: FSMContext) -> None:
 
 @dp.message(startaccount.sleeps)
 async def add_sleeps(message: Message, state: FSMContext) -> None:
-    data, _, account = await _load_account_data(state)
+    data, account_id, account = await _load_account_data(state)
 
     stored_sleeps: Optional[str] = None
     if account:
@@ -1338,6 +1338,7 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
     session = data.get("account")
 
     channels: List[str] = []
+    seen_channels: Set[str] = set()
 
     app = Client(
         name=f"sessions/{message.from_user.id}/{session}",
@@ -1348,9 +1349,14 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
         async with app:
             async for dialog in app.get_dialogs():
                 chat = dialog.chat
-                if str(chat.type) == "ChatType.CHANNEL":
-                    if chat.username is not None:
-                        channels.append(f"@{chat.username}")
+                if str(chat.type) == "ChatType.CHANNEL" and chat.username is not None:
+                    channel_handle = f"@{chat.username}"
+                    if channel_handle not in seen_channels:
+                        channels.append(channel_handle)
+                        seen_channels.add(channel_handle)
+
+        if account_id:
+            await update_account_settings(account_id, channels=channels)
 
         # Используем унифицированное отображение каналов
         channels_display = await format_channels_display(
@@ -1985,11 +1991,15 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
     system_prompt_value = data.get("systempromt") if data else None
     sleeps = data.get("sleeps") if data else None
 
-    existing_channels_raw = []
+    existing_channels_raw: List[str] = []
     if account and isinstance(account, dict):
         stored_channels = account.get("channels")
         if isinstance(stored_channels, list):
             existing_channels_raw = [channel for channel in stored_channels if isinstance(channel, str)]
+
+    existing_channels_lookup: Set[str] = {
+        channel.lower() for channel in existing_channels_raw if isinstance(channel, str)
+    }
 
     if not account_id:
         await bot.send_message(message.from_user.id, "Ошибка: аккаунт не найден. Попробуйте снова.")
@@ -2000,7 +2010,21 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
     channels_to_update: Optional[List[str]] = None
     successful_channels: List[str] = []
     if str(message.text) != '-':
-        channels = [line.strip() for line in message.text.splitlines() if line.strip()]
+        raw_channels = [line.strip() for line in message.text.splitlines() if line.strip()]
+
+        channels: List[str] = []
+        seen_new: Set[str] = set()
+        for channel in raw_channels:
+            if channel.startswith("-"):
+                channels.append(channel)
+                continue
+
+            normalized = channel.lower()
+            if normalized in existing_channels_lookup or normalized in seen_new:
+                continue
+
+            seen_new.add(normalized)
+            channels.append(channel)
 
         # Вступаем в обычные каналы сразу
         for channel in channels:
