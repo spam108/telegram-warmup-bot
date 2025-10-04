@@ -2424,16 +2424,23 @@ async def main():
                 phone = account["phone"]
                 key = make_session_key(user_id, phone)
                 session_file = os.path.join("sessions", str(user_id), f"{phone}.session")
+
                 if os.path.exists(session_file):
-                    # Запускаем только аккаунты в стандартном режиме
-                    if account.get("mode") == "standard":
-                        active_sessions[key] = True
-                        active_account_ids[key] = account["id"]
-                        asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
-                        log_file.write(f"Started account {phone}\n")
-                    else:
-                        # Аккаунты в режиме прогрева не запускаем автоматически
-                        log_file.write(f"Account {phone} in warmup mode - not started automatically\n")
+                    # Перед повторным запуском очищаем прошлые записи, чтобы избежать дублирования
+                    active_sessions.pop(key, None)
+                    active_account_ids.pop(key, None)
+                    active_pyrogram_clients.pop(key, None)
+                    active_client_locks.pop(key, None)
+
+                    if account.get("status") != "running":
+                        await mark_account_running(account["id"])
+
+                    active_sessions[key] = True
+                    active_account_ids[key] = account["id"]
+                    asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
+                    log_file.write(
+                        f"Started account {phone} in {account.get('mode', 'unknown')} mode\n"
+                    )
                     log_file.flush()
                 else:
                     await mark_account_stopped(account["id"])
