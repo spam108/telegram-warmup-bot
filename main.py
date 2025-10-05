@@ -14,7 +14,13 @@ import re
 from pyrogram import Client, filters
 from pyrogram.errors import ChatWriteForbidden, UserAlreadyParticipant
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    Message,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
@@ -1090,17 +1096,62 @@ async def main_message(message):
         if not is_running:
             builder.row(button_delete)
 
-
-    builder.row(
-        types.InlineKeyboardButton(text="Добавить аккаунт", callback_data="add_account"),
-        types.InlineKeyboardButton(text="Добавить прогрев", callback_data="add_warmup"),
-    )
-    builder.row(
-        types.InlineKeyboardButton(text="📊 Общая статистика", callback_data="global_stats"),
-        types.InlineKeyboardButton(text="⚙️ Настройки прогрева", callback_data="warmup_settings"),
-    )
-
     await bot.send_message(message.from_user.id, 'Ваши аккаунты', reply_markup=builder.as_markup())
+    await bot.send_message(
+        message.from_user.id,
+        "Доступные действия",
+        reply_markup=build_main_actions_keyboard(),
+    )
+
+
+def build_main_actions_keyboard() -> ReplyKeyboardMarkup:
+    """Возвращает клавиатуру с основными действиями под строкой ввода."""
+
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="Добавить аккаунт"),
+                KeyboardButton(text="Добавить прогрев"),
+            ],
+            [
+                KeyboardButton(text="📊 Общая статистика"),
+                KeyboardButton(text="⚙️ Настройки прогрева"),
+            ],
+        ],
+        resize_keyboard=True,
+    )
+
+
+async def start_add_account_flow(user_id: int, state: FSMContext, *, warmup_only: bool = False) -> None:
+    """Запускает сценарий добавления аккаунта или назначения прогрева."""
+
+    await state.clear()
+    await bot.send_message(user_id, 'Пришлите номер телефона\nПример: 79999999999')
+    await state.set_state(addsession.number)
+    await state.update_data({"warmup_only": warmup_only})
+
+
+async def open_warmup_settings_dialog(user_id: int, state: FSMContext) -> None:
+    """Открывает диалог редактирования общих настроек прогрева."""
+
+    await state.clear()
+    settings = await refresh_warmup_settings_from_db()
+    prompt = (
+        f"{format_warmup_settings(settings)}\n\n"
+        "Введите новый лимит вступлений в день (число) или '-' чтобы оставить без изменений."
+    )
+    await bot.send_message(user_id, prompt)
+    await state.set_state(warmupsettings.limit)
+
+
+async def send_global_stats_report(user_id: int) -> None:
+    """Отправляет пользователю и в лог-канал сводку по всем аккаунтам."""
+
+    stats = await get_global_statistics()
+    report = format_global_statistics_report(stats)
+    await bot.send_message(user_id, report, parse_mode="Markdown")
+    if user_id != log_channel:
+        await bot.send_message(log_channel, report, parse_mode="Markdown")
 
 
 
@@ -1145,6 +1196,44 @@ async def show_account_summary(message: types.Message, state: FSMContext):
     
     # Показываем резюме
     await send_account_summary_to_user(message.from_user.id, account['id'], phone)
+
+
+@dp.message(lambda message: message.text == "Добавить аккаунт")
+async def handle_add_account_button(message: types.Message, state: FSMContext):
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+
+    await start_add_account_flow(message.from_user.id, state, warmup_only=False)
+
+
+@dp.message(lambda message: message.text == "Добавить прогрев")
+async def handle_add_warmup_button(message: types.Message, state: FSMContext):
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+
+    await start_add_account_flow(message.from_user.id, state, warmup_only=True)
+
+
+@dp.message(lambda message: message.text == "📊 Общая статистика")
+async def handle_global_stats_button(message: types.Message, state: FSMContext):  # noqa: ARG001
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+
+    await send_global_stats_report(message.from_user.id)
+    await main_message(message)
+
+
+@dp.message(lambda message: message.text == "⚙️ Настройки прогрева")
+async def handle_warmup_settings_button(message: types.Message, state: FSMContext):
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+
+    await open_warmup_settings_dialog(message.from_user.id, state)
+
 
 @dp.message(Command("testwarmup"))
 async def test_warmup_command(message: Message) -> None:
@@ -1261,35 +1350,20 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.delete()
 
     if call == 'add_account':
-        await bot.send_message(callback_query.from_user.id, 'Пришлите номер телефона\nПример: 79999999999')
-        await state.set_state(addsession.number)
+        await start_add_account_flow(callback_query.from_user.id, state, warmup_only=False)
 
     elif call == 'add_warmup':
-        await state.clear()
-        await bot.send_message(callback_query.from_user.id, 'Пришлите номер телефона для прогрева\nПример: 79999999999')
-        await state.set_state(addsession.number)
-        await state.update_data({"warmup_only": True})
+        await start_add_account_flow(callback_query.from_user.id, state, warmup_only=True)
 
 
     elif call == 'warmup_settings':
         await callback_query.answer()
-        await state.clear()
-        settings = await refresh_warmup_settings_from_db()
-        prompt = (
-            f"{format_warmup_settings(settings)}\n\n"
-            "Введите новый лимит вступлений в день (число) или '-' чтобы оставить без изменений."
-        )
-        await bot.send_message(callback_query.from_user.id, prompt)
-        await state.set_state(warmupsettings.limit)
+        await open_warmup_settings_dialog(callback_query.from_user.id, state)
         return
 
     elif call == 'global_stats':
         await callback_query.answer()
-        stats = await get_global_statistics()
-        report = format_global_statistics_report(stats)
-        await bot.send_message(callback_query.from_user.id, report, parse_mode="Markdown")
-        if callback_query.from_user.id != log_channel:
-            await bot.send_message(log_channel, report, parse_mode="Markdown")
+        await send_global_stats_report(callback_query.from_user.id)
         await main_message(callback_query)
         return
 
