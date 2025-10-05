@@ -141,6 +141,219 @@ active_pyrogram_clients: Dict[str, Client] = {}
 active_client_locks: Dict[str, asyncio.Lock] = {}
 
 
+def _is_discussion_reply_message(message: Any) -> bool:
+    reply = getattr(message, "reply_to_message", None)
+    if not reply:
+        return False
+    forward_chat = getattr(reply, "forward_from_chat", None)
+    return forward_chat is not None
+
+
+def _is_self_generated_message(message: Any) -> bool:
+    from_user = getattr(message, "from_user", None)
+    if not from_user:
+        return False
+    return bool(getattr(from_user, "is_self", False))
+
+
+def _chat_allows_sending_message(message: Any) -> Tuple[bool, Optional[str]]:
+    chat = getattr(message, "chat", None)
+    if not chat:
+        return False, "no chat"
+
+    permissions = getattr(chat, "permissions", None)
+    can_send_messages = getattr(permissions, "can_send_messages", None) if permissions else None
+
+    if can_send_messages is False:
+        return False, "comments disabled"
+
+    if can_send_messages is True:
+        return True, None
+
+    chat_type = getattr(chat, "type", None)
+    if chat_type in {"supergroup", "group"}:
+        return True, None
+
+    # По умолчанию считаем, что можно отправлять комментарии, если явного запрета нет
+    return True, None
+
+
+def _extract_post_text(message: Any) -> Optional[str]:
+    text = getattr(message, "text", None)
+    caption = getattr(message, "caption", None)
+    return text if text is not None else caption
+
+
+def _build_post_link(sent_message: Any, original_message: Any) -> str:
+    reply = getattr(sent_message, "reply_to_message", None)
+    if (
+        reply
+        and hasattr(reply, "forward_from_chat")
+        and reply.forward_from_chat
+        and getattr(reply.forward_from_chat, "username", None)
+    ):
+        username = reply.forward_from_chat.username
+        forward_message_id = getattr(reply, "forward_from_message_id", None)
+        if forward_message_id is not None:
+            return f"https://t.me/{username}/{forward_message_id}"
+
+    chat = getattr(original_message, "chat", None)
+    chat_id = getattr(chat, "id", "")
+    return f'https://t.me/c/{str(chat_id).replace("-", "")}/{getattr(original_message, "id", "")}'
+
+
+async def _handle_linked_channel_message(
+    client: Client,
+    message: Any,
+    *,
+    userid: int,
+    session: str,
+    account_id: int,
+    chance: int,
+    xsleep: int,
+    ysleep: int,
+    system_promt: str,
+    reaction_emojis: List[str],
+    reaction_chance: int,
+    reaction_sleep_min: int,
+    reaction_sleep_max: int,
+) -> None:
+    key = make_session_key(userid, session)
+    if not active_sessions.get(key, False):
+        return
+
+    is_discussion_message = _is_discussion_reply_message(message)
+    if is_discussion_message and _is_self_generated_message(message):
+        logging.debug("Обнаружен собственный комментарий в обсуждении для %s", session)
+        return
+
+    post_text = _extract_post_text(message)
+    if post_text is None:
+        await add_comment_log(
+            account_id,
+            channel=str(getattr(getattr(message, "chat", None), "id", "")),
+            message_id=getattr(message, "id", None),
+            status='no_comments',
+            error='no text or caption',
+        )
+        return
+
+    can_send, reason = _chat_allows_sending_message(message)
+    if not can_send:
+        await add_comment_log(
+            account_id,
+            channel=str(getattr(getattr(message, "chat", None), "id", "")),
+            message_id=getattr(message, "id", None),
+            status='no_comments',
+            error=reason or 'comments disabled',
+        )
+        return
+
+    try:
+        roll = random.randint(1, 100)
+        if roll > chance:
+            await bot.send_message(log_channel, f'Аккаунт {session} пропустил комментарий (rnd {roll} > {chance})')
+            await add_comment_log(
+                account_id,
+                channel=str(getattr(getattr(message, "chat", None), "id", "")),
+                message_id=getattr(message, "id", None),
+                status='skipped',
+                error=f'random {roll} > chance {chance}',
+            )
+            return
+
+        if is_quiet_period():
+            if key not in quiet_sessions_notified:
+                await bot.send_message(
+                    log_channel,
+                    f'Аккаунт {session} приостановлен до {QUIET_END_MSK_STR} МСК (циркадный режим)'
+                )
+                quiet_sessions_notified.add(key)
+            return
+
+        await asyncio.sleep(random.uniform(xsleep, ysleep))
+        comment = generate_comment(post_text, system_promt)
+        msg = await client.send_message(message.chat.id, comment, reply_to_message_id=message.id)
+
+        post_base_link = _build_post_link(msg, message)
+        comment_link = f"{post_base_link}?comment={msg.id}"
+        await bot.send_message(
+            log_channel,
+            f'Аккаунт {session} отправил комментарий\n{comment_link}'
+        )
+        # Небольшая пауза перед записью в БД
+        await asyncio.sleep(0.2)
+        await add_comment_log(
+            account_id,
+            channel=str(message.chat.id),
+            message_id=msg.id,
+            status='success',
+        )
+
+        if reaction_emojis and reaction_chance > 0:
+            reaction_roll = random.randint(1, 100)
+            if reaction_roll <= reaction_chance:
+                await asyncio.sleep(random.uniform(reaction_sleep_min, reaction_sleep_max))
+                reaction_emoji = random.choice(reaction_emojis)
+                try:
+                    await client.send_reaction(message.chat.id, message.id, reaction_emoji)
+                    await bot.send_message(
+                        log_channel,
+                        f'Аккаунт {session} поставил реакцию {reaction_emoji}\n{post_base_link}'
+                    )
+                    await asyncio.sleep(0.2)
+                    await add_comment_log(
+                        account_id,
+                        channel=str(message.chat.id),
+                        message_id=message.id,
+                        status='reaction_success',
+                    )
+                except Exception as reaction_error:
+                    await bot.send_message(
+                        log_channel,
+                        f'Аккаунт {session} ошибка при установке реакции: {reaction_error}'
+                    )
+                    await asyncio.sleep(0.2)
+                    await add_comment_log(
+                        account_id,
+                        channel=str(message.chat.id),
+                        message_id=message.id,
+                        status='reaction_error',
+                        error=str(reaction_error),
+                    )
+            else:
+                await asyncio.sleep(0.2)
+                await add_comment_log(
+                    account_id,
+                    channel=str(message.chat.id),
+                    message_id=message.id,
+                    status='reaction_skipped',
+                    error=f'reaction random {reaction_roll} > chance {reaction_chance}',
+                )
+
+    except ChatWriteForbidden as e:
+        await bot.send_message(log_channel, f'Аккаунт {session} не может оставить комментарий: {e}')
+        await asyncio.sleep(0.2)
+        await add_comment_log(
+            account_id,
+            channel=str(message.chat.id),
+            message_id=message.id,
+            status='no_comments',
+            error=str(e),
+        )
+    except Exception as e:
+        await bot.send_message(log_channel, f'Аккаунт {session} ошибка комментирования: {e}')
+        # Пауза перед записью ошибки в БД
+        await asyncio.sleep(0.2)
+        await add_comment_log(
+            account_id,
+            channel=str(message.chat.id),
+            message_id=message.id,
+            status='error',
+            error=str(e),
+        )
+
+
 class TransientJoinError(Exception):
     """Raised when a transient error occurs while joining a channel."""
 
@@ -1794,168 +2007,27 @@ async def send_comments(userid, session, account_id):
                 print(ex)
 
         def _is_discussion_reply(_: Client, __, incoming_message: Message) -> bool:
-            reply = getattr(incoming_message, "reply_to_message", None)
-            if not reply:
-                return False
-            forward_chat = getattr(reply, "forward_from_chat", None)
-            return forward_chat is not None
+            return _is_discussion_reply_message(incoming_message)
 
         discussion_filter = filters.create(_is_discussion_reply)
 
         @app.on_message(filters.linked_channel | discussion_filter)
         async def linked_channel_handler(client: Client, message: Message):
-            key = make_session_key(userid, session)
-            if not active_sessions.get(key, False):
-                return
-
-            if _is_discussion_reply(client, None, message):
-                logging.debug("Обнаружен комментарий в обсуждении для %s", session)
-                return
-
-            if (message.chat.permissions.can_send_messages is True) and (
-                    message.text is not None or message.caption is not None):
-
-                roll = random.randint(1, 100)
-                if roll > chance:
-                    await bot.send_message(log_channel, f'Аккаунт {session} пропустил комментарий (rnd {roll} > {chance})')
-                    await add_comment_log(
-                        account_id,
-                        channel=str(message.chat.id),
-                        message_id=message.id,
-                        status='skipped',
-                        error=f'random {roll} > chance {chance}',
-                    )
-                    return
-
-                post_text = message.text or message.caption
-
-                try:
-                    permissions = getattr(message.chat, "permissions", None)
-                    if permissions and permissions.can_send_messages is False:
-                        reason = "comments disabled"
-                        await add_comment_log(
-                            account_id,
-                            channel=str(message.chat.id),
-                            message_id=message.id,
-                            status='no_comments',
-                            error=reason,
-                        )
-                        return
-
-                    if post_text is None:
-                        await add_comment_log(
-                            account_id,
-                            channel=str(message.chat.id),
-                            message_id=message.id,
-                            status='no_comments',
-                            error='no text or caption',
-                        )
-                        return
-
-                    if is_quiet_period():
-                        key = make_session_key(userid, session)
-                        if key not in quiet_sessions_notified:
-                            await bot.send_message(
-                                log_channel,
-                                f'Аккаунт {session} приостановлен до {QUIET_END_MSK_STR} МСК (циркадный режим)'
-                            )
-                            quiet_sessions_notified.add(key)
-                        return
-                    await asyncio.sleep(random.uniform(xsleep, ysleep))
-                    comment = generate_comment(post_text, system_promt)
-                    msg = await client.send_message(message.chat.id, comment, reply_to_message_id=message.id)
-
-                    post_base_link: Optional[str] = None
-                    if (
-                        hasattr(msg, "reply_to_message")
-                        and msg.reply_to_message
-                        and hasattr(msg.reply_to_message, "forward_from_chat")
-                        and msg.reply_to_message.forward_from_chat
-                    ):
-                        post_base_link = (
-                            f'https://t.me/{msg.reply_to_message.forward_from_chat.username}/'
-                            f'{msg.reply_to_message.forward_from_message_id}'
-                        )
-                    else:
-                        post_base_link = f'https://t.me/c/{str(message.chat.id).replace("-", "")}/{message.id}'
-
-                    comment_link = f"{post_base_link}?comment={msg.id}"
-                    await bot.send_message(
-                        log_channel,
-                        f'Аккаунт {session} отправил комментарий\n{comment_link}'
-                    )
-                    # Небольшая пауза перед записью в БД
-                    await asyncio.sleep(0.2)
-                    await add_comment_log(
-                        account_id,
-                        channel=str(message.chat.id),
-                        message_id=msg.id,
-                        status='success',
-                    )
-
-                    if reaction_emojis and reaction_chance > 0:
-                        reaction_roll = random.randint(1, 100)
-                        if reaction_roll <= reaction_chance:
-                            await asyncio.sleep(random.uniform(reaction_sleep_min, reaction_sleep_max))
-                            reaction_emoji = random.choice(reaction_emojis)
-                            try:
-                                await client.send_reaction(message.chat.id, message.id, reaction_emoji)
-                                await bot.send_message(
-                                    log_channel,
-                                    f'Аккаунт {session} поставил реакцию {reaction_emoji}\n{post_base_link}'
-                                )
-                                await asyncio.sleep(0.2)
-                                await add_comment_log(
-                                    account_id,
-                                    channel=str(message.chat.id),
-                                    message_id=message.id,
-                                    status='reaction_success',
-                                )
-                            except Exception as reaction_error:
-                                await bot.send_message(
-                                    log_channel,
-                                    f'Аккаунт {session} ошибка при установке реакции: {reaction_error}'
-                                )
-                                await asyncio.sleep(0.2)
-                                await add_comment_log(
-                                    account_id,
-                                    channel=str(message.chat.id),
-                                    message_id=message.id,
-                                    status='reaction_error',
-                                    error=str(reaction_error),
-                                )
-                        else:
-                            await asyncio.sleep(0.2)
-                            await add_comment_log(
-                                account_id,
-                                channel=str(message.chat.id),
-                                message_id=message.id,
-                                status='reaction_skipped',
-                                error=f'reaction random {reaction_roll} > chance {reaction_chance}',
-                            )
-
-
-                except ChatWriteForbidden as e:
-                    await bot.send_message(log_channel, f'Аккаунт {session} не может оставить комментарий: {e}')
-                    await asyncio.sleep(0.2)
-                    await add_comment_log(
-                        account_id,
-                        channel=str(message.chat.id),
-                        message_id=message.id,
-                        status='no_comments',
-                        error=str(e),
-                    )
-                except Exception as e:
-                    await bot.send_message(log_channel, f'Аккаунт {session} ошибка комментирования: {e}')
-                    # Пауза перед записью ошибки в БД
-                    await asyncio.sleep(0.2)
-                    await add_comment_log(
-                        account_id,
-                        channel=str(message.chat.id),
-                        message_id=message.id,
-                        status='error',
-                        error=str(e),
-                    )
+            await _handle_linked_channel_message(
+                client,
+                message,
+                userid=userid,
+                session=session,
+                account_id=account_id,
+                chance=chance,
+                xsleep=xsleep,
+                ysleep=ysleep,
+                system_promt=system_promt,
+                reaction_emojis=reaction_emojis,
+                reaction_chance=reaction_chance,
+                reaction_sleep_min=reaction_sleep_min,
+                reaction_sleep_max=reaction_sleep_max,
+            )
         try:
             await app.start()
             key = make_session_key(userid, session)
