@@ -168,6 +168,10 @@ active_pyrogram_clients: Dict[str, Client] = {}
 active_client_locks: Dict[str, asyncio.Lock] = {}
 
 
+CHECK_ACCOUNT_SHUTDOWN_TIMEOUT = 5.0
+CHECK_ACCOUNT_SHUTDOWN_INTERVAL = 0.2
+
+
 def _is_discussion_reply_message(message: Any) -> bool:
     reply = getattr(message, "reply_to_message", None)
     if not reply:
@@ -819,21 +823,49 @@ async def check_account(user_id, phone):
     key = make_session_key(user_id, phone)
     existing_client = active_pyrogram_clients.get(key)
 
-    if active_sessions.get(key) and existing_client:
+    if existing_client:
         lock = active_client_locks.setdefault(key, asyncio.Lock())
+        should_cleanup_lock = False
         async with lock:
-            if not getattr(existing_client, "is_connected", False):
-                await bot.send_message(user_id, f"Аккаунт {phone} сейчас используется, попробуйте позже")
-                return False
+            session_active = active_sessions.get(key)
+            is_connected = getattr(existing_client, "is_connected", False)
 
-            try:
-                await existing_client.get_me()
-                return True
-            except sqlite3.OperationalError as e:
-                if "database is locked" in str(e).lower():
-                    await bot.send_message(user_id, f"Аккаунт {phone} сейчас используется, попробуйте позже")
+            if session_active:
+                if not is_connected:
+                    await bot.send_message(
+                        user_id, f"Аккаунт {phone} сейчас используется, попробуйте позже"
+                    )
                     return False
-                raise
+
+                try:
+                    await existing_client.get_me()
+                    return True
+                except sqlite3.OperationalError as e:
+                    if "database is locked" in str(e).lower():
+                        await bot.send_message(
+                            user_id, f"Аккаунт {phone} сейчас используется, попробуйте позже"
+                        )
+                        return False
+                    raise
+
+            if is_connected and not session_active:
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + CHECK_ACCOUNT_SHUTDOWN_TIMEOUT
+                while getattr(existing_client, "is_connected", False):
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        await bot.send_message(user_id, f"Аккаунт {phone} останавливается")
+                        return False
+                    await asyncio.sleep(min(CHECK_ACCOUNT_SHUTDOWN_INTERVAL, remaining))
+
+                is_connected = getattr(existing_client, "is_connected", False)
+
+            if not session_active and not is_connected:
+                should_cleanup_lock = True
+
+        if should_cleanup_lock:
+            active_pyrogram_clients.pop(key, None)
+            active_client_locks.pop(key, None)
 
     client = Client(
         name=f"sessions/{user_id}/{phone}",
