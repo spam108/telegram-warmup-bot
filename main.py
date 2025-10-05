@@ -4,6 +4,7 @@ import asyncio
 import logging
 import shutil
 import sqlite3
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, time, timezone, timedelta
 from typing import Dict, List, Optional, Set, Any, Union, Tuple
@@ -168,6 +169,16 @@ quiet_sessions_notified: Set[str] = set()
 active_pyrogram_clients: Dict[str, Client] = {}
 active_client_locks: Dict[str, asyncio.Lock] = {}
 
+skip_log_counters: Dict[str, Counter] = defaultdict(Counter)
+skip_log_last_reasons: Dict[str, Dict[str, str]] = defaultdict(dict)
+skip_log_last_flush_at: Optional[datetime] = None
+
+SKIP_LOG_FLUSH_INTERVAL_SECONDS = 600
+SKIP_LOG_EVENT_LABELS = {
+    "comment": "Комментарии",
+    "reaction": "Реакции",
+}
+
 
 CHECK_ACCOUNT_SHUTDOWN_TIMEOUT = 5.0
 CHECK_ACCOUNT_SHUTDOWN_INTERVAL = 0.2
@@ -232,6 +243,72 @@ def _build_post_link(sent_message: Any, original_message: Any) -> str:
     chat = getattr(original_message, "chat", None)
     chat_id = getattr(chat, "id", "")
     return f'https://t.me/c/{str(chat_id).replace("-", "")}/{getattr(original_message, "id", "")}'
+
+
+def enqueue_skip_log(session: str, event_type: str, reason: str) -> None:
+    """Adds skip statistics for delayed aggregated reporting."""
+
+    counters = skip_log_counters[session]
+    counters[event_type] += 1
+    skip_log_last_reasons[session][event_type] = reason
+
+
+async def flush_skip_logs() -> None:
+    """Sends an aggregated skip report and resets collected data."""
+
+    global skip_log_last_flush_at
+
+    entries: List[Tuple[str, str, int, Optional[str]]] = []
+    for session, counters in skip_log_counters.items():
+        for event_type, count in counters.items():
+            if count <= 0:
+                continue
+            reason = skip_log_last_reasons.get(session, {}).get(event_type)
+            entries.append((session, event_type, count, reason))
+
+    now = datetime.now(timezone.utc)
+
+    if not entries:
+        skip_log_last_flush_at = now
+        return
+
+    timestamp = now.strftime('%H:%M:%S')
+    lines = [f"🕒 Сводка пропусков ({timestamp} UTC)"]
+
+    grouped: Dict[str, List[Tuple[str, int, Optional[str]]]] = defaultdict(list)
+    for session, event_type, count, reason in entries:
+        grouped[session].append((event_type, count, reason))
+
+    for session in sorted(grouped):
+        lines.append(f"Аккаунт {session}:")
+        for event_type, count, reason in sorted(grouped[session], key=lambda item: item[0]):
+            label = SKIP_LOG_EVENT_LABELS.get(event_type, event_type)
+            reason_suffix = f" (последняя причина: {reason})" if reason else ""
+            lines.append(f"• {label}: {count}{reason_suffix}")
+
+    message = "\n".join(lines)
+
+    try:
+        await bot.send_message(log_channel, message)
+    except Exception:
+        logging.exception("Не удалось отправить сводку пропусков")
+    finally:
+        skip_log_counters.clear()
+        skip_log_last_reasons.clear()
+        skip_log_last_flush_at = now
+
+
+async def skip_log_flush_worker() -> None:
+    """Background task that periodically flushes skip statistics."""
+
+    while True:
+        try:
+            await asyncio.sleep(SKIP_LOG_FLUSH_INTERVAL_SECONDS)
+            await flush_skip_logs()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("Ошибка фоновой отправки сводки пропусков")
 
 
 async def _handle_linked_channel_message(
@@ -313,12 +390,10 @@ async def _handle_linked_channel_message(
         if roll > comment_chance:
             comment_skipped = True
             comment_skip_reason = f'random {roll} > chance {comment_chance}'
-            await bot.send_message(
-                log_channel,
-                (
-                    f'Аккаунт {session} пропустил комментарий '
-                    f'(rnd {roll} > {comment_chance}), проверяем реакцию'
-                ),
+            enqueue_skip_log(
+                session,
+                "comment",
+                f"{comment_skip_reason}; проверяем реакцию",
             )
             await add_comment_log(
                 account_id,
@@ -375,9 +450,10 @@ async def _handle_linked_channel_message(
             if limit is not None:
                 if limit <= 0:
                     reason = f'reaction limit {limit} reached'
-                    await bot.send_message(
-                        log_channel,
-                        f'Аккаунт {session} пропустил реакцию: {reason}{reaction_comment_context}'
+                    enqueue_skip_log(
+                        session,
+                        "reaction",
+                        f"{reason}{reaction_comment_context}",
                     )
                     await asyncio.sleep(0.2)
                     await add_comment_log(
@@ -392,9 +468,10 @@ async def _handle_linked_channel_message(
                     reaction_count = await count_reactions_for_message(channel_for_reactions, message_id)
                     if reaction_count >= limit:
                         reason = f'reaction limit {reaction_count}/{limit}'
-                        await bot.send_message(
-                            log_channel,
-                            f'Аккаунт {session} пропустил реакцию: {reason}{reaction_comment_context}'
+                        enqueue_skip_log(
+                            session,
+                            "reaction",
+                            f"{reason}{reaction_comment_context}",
                         )
                         await asyncio.sleep(0.2)
                         await add_comment_log(
@@ -422,9 +499,10 @@ async def _handle_linked_channel_message(
                                 'reaction cooldown '
                                 f"{int((now - previous).total_seconds())}/{cooldown_seconds}s"
                             )
-                            await bot.send_message(
-                                log_channel,
-                                f'Аккаунт {session} пропустил реакцию: {reason}{reaction_comment_context}'
+                            enqueue_skip_log(
+                                session,
+                                "reaction",
+                                f"{reason}{reaction_comment_context}",
                             )
                             await asyncio.sleep(0.2)
                             await add_comment_log(
@@ -470,9 +548,10 @@ async def _handle_linked_channel_message(
                 reason = (
                     f'reaction random {reaction_roll} > chance {selected_reaction_chance}'
                 )
-                await bot.send_message(
-                    log_channel,
-                    f'Аккаунт {session} пропустил реакцию: {reason}{reaction_comment_context}'
+                enqueue_skip_log(
+                    session,
+                    "reaction",
+                    f"{reason}{reaction_comment_context}",
                 )
                 await asyncio.sleep(0.2)
                 await add_comment_log(
@@ -3926,9 +4005,10 @@ async def main():
                     log_file.flush()
             
             asyncio.create_task(process_warmup_accounts())
+            asyncio.create_task(skip_log_flush_worker())
             log_file.write("Starting bot polling...\n")
             log_file.flush()
-            
+
             await dp.start_polling(bot)
     except Exception as e:
         with open("bot_error.txt", "w") as error_file:
