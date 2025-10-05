@@ -108,6 +108,8 @@ async def init_db() -> None:
             reaction_emojis TEXT,
             reaction_chance INTEGER,
             reaction_discussion_chance INTEGER,
+            discussion_reply_prompt TEXT,
+            discussion_reply_chance INTEGER,
             reaction_sleep_min INTEGER,
             reaction_sleep_max INTEGER,
             channels TEXT,
@@ -123,6 +125,7 @@ async def init_db() -> None:
             warmup_last_join TEXT,
             warmup_last_join_at TEXT,
             warmup_next_join_at TEXT,
+            reactions_enabled INTEGER NOT NULL DEFAULT 1,
             UNIQUE (user_id, phone),
             CHECK (mode IN ('warmup', 'standard'))
         )
@@ -195,10 +198,13 @@ async def init_db() -> None:
     await _ensure_column("accounts", "reaction_emojis", "TEXT")
     await _ensure_column("accounts", "reaction_chance", "INTEGER")
     await _ensure_column("accounts", "reaction_discussion_chance", "INTEGER")
+    await _ensure_column("accounts", "discussion_reply_prompt", "TEXT")
+    await _ensure_column("accounts", "discussion_reply_chance", "INTEGER")
     await _ensure_column("accounts", "reaction_sleep_min", "INTEGER")
     await _ensure_column("accounts", "reaction_sleep_max", "INTEGER")
     await _ensure_column("accounts", "reaction_limit_per_message", "INTEGER")
     await _ensure_column("accounts", "last_reaction_at", "TEXT")
+    await _ensure_column("accounts", "reactions_enabled", "INTEGER NOT NULL DEFAULT 1")
 
     await conn.commit()
     _CONN = conn
@@ -392,6 +398,9 @@ def _convert_account_row(row: aiosqlite.Row) -> Dict[str, Any]:
     data["channels"] = _deserialize_list(data.get("channels"))
     data["warmup_channels"] = _deserialize_list(data.get("warmup_channels"))
     data["reaction_emojis"] = _deserialize_list(data.get("reaction_emojis"))
+    reactions_enabled = data.get("reactions_enabled")
+    if reactions_enabled is not None:
+        data["reactions_enabled"] = bool(reactions_enabled)
     return data
 
 
@@ -453,13 +462,16 @@ async def update_account_settings(
     sleep_min: Optional[int] = None,
     sleep_max: Optional[int] = None,
     reaction_chance: Optional[int] = None,
-    reaction_discussion_chance: Optional[int] = None,
+    reaction_discussion_chance: Any = _UNSET,
+    discussion_reply_prompt: Any = _UNSET,
+    discussion_reply_chance: Any = _UNSET,
     reaction_sleep_min: Optional[int] = None,
     reaction_sleep_max: Optional[int] = None,
     reaction_emojis: Optional[List[str]] = None,
     reaction_limit_per_message: Any = _UNSET,
     last_reaction_at: Any = _UNSET,
     channels: Optional[List[str]] = None,
+    reactions_enabled: Any = _UNSET,
 ) -> None:
     print(
         "DEBUG: update_account_settings called with "
@@ -485,9 +497,15 @@ async def update_account_settings(
     if reaction_chance is not None:
         updates.append("reaction_chance = ?")
         values.append(reaction_chance)
-    if reaction_discussion_chance is not None:
+    if reaction_discussion_chance is not _UNSET:
         updates.append("reaction_discussion_chance = ?")
         values.append(reaction_discussion_chance)
+    if discussion_reply_prompt is not _UNSET:
+        updates.append("discussion_reply_prompt = ?")
+        values.append(discussion_reply_prompt)
+    if discussion_reply_chance is not _UNSET:
+        updates.append("discussion_reply_chance = ?")
+        values.append(discussion_reply_chance)
     if reaction_sleep_min is not None:
         updates.append("reaction_sleep_min = ?")
         values.append(reaction_sleep_min)
@@ -509,6 +527,12 @@ async def update_account_settings(
     if channels is not None:
         updates.append("channels = ?")
         values.append(_serialize_list(channels))
+    if reactions_enabled is not _UNSET:
+        updates.append("reactions_enabled = ?")
+        if reactions_enabled is None:
+            values.append(None)
+        else:
+            values.append(1 if reactions_enabled else 0)
 
     if not updates:
         print("DEBUG: No updates to perform")
@@ -532,11 +556,14 @@ async def bulk_update_reaction_settings(
     user_id: int,
     *,
     reaction_chance: Optional[int] = None,
-    reaction_discussion_chance: Optional[int] = None,
+    reaction_discussion_chance: Any = _UNSET,
+    discussion_reply_prompt: Any = _UNSET,
+    discussion_reply_chance: Any = _UNSET,
     reaction_sleep_min: Optional[int] = None,
     reaction_sleep_max: Optional[int] = None,
     reaction_emojis: Optional[List[str]] = None,
     reaction_limit_per_message: Any = _UNSET,
+    reactions_enabled: Any = _UNSET,
 ) -> None:
     updates: List[str] = []
     values: List[Any] = []
@@ -544,9 +571,15 @@ async def bulk_update_reaction_settings(
     if reaction_chance is not None:
         updates.append("reaction_chance = ?")
         values.append(reaction_chance)
-    if reaction_discussion_chance is not None:
+    if reaction_discussion_chance is not _UNSET:
         updates.append("reaction_discussion_chance = ?")
         values.append(reaction_discussion_chance)
+    if discussion_reply_prompt is not _UNSET:
+        updates.append("discussion_reply_prompt = ?")
+        values.append(discussion_reply_prompt)
+    if discussion_reply_chance is not _UNSET:
+        updates.append("discussion_reply_chance = ?")
+        values.append(discussion_reply_chance)
     if reaction_sleep_min is not None:
         updates.append("reaction_sleep_min = ?")
         values.append(reaction_sleep_min)
@@ -559,6 +592,12 @@ async def bulk_update_reaction_settings(
     if reaction_limit_per_message is not _UNSET:
         updates.append("reaction_limit_per_message = ?")
         values.append(reaction_limit_per_message)
+    if reactions_enabled is not _UNSET:
+        updates.append("reactions_enabled = ?")
+        if reactions_enabled is None:
+            values.append(None)
+        else:
+            values.append(1 if reactions_enabled else 0)
 
     if not updates:
         return
