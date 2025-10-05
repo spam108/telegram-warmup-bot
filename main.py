@@ -1605,7 +1605,7 @@ async def _prompt_discussion_reaction_chance(message: Message, state: FSMContext
         message.from_user.id,
         (
             f"Текущий шанс реакций в обсуждениях: {display}.\n"
-            "Отправьте число от 0 до 100 или '-' чтобы отключить реакции в обсуждениях."
+            "Отправьте число от 0 до 100, '-' чтобы оставить текущее значение или 'none'/'off' чтобы отключить реакции в обсуждениях."
         ),
     )
 
@@ -1626,7 +1626,7 @@ async def _prompt_discussion_reply_chance(message: Message, state: FSMContext) -
         message.from_user.id,
         (
             f"Текущий шанс текстовых ответов в обсуждениях: {display}.\n"
-            "Отправьте число от 0 до 100 или '-' чтобы отключить текстовые ответы."
+            "Отправьте число от 0 до 100, '-' чтобы оставить текущее значение или 'none'/'off' чтобы отключить текстовые ответы."
         ),
     )
 
@@ -1647,7 +1647,7 @@ async def _prompt_discussion_reply_prompt(message: Message, state: FSMContext) -
         message.from_user.id,
         (
             f"Текущий промт для ответов в обсуждениях: {display}.\n"
-            "Отправьте новый промт или '-' чтобы отключить ответы в обсуждениях."
+            "Отправьте новый промт, '-' чтобы оставить текущее значение или 'none'/'off' чтобы отключить ответы в обсуждениях."
         ),
     )
 
@@ -1898,8 +1898,11 @@ async def add_discussion_reaction_chance(message: Message, state: FSMContext) ->
         stored = data.get("reaction_discussion_chance")
 
     incoming = (message.text or "").strip()
+    incoming_lower = incoming.lower()
 
     if incoming == "-":
+        await state.update_data({"reaction_discussion_chance": stored})
+    elif incoming_lower in {"none", "off"}:
         await state.update_data({"reaction_discussion_chance": None})
     else:
         if not incoming.isdigit():
@@ -1908,7 +1911,7 @@ async def add_discussion_reaction_chance(message: Message, state: FSMContext) ->
                 message.from_user.id,
                 (
                     f"Некорректное значение. Текущий шанс реакций в обсуждениях: {current_display}.\n"
-                    "Отправьте число от 0 до 100 или '-' чтобы отключить реакции."
+                    "Отправьте число от 0 до 100, '-' чтобы оставить текущее значение или 'none'/'off' чтобы отключить реакции."
                 ),
             )
             await _prompt_discussion_reaction_chance(message, state)
@@ -1941,8 +1944,11 @@ async def add_discussion_reply_chance(message: Message, state: FSMContext) -> No
         stored = data.get("discussion_reply_chance")
 
     incoming = (message.text or "").strip()
+    incoming_lower = incoming.lower()
 
     if incoming == "-":
+        await state.update_data({"discussion_reply_chance": stored})
+    elif incoming_lower in {"none", "off"}:
         await state.update_data({"discussion_reply_chance": None})
     else:
         if not incoming.isdigit():
@@ -1951,7 +1957,7 @@ async def add_discussion_reply_chance(message: Message, state: FSMContext) -> No
                 message.from_user.id,
                 (
                     f"Некорректное значение. Текущий шанс ответов в обсуждениях: {current_display}.\n"
-                    "Отправьте число от 0 до 100 или '-' чтобы отключить ответы."
+                    "Отправьте число от 0 до 100, '-' чтобы оставить текущее значение или 'none'/'off' чтобы отключить ответы."
                 ),
             )
             await _prompt_discussion_reply_chance(message, state)
@@ -1984,9 +1990,12 @@ async def add_discussion_reply_prompt(message: Message, state: FSMContext) -> No
         stored = data.get("discussion_reply_prompt")
 
     incoming = (message.text or "").strip()
+    incoming_lower = incoming.lower()
 
     if incoming == "-":
-        prompt_value: Optional[str] = None
+        prompt_value = stored
+    elif incoming_lower in {"none", "off"}:
+        prompt_value = None
     elif not incoming:
         current_display = stored if stored else "не задан"
         await bot.send_message(

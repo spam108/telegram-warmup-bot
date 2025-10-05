@@ -133,9 +133,18 @@ async def test_reaction_settings_flow_saves_values(monkeypatch):
     monkeypatch.setattr(main, "main_message", fake_main_message)
 
     await main.add_reaction_limit(DummyMessage("10", user_id), state)
-    assert state.set_states[-1] == main.reactionsettings.chance
+    assert state.set_states[-1] == main.reactionsettings.post_chance
 
-    await main.add_reaction_chance(DummyMessage("70/50", user_id), state)
+    await main.add_post_reaction_chance(DummyMessage("70", user_id), state)
+    assert state.set_states[-1] == main.reactionsettings.discussion_reaction_chance
+
+    await main.add_discussion_reaction_chance(DummyMessage("50", user_id), state)
+    assert state.set_states[-1] == main.reactionsettings.discussion_reply_chance
+
+    await main.add_discussion_reply_chance(DummyMessage("100", user_id), state)
+    assert state.set_states[-1] == main.reactionsettings.discussion_prompt
+
+    await main.add_discussion_reply_prompt(DummyMessage("Промт", user_id), state)
     assert state.set_states[-1] == main.reactionsettings.sleeps
 
     await main.add_reaction_sleeps(DummyMessage("2-4", user_id), state)
@@ -149,6 +158,8 @@ async def test_reaction_settings_flow_saves_values(monkeypatch):
     assert kwargs["reaction_limit_per_message"] == 10
     assert kwargs["reaction_chance"] == 70
     assert kwargs["reaction_discussion_chance"] == 50
+    assert kwargs["discussion_reply_chance"] == 100
+    assert kwargs["discussion_reply_prompt"] == "Промт"
     assert kwargs["reaction_sleep_min"] == 2
     assert kwargs["reaction_sleep_max"] == 4
     assert kwargs["reaction_emojis"] == ["🔥", "👍"]
@@ -164,11 +175,14 @@ async def test_reaction_settings_flow_with_defaults(monkeypatch):
     state_data = {"account": "79995550000", "account_id": 321}
     state = DummyState(state_data)
     account_info = {
-        "reaction_chance": None,
-        "reaction_discussion_chance": None,
-        "reaction_sleep_min": None,
-        "reaction_sleep_max": None,
-        "reaction_emojis": None,
+        "reaction_limit_per_message": 5,
+        "reaction_chance": 60,
+        "reaction_discussion_chance": 40,
+        "discussion_reply_chance": 25,
+        "discussion_reply_prompt": "Старый промт",
+        "reaction_sleep_min": 3,
+        "reaction_sleep_max": 7,
+        "reaction_emojis": ["🔥", "👍"],
     }
 
     captured_update: dict[str, object] = {}
@@ -193,15 +207,72 @@ async def test_reaction_settings_flow_with_defaults(monkeypatch):
     monkeypatch.setattr(main, "main_message", fake_main_message)
 
     await main.add_reaction_limit(DummyMessage("-", user_id), state)
-    await main.add_reaction_chance(DummyMessage("-", user_id), state)
+    await main.add_post_reaction_chance(DummyMessage("-", user_id), state)
+    await main.add_discussion_reaction_chance(DummyMessage("-", user_id), state)
+    await main.add_discussion_reply_chance(DummyMessage("-", user_id), state)
+    await main.add_discussion_reply_prompt(DummyMessage("-", user_id), state)
     await main.add_reaction_sleeps(DummyMessage("-", user_id), state)
     await main.add_reaction_emojis(DummyMessage("-", user_id), state)
 
     assert captured_update["account_id"] == 321
     kwargs = captured_update["kwargs"]
     assert "reaction_limit_per_message" not in kwargs
-    assert kwargs["reaction_chance"] is None
-    assert kwargs["reaction_discussion_chance"] is None
-    assert kwargs["reaction_sleep_min"] is None
-    assert kwargs["reaction_sleep_max"] is None
-    assert kwargs["reaction_emojis"] is None
+    assert kwargs["reaction_chance"] == 60
+    assert kwargs["reaction_discussion_chance"] == 40
+    assert kwargs["discussion_reply_chance"] == 25
+    assert kwargs["discussion_reply_prompt"] == "Старый промт"
+    assert kwargs["reaction_sleep_min"] == 3
+    assert kwargs["reaction_sleep_max"] == 7
+    assert kwargs["reaction_emojis"] == ["🔥", "👍"]
+
+
+@pytest.mark.anyio("asyncio")
+async def test_discussion_settings_dash_keeps_previous(monkeypatch):
+    user_id = 99
+    state_data = {"account": "79000000000", "account_id": 555}
+    state = DummyState(state_data)
+
+    account_info = {
+        "reaction_discussion_chance": 42,
+        "discussion_reply_chance": 17,
+        "discussion_reply_prompt": "Старый промт",
+    }
+
+    async def fake_load_account_data(dummy_state):  # noqa: ANN001
+        return state_data, state_data["account_id"], account_info
+
+    async def fake_send_message(chat_id: int, text: str, **kwargs):  # noqa: ANN001
+        return types.SimpleNamespace(message_id=1)
+
+    async def fake_prompt_discussion_reply_chance(message, dummy_state):  # noqa: ANN001
+        return None
+
+    async def fake_prompt_discussion_reply_prompt(message, dummy_state):  # noqa: ANN001
+        return None
+
+    async def fake_prompt_reaction_sleeps(message, dummy_state):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(main, "_load_account_data", fake_load_account_data)
+    monkeypatch.setattr(main.bot, "send_message", fake_send_message)
+    monkeypatch.setattr(main, "_prompt_discussion_reply_chance", fake_prompt_discussion_reply_chance)
+    monkeypatch.setattr(main, "_prompt_discussion_reply_prompt", fake_prompt_discussion_reply_prompt)
+    monkeypatch.setattr(main, "_prompt_reaction_sleeps", fake_prompt_reaction_sleeps)
+
+    await main.add_discussion_reaction_chance(DummyMessage("-", user_id), state)
+    assert state._data["reaction_discussion_chance"] == 42
+
+    await main.add_discussion_reply_chance(DummyMessage("-", user_id), state)
+    assert state._data["discussion_reply_chance"] == 17
+
+    await main.add_discussion_reply_prompt(DummyMessage("-", user_id), state)
+    assert state._data["discussion_reply_prompt"] == "Старый промт"
+
+    await main.add_discussion_reaction_chance(DummyMessage("off", user_id), state)
+    assert state._data["reaction_discussion_chance"] is None
+
+    await main.add_discussion_reply_chance(DummyMessage("none", user_id), state)
+    assert state._data["discussion_reply_chance"] is None
+
+    await main.add_discussion_reply_prompt(DummyMessage("off", user_id), state)
+    assert state._data["discussion_reply_prompt"] is None
