@@ -196,6 +196,7 @@ async def init_db() -> None:
     await _ensure_column("accounts", "reaction_sleep_min", "INTEGER")
     await _ensure_column("accounts", "reaction_sleep_max", "INTEGER")
     await _ensure_column("accounts", "reaction_limit_per_message", "INTEGER")
+    await _ensure_column("accounts", "last_reaction_at", "TEXT")
 
     await conn.commit()
     _CONN = conn
@@ -454,6 +455,7 @@ async def update_account_settings(
     reaction_sleep_max: Optional[int] = None,
     reaction_emojis: Optional[List[str]] = None,
     reaction_limit_per_message: Any = _UNSET,
+    last_reaction_at: Any = _UNSET,
     channels: Optional[List[str]] = None,
 ) -> None:
     print(
@@ -492,6 +494,12 @@ async def update_account_settings(
     if reaction_limit_per_message is not _UNSET:
         updates.append("reaction_limit_per_message = ?")
         values.append(reaction_limit_per_message)
+    if last_reaction_at is not _UNSET:
+        updates.append("last_reaction_at = ?")
+        if isinstance(last_reaction_at, datetime):
+            values.append(last_reaction_at.isoformat())
+        else:
+            values.append(last_reaction_at)
     if channels is not None:
         updates.append("channels = ?")
         values.append(_serialize_list(channels))
@@ -556,6 +564,20 @@ async def bulk_update_reaction_settings(
     """
 
     await conn.execute(query, tuple(values))
+    await conn.commit()
+
+
+async def update_last_reaction_at(account_id: int, timestamp: Optional[datetime]) -> None:
+    conn = await _require_conn()
+    value = timestamp.isoformat() if timestamp is not None else None
+    await conn.execute(
+        """
+        UPDATE accounts
+        SET last_reaction_at = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (value, account_id),
+    )
     await conn.commit()
 
 
