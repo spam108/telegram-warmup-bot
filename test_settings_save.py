@@ -34,9 +34,14 @@ class DummyState:
 
 
 class DummyMessage:
-    def __init__(self, text: str, user_id: int):
+    def __init__(self, text: str, user_id: int, *, from_user_id: int | None = None, chat_id: int | None = None):
         self.text = text
-        self.from_user = types.SimpleNamespace(id=user_id)
+        if chat_id is None:
+            chat_id = user_id
+        self.chat = types.SimpleNamespace(id=chat_id)
+        if from_user_id is None:
+            from_user_id = user_id
+        self.from_user = types.SimpleNamespace(id=from_user_id)
 
 
 @pytest.fixture
@@ -252,6 +257,72 @@ async def test_reaction_settings_apply_all_triggers_bulk(monkeypatch):
     assert state.cleared is True
     assert main_message_called is True
     assert any("Настройки реакций применены" in text for _, text in sent_messages)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_reaction_apply_all_notifies_user_from_bot_message(monkeypatch):
+    user_id = 77
+    bot_id = 999001
+    state_data = {
+        "account": "79991112233",
+        "account_id": 333,
+        "reaction_limit_set": True,
+        "reaction_limit": 5,
+        "reaction_chance": 70,
+        "reaction_discussion_chance": 30,
+        "discussion_reply_chance": 20,
+        "discussion_reply_prompt": "Ответ",
+        "reaction_sleeps": "1-2",
+        "reaction_emojis": ["🔥"],
+    }
+    state = DummyState(state_data)
+    account_info: dict[str, object] = {}
+
+    captured_updates: list[tuple[int, dict[str, object]]] = []
+    captured_bulk: list[tuple[int, dict[str, object]]] = []
+    sent_messages: list[tuple[int, str]] = []
+    main_message_called = False
+
+    async def fake_load_account_data(dummy_state):  # noqa: ANN001
+        return state_data, state_data["account_id"], account_info
+
+    async def fake_update_account_settings(account_id: int, **kwargs):  # noqa: ANN001
+        captured_updates.append((account_id, kwargs))
+
+    async def fake_bulk_update(user: int, **kwargs):  # noqa: ANN001
+        captured_bulk.append((user, kwargs))
+
+    async def fake_send_message(chat_id: int, text: str, **kwargs):  # noqa: ANN001
+        sent_messages.append((chat_id, text))
+        return types.SimpleNamespace(message_id=1)
+
+    async def fake_main_message(message):  # noqa: ANN001
+        nonlocal main_message_called
+        main_message_called = True
+
+    monkeypatch.setattr(main, "_load_account_data", fake_load_account_data)
+    monkeypatch.setattr(main, "update_account_settings", fake_update_account_settings)
+    monkeypatch.setattr(main, "bulk_update_reaction_settings", fake_bulk_update)
+    monkeypatch.setattr(main.bot, "send_message", fake_send_message)
+    monkeypatch.setattr(main, "main_message", fake_main_message)
+
+    class DummyCallback:
+        def __init__(self) -> None:
+            self.data = "reaction_apply_all"
+            self.from_user = types.SimpleNamespace(id=user_id)
+            self.message = DummyMessage("", user_id, from_user_id=bot_id, chat_id=user_id)
+
+        async def answer(self, *args, **kwargs):  # noqa: ANN001
+            return None
+
+    await main.callbacks(DummyCallback(), state)
+
+    assert captured_updates and captured_updates[0][0] == state_data["account_id"]
+    assert captured_bulk and captured_bulk[0][0] == user_id
+    assert any(chat_id == user_id and "Настройки реакций применены" in text for chat_id, text in sent_messages)
+    assert all(chat_id != bot_id for chat_id, _ in sent_messages)
+    assert state.cleared is True
+    assert main_message_called is True
 
 
 @pytest.mark.anyio("asyncio")

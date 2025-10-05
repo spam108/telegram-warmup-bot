@@ -2278,8 +2278,15 @@ async def _save_reaction_settings(
     data, account_id, _ = await _load_account_data(state)
     session = data.get("account") if data else None
 
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        from_user = getattr(message, "from_user", None)
+        chat_id = getattr(from_user, "id", None)
+
     if not account_id:
-        await bot.send_message(message.from_user.id, "Ошибка: аккаунт не найден. Попробуйте снова.")
+        if chat_id is not None:
+            await bot.send_message(chat_id, "Ошибка: аккаунт не найден. Попробуйте снова.")
         await state.clear()
         await main_message(message)
         return
@@ -2315,18 +2322,20 @@ async def _save_reaction_settings(
 
     if data.get("apply_reactions_to_all"):
         bulk_kwargs = dict(update_kwargs)
-        await bulk_update_reaction_settings(message.from_user.id, **bulk_kwargs)
-        await bot.send_message(
-            message.from_user.id,
-            "Настройки реакций применены ко всем вашим аккаунтам.",
-        )
+        if chat_id is not None:
+            await bulk_update_reaction_settings(chat_id, **bulk_kwargs)
+            await bot.send_message(
+                chat_id,
+                "Настройки реакций применены ко всем вашим аккаунтам.",
+            )
         await bot.send_message(
             log_channel,
             f"Аккаунт {session}: настройки реакций применены ко всем аккаунтам пользователя.",
         )
 
     if notify:
-        await bot.send_message(message.from_user.id, "Настройки реакций сохранены.")
+        if chat_id is not None:
+            await bot.send_message(chat_id, "Настройки реакций сохранены.")
         if session:
             await bot.send_message(
                 log_channel,
