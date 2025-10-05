@@ -112,3 +112,61 @@ async def test_get_global_statistics_and_report(tmp_path, monkeypatch):
 
     await db_module.close_db()
 
+
+def test_format_global_statistics_report_escapes_markdown_special_chars(monkeypatch):
+    monkeypatch.setenv("BOT_TOKEN", "123456:TEST")
+    monkeypatch.setenv("API_ID", "123")
+    monkeypatch.setenv("API_HASH", "hash")
+
+    import importlib
+    import main as main_module
+
+    main_module = importlib.reload(main_module)
+
+    stats = {
+        "accounts": {
+            "total": 1,
+            "by_status": {
+                "running_status": 1,
+                "custom_status": 2,
+            },
+            "by_mode": {
+                "mode_with_underscores": 3,
+            },
+            "running_by_mode": {
+                "mode_with_underscores": 2,
+            },
+        },
+        "comments": {
+            "total": 0,
+            "by_status": {
+                "success": 0,
+                "error": 0,
+                "skipped": 0,
+                "no_comments": 0,
+                "custom_comment_status": 1,
+            },
+            "reactions_total": 0,
+            "reactions": {
+                "success": 0,
+                "error": 0,
+                "skipped": 0,
+                "custom_reaction_status": 1,
+            },
+        },
+        "warmup": {
+            "by_status": {
+                "joined": 0,
+                "pending": 0,
+                "error": 0,
+                "custom_warmup_status": 1,
+            },
+            "total_attempts": 0,
+        },
+    }
+
+    report = main_module.format_global_statistics_report(stats)
+
+    import re
+
+    assert not re.search(r"(?<!\\)_", report)

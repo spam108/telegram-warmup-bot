@@ -3381,7 +3381,11 @@ def format_global_statistics_report(stats: Dict[str, Any]) -> str:
     reaction_total = comments.get("reactions_total", 0)
 
     def _format_additional(counts: Dict[str, Any], known_keys: Set[str]) -> Optional[str]:
-        extra = [f"{key}: {counts[key]}" for key in sorted(counts) if key not in known_keys]
+        extra = [
+            f"{escape_markdown_text(str(key))}: {counts[key]}"
+            for key in sorted(counts)
+            if key not in known_keys
+        ]
         if extra:
             return ", ".join(extra)
         return None
@@ -3402,12 +3406,12 @@ def format_global_statistics_report(stats: Dict[str, Any]) -> str:
     if accounts_by_mode:
         lines.append("• Режимы:")
         for mode, count in sorted(accounts_by_mode.items()):
-            lines.append(f"   ◦ {mode}: {count}")
+            lines.append(f"   ◦ {escape_markdown_text(str(mode))}: {count}")
 
     if running_by_mode:
         lines.append("• Активные по режимам:")
         for mode, count in sorted(running_by_mode.items()):
-            lines.append(f"   ◦ {mode}: {count}")
+            lines.append(f"   ◦ {escape_markdown_text(str(mode))}: {count}")
 
     lines.extend(
         [
