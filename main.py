@@ -143,7 +143,10 @@ class startaccount(StatesGroup):
 
 class reactionsettings(StatesGroup):
     limit = State()
-    chance = State()
+    post_chance = State()
+    discussion_reaction_chance = State()
+    discussion_reply_chance = State()
+    discussion_prompt = State()
     sleeps = State()
     emojis = State()
 
@@ -238,10 +241,13 @@ async def _handle_linked_channel_message(
     system_promt: str,
     reaction_emojis: List[str],
     reaction_chance: int,
-    reaction_discussion_chance: int,
+    reaction_discussion_chance: Optional[int],
+    discussion_reply_prompt: Optional[str],
+    discussion_reply_chance: Optional[int],
     reaction_sleep_min: int,
     reaction_sleep_max: int,
     reaction_limit_per_message: Optional[int],
+    reactions_enabled: bool,
     last_reaction_at: Optional[datetime] = None,
 ) -> Optional[datetime]:
     key = make_session_key(userid, session)
@@ -255,9 +261,19 @@ async def _handle_linked_channel_message(
         logging.debug("Обнаружен собственный комментарий в обсуждении для %s", session)
         return current_last_reaction_at
 
-    selected_reaction_chance = (
-        reaction_discussion_chance if is_discussion_message else reaction_chance
-    )
+    if is_discussion_message:
+        if discussion_reply_prompt is None or discussion_reply_chance is None:
+            logging.debug(
+                "Обсуждения отключены для %s: отсутствуют настройки", session
+            )
+            return current_last_reaction_at
+        comment_chance = discussion_reply_chance
+        comment_prompt = discussion_reply_prompt
+        selected_reaction_chance = reaction_discussion_chance or 0
+    else:
+        comment_chance = chance
+        comment_prompt = system_promt
+        selected_reaction_chance = reaction_chance
 
     post_text = _extract_post_text(message)
     if post_text is None:
@@ -283,14 +299,14 @@ async def _handle_linked_channel_message(
 
     try:
         roll = random.randint(1, 100)
-        if roll > chance:
-            await bot.send_message(log_channel, f'Аккаунт {session} пропустил комментарий (rnd {roll} > {chance})')
+        if roll > comment_chance:
+            await bot.send_message(log_channel, f'Аккаунт {session} пропустил комментарий (rnd {roll} > {comment_chance})')
             await add_comment_log(
                 account_id,
                 channel=str(getattr(getattr(message, "chat", None), "id", "")),
                 message_id=getattr(message, "id", None),
                 status='skipped',
-                error=f'random {roll} > chance {chance}',
+                error=f'random {roll} > chance {comment_chance}',
             )
             return current_last_reaction_at
 
@@ -304,7 +320,7 @@ async def _handle_linked_channel_message(
             return current_last_reaction_at
 
         await asyncio.sleep(random.uniform(xsleep, ysleep))
-        comment = generate_comment(post_text, system_promt)
+        comment = generate_comment(post_text, comment_prompt)
         msg = await client.send_message(message.chat.id, comment, reply_to_message_id=message.id)
 
         post_base_link = _build_post_link(msg, message)
@@ -322,7 +338,11 @@ async def _handle_linked_channel_message(
             status='success',
         )
 
-        if reaction_emojis and selected_reaction_chance > 0:
+        if (
+            reactions_enabled
+            and reaction_emojis
+            and (selected_reaction_chance or 0) > 0
+        ):
             channel_for_reactions = str(getattr(getattr(message, "chat", None), "id", ""))
             message_id = getattr(message, "id", None)
             limit = reaction_limit_per_message
@@ -352,7 +372,7 @@ async def _handle_linked_channel_message(
                         return current_last_reaction_at
 
             reaction_roll = random.randint(1, 100)
-            if reaction_roll <= selected_reaction_chance:
+            if reaction_roll <= (selected_reaction_chance or 0):
                 await asyncio.sleep(random.uniform(reaction_sleep_min, reaction_sleep_max))
                 reaction_emoji = random.choice(reaction_emojis)
                 try:
@@ -1553,34 +1573,81 @@ async def _prompt_reaction_limit(message: Message, state: FSMContext) -> None:
     )
 
 
-async def _prompt_reaction_chance(message: Message, state: FSMContext) -> None:
+async def _prompt_post_reaction_chance(message: Message, state: FSMContext) -> None:
     data, _, account = await _load_account_data(state)
     stored = account.get("reaction_chance") if account else None
     if stored is None:
         stored = data.get("reaction_chance")
 
-    stored_discussion = account.get("reaction_discussion_chance") if account else None
-    if stored_discussion is None:
-        stored_discussion = data.get("reaction_discussion_chance")
-    if stored_discussion is None:
-        stored_discussion = stored
-
-    if stored is None:
-        display = "0% (по умолчанию)"
-    else:
-        display = _format_chance(stored)
-
-    if stored_discussion is None:
-        discussion_display = "0% (по умолчанию)"
-    else:
-        discussion_display = _format_chance(stored_discussion)
+    display = _format_chance(stored) if stored is not None else "0% (по умолчанию)"
     await bot.send_message(
         message.from_user.id,
         (
-            f"Текущий шанс реакции: {display}.\n"
-            f"Шанс реакции в обсуждениях: {discussion_display}.\n"
-            "Отправьте одно число (для обоих значений) или два числа через '/' или пробел "
-            "(сначала для постов, затем для обсуждений). Используйте '-' для сохранения текущих."
+            f"Текущий шанс реакций на посты: {display}.\n"
+            "Отправьте число от 0 до 100 или '-' для сохранения текущего значения."
+        ),
+    )
+
+
+async def _prompt_discussion_reaction_chance(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+
+    stored = account.get("reaction_discussion_chance") if account else None
+    if stored is None and data is not None:
+        stored = data.get("reaction_discussion_chance")
+
+    if stored is None:
+        display = "не задан (обсуждения выключены)"
+    else:
+        display = _format_chance(stored)
+
+    await bot.send_message(
+        message.from_user.id,
+        (
+            f"Текущий шанс реакций в обсуждениях: {display}.\n"
+            "Отправьте число от 0 до 100 или '-' чтобы отключить реакции в обсуждениях."
+        ),
+    )
+
+
+async def _prompt_discussion_reply_chance(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+
+    stored = account.get("discussion_reply_chance") if account else None
+    if stored is None and data is not None:
+        stored = data.get("discussion_reply_chance")
+
+    if stored is None:
+        display = "не задан (обсуждения выключены)"
+    else:
+        display = _format_chance(stored)
+
+    await bot.send_message(
+        message.from_user.id,
+        (
+            f"Текущий шанс текстовых ответов в обсуждениях: {display}.\n"
+            "Отправьте число от 0 до 100 или '-' чтобы отключить текстовые ответы."
+        ),
+    )
+
+
+async def _prompt_discussion_reply_prompt(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+
+    stored = account.get("discussion_reply_prompt") if account else None
+    if stored is None and data is not None:
+        stored = data.get("discussion_reply_prompt")
+
+    if stored:
+        display = stored
+    else:
+        display = "не задан (обсуждения выключены)"
+
+    await bot.send_message(
+        message.from_user.id,
+        (
+            f"Текущий промт для ответов в обсуждениях: {display}.\n"
+            "Отправьте новый промт или '-' чтобы отключить ответы в обсуждениях."
         ),
     )
 
@@ -1606,8 +1673,8 @@ async def add_reaction_limit(message: Message, state: FSMContext) -> None:
                 "reaction_limit_set": False,
             }
         )
-        await _prompt_reaction_chance(message, state)
-        await state.set_state(reactionsettings.chance)
+        await _prompt_post_reaction_chance(message, state)
+        await state.set_state(reactionsettings.post_chance)
         return
 
     lowered = incoming.lower()
@@ -1618,8 +1685,8 @@ async def add_reaction_limit(message: Message, state: FSMContext) -> None:
                 "reaction_limit_set": True,
             }
         )
-        await _prompt_reaction_chance(message, state)
-        await state.set_state(reactionsettings.chance)
+        await _prompt_post_reaction_chance(message, state)
+        await state.set_state(reactionsettings.post_chance)
         return
 
     try:
@@ -1654,8 +1721,8 @@ async def add_reaction_limit(message: Message, state: FSMContext) -> None:
             "reaction_limit_set": True,
         }
     )
-    await _prompt_reaction_chance(message, state)
-    await state.set_state(reactionsettings.chance)
+    await _prompt_post_reaction_chance(message, state)
+    await state.set_state(reactionsettings.post_chance)
 
 
 async def _prompt_reaction_sleeps(message: Message, state: FSMContext) -> None:
@@ -1754,87 +1821,186 @@ async def _prepare_regular_channels_prompt(message: Message, state: FSMContext) 
         await main_message(message)
 
 
-@dp.message(reactionsettings.chance)
-async def add_reaction_chance(message: Message, state: FSMContext) -> None:
+@dp.message(reactionsettings.post_chance)
+async def add_post_reaction_chance(message: Message, state: FSMContext) -> None:
     data, _, account = await _load_account_data(state)
 
-    stored_chance: Optional[Union[int, str]] = None
+    stored: Optional[Union[int, str]] = None
     if account:
-        stored_chance = account.get("reaction_chance")
-    if stored_chance is None:
-        stored_chance = data.get("reaction_chance")
+        stored = account.get("reaction_chance")
+    if stored is None:
+        stored = data.get("reaction_chance")
 
-    stored_discussion: Optional[Union[int, str]] = None
+    incoming = (message.text or "").strip()
+
+    def _parse_value(raw: Union[str, int, None]) -> int:
+        value = int(raw)  # type: ignore[arg-type]
+        if value < 0 or value > 100:
+            raise ValueError
+        return value
+
+    if incoming == "-":
+        if stored is None or stored == "":
+            await bot.send_message(
+                message.from_user.id,
+                "Значение не задано. Укажите число от 0 до 100.",
+            )
+            await _prompt_post_reaction_chance(message, state)
+            return
+        try:
+            chance_value = _parse_value(stored)
+        except (TypeError, ValueError):
+            await bot.send_message(
+                message.from_user.id,
+                "Не удалось определить сохранённый шанс. Укажите число от 0 до 100.",
+            )
+            await _prompt_post_reaction_chance(message, state)
+            return
+    else:
+        if not incoming.isdigit():
+            current_display = _format_chance(stored)
+            await bot.send_message(
+                message.from_user.id,
+                (
+                    f"Некорректное значение. Текущий шанс реакций на посты: {current_display}.\n"
+                    "Отправьте число от 0 до 100 или '-' для сохранения текущего."
+                ),
+            )
+            await _prompt_post_reaction_chance(message, state)
+            return
+        try:
+            chance_value = _parse_value(incoming)
+        except ValueError:
+            current_display = _format_chance(stored)
+            await bot.send_message(
+                message.from_user.id,
+                (
+                    f"Шанс должен быть от 0 до 100. Текущее значение: {current_display}."
+                ),
+            )
+            await _prompt_post_reaction_chance(message, state)
+            return
+
+    await state.update_data({"reaction_chance": chance_value})
+
+    await _prompt_discussion_reaction_chance(message, state)
+    await state.set_state(reactionsettings.discussion_reaction_chance)
+
+
+@dp.message(reactionsettings.discussion_reaction_chance)
+async def add_discussion_reaction_chance(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+
+    stored: Optional[Union[int, str]] = None
     if account:
-        stored_discussion = account.get("reaction_discussion_chance")
-    if stored_discussion is None:
-        stored_discussion = data.get("reaction_discussion_chance")
-    if stored_discussion is None:
-        stored_discussion = stored_chance
+        stored = account.get("reaction_discussion_chance")
+    if stored is None:
+        stored = data.get("reaction_discussion_chance")
 
     incoming = (message.text or "").strip()
 
     if incoming == "-":
-        def _convert_optional(value: Optional[Union[int, str]]) -> Optional[int]:
-            if value is None or value == "":
-                return None
-            converted = int(value)
-            if converted < 0 or converted > 100:
-                raise ValueError
-            return converted
-
-        try:
-            reaction_chance_value = _convert_optional(stored_chance)
-            reaction_discussion_value = _convert_optional(stored_discussion)
-        except (TypeError, ValueError):
-            await bot.send_message(
-                message.from_user.id,
-                (
-                    "Не удалось определить сохранённые значения шансов. "
-                    "Укажите одно число от 0 до 100 или два числа через '/' или пробел."
-                ),
-            )
-            await _prompt_reaction_chance(message, state)
-            return
+        await state.update_data({"reaction_discussion_chance": None})
     else:
-        parts = [part for part in re.split(r"[\s,\/]+", incoming) if part]
-
-        def _parse_part(part: str) -> int:
-            value = int(part)
-            if value < 0 or value > 100:
-                raise ValueError
-            return value
-
-        try:
-            if len(parts) == 1:
-                reaction_chance_value = _parse_part(parts[0])
-                reaction_discussion_value = reaction_chance_value
-            elif len(parts) == 2:
-                reaction_chance_value = _parse_part(parts[0])
-                reaction_discussion_value = _parse_part(parts[1])
-            else:
-                raise ValueError
-        except (ValueError, TypeError):
-            current_display = _format_chance(stored_chance)
-            discussion_display = _format_chance(stored_discussion)
+        if not incoming.isdigit():
+            current_display = _format_chance(stored)
             await bot.send_message(
                 message.from_user.id,
                 (
-                    f"Некорректное значение. Текущий шанс реакции: {current_display}.\n"
-                    f"Шанс в обсуждениях: {discussion_display}.\n"
-                    "Отправьте одно число от 0 до 100 или два числа через '/' или пробел "
-                    "(сначала для постов, затем для обсуждений)."
+                    f"Некорректное значение. Текущий шанс реакций в обсуждениях: {current_display}.\n"
+                    "Отправьте число от 0 до 100 или '-' чтобы отключить реакции."
                 ),
             )
-            await _prompt_reaction_chance(message, state)
+            await _prompt_discussion_reaction_chance(message, state)
             return
+        value = int(incoming)
+        if value < 0 or value > 100:
+            current_display = _format_chance(stored)
+            await bot.send_message(
+                message.from_user.id,
+                (
+                    f"Шанс должен быть от 0 до 100. Текущее значение: {current_display}."
+                ),
+            )
+            await _prompt_discussion_reaction_chance(message, state)
+            return
+        await state.update_data({"reaction_discussion_chance": value})
 
-    await state.update_data(
-        {
-            "reaction_chance": reaction_chance_value,
-            "reaction_discussion_chance": reaction_discussion_value,
-        }
-    )
+    await _prompt_discussion_reply_chance(message, state)
+    await state.set_state(reactionsettings.discussion_reply_chance)
+
+
+@dp.message(reactionsettings.discussion_reply_chance)
+async def add_discussion_reply_chance(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+
+    stored: Optional[Union[int, str]] = None
+    if account:
+        stored = account.get("discussion_reply_chance")
+    if stored is None:
+        stored = data.get("discussion_reply_chance")
+
+    incoming = (message.text or "").strip()
+
+    if incoming == "-":
+        await state.update_data({"discussion_reply_chance": None})
+    else:
+        if not incoming.isdigit():
+            current_display = _format_chance(stored)
+            await bot.send_message(
+                message.from_user.id,
+                (
+                    f"Некорректное значение. Текущий шанс ответов в обсуждениях: {current_display}.\n"
+                    "Отправьте число от 0 до 100 или '-' чтобы отключить ответы."
+                ),
+            )
+            await _prompt_discussion_reply_chance(message, state)
+            return
+        value = int(incoming)
+        if value < 0 or value > 100:
+            current_display = _format_chance(stored)
+            await bot.send_message(
+                message.from_user.id,
+                (
+                    f"Шанс должен быть от 0 до 100. Текущее значение: {current_display}."
+                ),
+            )
+            await _prompt_discussion_reply_chance(message, state)
+            return
+        await state.update_data({"discussion_reply_chance": value})
+
+    await _prompt_discussion_reply_prompt(message, state)
+    await state.set_state(reactionsettings.discussion_prompt)
+
+
+@dp.message(reactionsettings.discussion_prompt)
+async def add_discussion_reply_prompt(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+
+    stored: Optional[str] = None
+    if account:
+        stored = account.get("discussion_reply_prompt")
+    if stored is None:
+        stored = data.get("discussion_reply_prompt")
+
+    incoming = (message.text or "").strip()
+
+    if incoming == "-":
+        prompt_value: Optional[str] = None
+    elif not incoming:
+        current_display = stored if stored else "не задан"
+        await bot.send_message(
+            message.from_user.id,
+            (
+                f"Промт не может быть пустым. Текущее значение: {current_display}."
+            ),
+        )
+        await _prompt_discussion_reply_prompt(message, state)
+        return
+    else:
+        prompt_value = incoming
+
+    await state.update_data({"discussion_reply_prompt": prompt_value})
 
     await _prompt_reaction_sleeps(message, state)
     await state.set_state(reactionsettings.sleeps)
@@ -1933,13 +2099,22 @@ async def _save_reaction_settings(message: Message, state: FSMContext) -> None:
         if parsed:
             reaction_sleep_min, reaction_sleep_max = parsed
 
-    update_kwargs: Dict[str, Any] = {
-        "reaction_chance": data.get("reaction_chance"),
-        "reaction_discussion_chance": data.get("reaction_discussion_chance"),
-        "reaction_sleep_min": reaction_sleep_min,
-        "reaction_sleep_max": reaction_sleep_max,
-        "reaction_emojis": data.get("reaction_emojis"),
-    }
+    update_kwargs: Dict[str, Any] = {}
+
+    if data and "reaction_chance" in data:
+        update_kwargs["reaction_chance"] = data.get("reaction_chance")
+    if data and "reaction_discussion_chance" in data:
+        update_kwargs["reaction_discussion_chance"] = data.get("reaction_discussion_chance")
+    if data and "discussion_reply_chance" in data:
+        update_kwargs["discussion_reply_chance"] = data.get("discussion_reply_chance")
+    if data and "discussion_reply_prompt" in data:
+        update_kwargs["discussion_reply_prompt"] = data.get("discussion_reply_prompt")
+    if reaction_sleep_min is not None:
+        update_kwargs["reaction_sleep_min"] = reaction_sleep_min
+    if reaction_sleep_max is not None:
+        update_kwargs["reaction_sleep_max"] = reaction_sleep_max
+    if data and "reaction_emojis" in data:
+        update_kwargs["reaction_emojis"] = data.get("reaction_emojis")
 
     if data.get("reaction_limit_set"):
         update_kwargs["reaction_limit_per_message"] = data.get("reaction_limit")
@@ -2246,8 +2421,6 @@ async def send_comments(userid, session, account_id):
         if reaction_chance is None:
             reaction_chance = 0
         reaction_discussion_chance = account.get("reaction_discussion_chance")
-        if reaction_discussion_chance is None:
-            reaction_discussion_chance = reaction_chance
         reaction_sleep_min = account.get("reaction_sleep_min")
         reaction_sleep_max = account.get("reaction_sleep_max")
         reaction_limit_per_message = account.get("reaction_limit_per_message")
@@ -2259,6 +2432,11 @@ async def send_comments(userid, session, account_id):
             reaction_sleep_max = sleep_max
         if reaction_sleep_min > reaction_sleep_max:
             reaction_sleep_min, reaction_sleep_max = reaction_sleep_max, reaction_sleep_min
+
+        discussion_reply_prompt = account.get("discussion_reply_prompt")
+        discussion_reply_chance = account.get("discussion_reply_chance")
+        reactions_enabled_raw = account.get("reactions_enabled")
+        reactions_enabled = True if reactions_enabled_raw is None else bool(reactions_enabled_raw)
 
         last_reaction_at_str = account.get("last_reaction_at")
         last_reaction_at_dt: Optional[datetime] = None
@@ -2305,9 +2483,12 @@ async def send_comments(userid, session, account_id):
                 reaction_emojis=reaction_emojis,
                 reaction_chance=reaction_chance,
                 reaction_discussion_chance=reaction_discussion_chance,
+                discussion_reply_prompt=discussion_reply_prompt,
+                discussion_reply_chance=discussion_reply_chance,
                 reaction_sleep_min=reaction_sleep_min,
                 reaction_sleep_max=reaction_sleep_max,
                 reaction_limit_per_message=reaction_limit_per_message,
+                reactions_enabled=reactions_enabled,
                 last_reaction_at=last_reaction_at_dt,
             )
         try:
@@ -3331,9 +3512,10 @@ async def get_account_summary(account_id):
     reaction_chance_value = account.get('reaction_chance')
     reaction_chance_display = _format_chance(reaction_chance_value)
     reaction_discussion_chance_value = account.get('reaction_discussion_chance')
-    if reaction_discussion_chance_value is None:
-        reaction_discussion_chance_value = reaction_chance_value
     reaction_discussion_chance_display = _format_chance(reaction_discussion_chance_value)
+    discussion_reply_chance_value = account.get('discussion_reply_chance')
+    discussion_reply_chance_display = _format_chance(discussion_reply_chance_value)
+    discussion_prompt_preview, _ = build_prompt_preview(account.get('discussion_reply_prompt'), 100)
     reaction_sleep_min_value = account.get('reaction_sleep_min')
     reaction_sleep_max_value = account.get('reaction_sleep_max')
     reaction_limit_value = account.get('reaction_limit_per_message')
@@ -3344,8 +3526,15 @@ async def get_account_summary(account_id):
         reaction_delay_display = f"{reaction_sleep_min_value}-{reaction_sleep_max_value}"
     reaction_emojis_list = account.get('reaction_emojis') or []
     reaction_emojis_display = " ".join(reaction_emojis_list) if reaction_emojis_list else "не заданы"
+    reactions_enabled_value = account.get('reactions_enabled')
+    if reactions_enabled_value is None:
+        reactions_enabled_display = "да"
+    else:
+        reactions_enabled_display = "да" if reactions_enabled_value else "нет"
     reaction_chance = escape_markdown_text(reaction_chance_display)
     reaction_discussion_chance = escape_markdown_text(reaction_discussion_chance_display)
+    discussion_reply_chance = escape_markdown_text(discussion_reply_chance_display)
+    discussion_prompt = escape_markdown_text(discussion_prompt_preview)
     reaction_delay = escape_markdown_text(reaction_delay_display)
     reaction_emojis = escape_markdown_text(reaction_emojis_display)
     reaction_limit = escape_markdown_text(reaction_limit_display)
@@ -3365,7 +3554,10 @@ async def get_account_summary(account_id):
 • Задержка: {sleep_min}-{sleep_max} сек
 • Шанс комментирования: {chance}%
 • Шанс реакции: {reaction_chance}
+• Реакции включены: {reactions_enabled_display}
 • Шанс реакции в обсуждениях: {reaction_discussion_chance}
+• Шанс ответов в обсуждениях: {discussion_reply_chance}
+• Промт обсуждений: {discussion_prompt}
 • Задержка реакции: {reaction_delay}
 • Эмодзи реакций: {reaction_emojis}
 • Лимит реакций на пост: {reaction_limit}

@@ -34,6 +34,87 @@ def anyio_backend():
 
 
 @pytest.mark.anyio
+async def test_discussion_without_settings_skips_actions(monkeypatch):
+    userid = 123
+    session = "+100500"
+    account_id = 42
+
+    original_active_sessions = dict(main.active_sessions)
+    original_quiet = set(main.quiet_sessions_notified)
+
+    main.active_sessions.clear()
+    main.quiet_sessions_notified.clear()
+    key = main.make_session_key(userid, session)
+    main.active_sessions[key] = True
+
+    client = DummyClient()
+
+    chat = types.SimpleNamespace(id=-2000000000, permissions=None, type="supergroup")
+    reply_to_message = types.SimpleNamespace(
+        forward_from_chat=types.SimpleNamespace(username="source_channel"),
+        forward_from_message_id=321,
+    )
+    from_user = types.SimpleNamespace(is_self=False)
+    message = types.SimpleNamespace(
+        chat=chat,
+        text="Original post",
+        caption=None,
+        id=111,
+        reply_to_message=reply_to_message,
+        from_user=from_user,
+    )
+
+    comment_logs = []
+
+    async def fake_add_comment_log(*args, **kwargs):
+        comment_logs.append((args, kwargs))
+
+    async def fake_bot_send_message(*args, **kwargs):
+        return None
+
+    async def fake_sleep(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main.bot, "send_message", fake_bot_send_message)
+    monkeypatch.setattr(main, "add_comment_log", fake_add_comment_log)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(main, "is_quiet_period", lambda: False)
+
+    try:
+        result = await main._handle_linked_channel_message(
+            client,
+            message,
+            userid=userid,
+            session=session,
+            account_id=account_id,
+            chance=100,
+            xsleep=0,
+            ysleep=0,
+            system_promt="prompt",
+            reaction_emojis=["🔥"],
+            reaction_chance=100,
+            reaction_discussion_chance=100,
+            discussion_reply_prompt=None,
+            discussion_reply_chance=None,
+            reaction_sleep_min=0,
+            reaction_sleep_max=0,
+            reaction_limit_per_message=5,
+            reactions_enabled=True,
+            last_reaction_at=None,
+        )
+    finally:
+        main.active_sessions.clear()
+        main.active_sessions.update(original_active_sessions)
+        main.quiet_sessions_notified.clear()
+        main.quiet_sessions_notified.update(original_quiet)
+
+    assert result is None
+    assert client.sent_messages == []
+    assert client.sent_reactions == []
+    assert comment_logs == []
+
+
+@pytest.mark.anyio
 async def test_discussion_reply_from_user_triggers_comment_and_reaction(monkeypatch):
     userid = 123
     session = "+100500"
@@ -118,9 +199,12 @@ async def test_discussion_reply_from_user_triggers_comment_and_reaction(monkeypa
             reaction_emojis=["🔥"],
             reaction_chance=100,
             reaction_discussion_chance=100,
+            discussion_reply_prompt="discussion",
+            discussion_reply_chance=100,
             reaction_sleep_min=0,
             reaction_sleep_max=0,
             reaction_limit_per_message=5,
+            reactions_enabled=True,
             last_reaction_at=None,
         )
     finally:
@@ -230,9 +314,12 @@ async def test_discussion_and_channel_reaction_chances_are_distinct(monkeypatch)
             reaction_emojis=["🔥"],
             reaction_chance=100,
             reaction_discussion_chance=0,
+            discussion_reply_prompt="discussion",
+            discussion_reply_chance=100,
             reaction_sleep_min=0,
             reaction_sleep_max=0,
             reaction_limit_per_message=5,
+            reactions_enabled=True,
             last_reaction_at=None,
         )
 
@@ -251,9 +338,12 @@ async def test_discussion_and_channel_reaction_chances_are_distinct(monkeypatch)
             reaction_emojis=["🔥"],
             reaction_chance=100,
             reaction_discussion_chance=0,
+            discussion_reply_prompt="discussion",
+            discussion_reply_chance=100,
             reaction_sleep_min=0,
             reaction_sleep_max=0,
             reaction_limit_per_message=5,
+            reactions_enabled=True,
             last_reaction_at=None,
         )
     finally:
@@ -346,9 +436,12 @@ async def test_reaction_skipped_when_limit_reached(monkeypatch):
             reaction_emojis=["🔥"],
             reaction_chance=100,
             reaction_discussion_chance=100,
+            discussion_reply_prompt="discussion",
+            discussion_reply_chance=100,
             reaction_sleep_min=0,
             reaction_sleep_max=0,
             reaction_limit_per_message=5,
+            reactions_enabled=True,
             last_reaction_at=None,
         )
     finally:
@@ -452,9 +545,12 @@ async def test_reaction_skipped_when_cooldown_active(monkeypatch):
             reaction_emojis=["🔥"],
             reaction_chance=100,
             reaction_discussion_chance=100,
+            discussion_reply_prompt="discussion",
+            discussion_reply_chance=100,
             reaction_sleep_min=0,
             reaction_sleep_max=0,
             reaction_limit_per_message=5,
+            reactions_enabled=True,
             last_reaction_at=recent_reaction,
         )
     finally:
@@ -563,9 +659,12 @@ async def test_reaction_occurs_after_cooldown(monkeypatch):
             reaction_emojis=["🔥"],
             reaction_chance=100,
             reaction_discussion_chance=100,
+            discussion_reply_prompt="discussion",
+            discussion_reply_chance=100,
             reaction_sleep_min=0,
             reaction_sleep_max=0,
             reaction_limit_per_message=5,
+            reactions_enabled=True,
             last_reaction_at=previous_reaction,
         )
     finally:
