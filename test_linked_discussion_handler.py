@@ -65,17 +65,13 @@ async def test_discussion_without_settings_skips_actions(monkeypatch):
     client = DummyClient()
 
     chat = types.SimpleNamespace(id=-2000000000, permissions=None, type="supergroup")
-    reply_to_message = types.SimpleNamespace(
-        forward_from_chat=types.SimpleNamespace(username="source_channel"),
-        forward_from_message_id=321,
-    )
     from_user = types.SimpleNamespace(is_self=False)
     message = types.SimpleNamespace(
         chat=chat,
         text="Original post",
         caption=None,
         id=111,
-        reply_to_message=reply_to_message,
+        reply_to_message=None,
         from_user=from_user,
     )
 
@@ -126,6 +122,199 @@ async def test_discussion_without_settings_skips_actions(monkeypatch):
     assert result is None
     assert client.sent_messages == []
     assert client.sent_reactions == []
+    assert comment_logs == []
+
+
+@pytest.mark.anyio
+async def test_comment_not_sent_if_session_stops_during_sleep(monkeypatch):
+    userid = 123
+    session = "+100500"
+    account_id = 42
+
+    original_active_sessions = dict(main.active_sessions)
+    original_quiet = set(main.quiet_sessions_notified)
+
+    main.active_sessions.clear()
+    main.quiet_sessions_notified.clear()
+    key = main.make_session_key(userid, session)
+    main.active_sessions[key] = True
+
+    client = DummyClient()
+
+    chat = types.SimpleNamespace(id=-2000000000, permissions=None, type="supergroup")
+    from_user = types.SimpleNamespace(is_self=False)
+    message = types.SimpleNamespace(
+        chat=chat,
+        text="Original post",
+        caption=None,
+        id=111,
+        reply_to_message=None,
+        from_user=from_user,
+    )
+
+    comment_logs = []
+    notifications = []
+    generate_called = False
+
+    async def fake_add_comment_log(*args, **kwargs):
+        comment_logs.append((args, kwargs))
+
+    async def fake_bot_send_message(*args, **kwargs):
+        notifications.append((args, kwargs))
+
+    def fake_generate_comment(*args, **kwargs):
+        nonlocal generate_called
+        generate_called = True
+        return "generated"
+
+    sleep_calls = []
+
+    async def fake_sleep(duration):
+        sleep_calls.append(duration)
+        if len(sleep_calls) == 1:
+            main.active_sessions[key] = False
+        return None
+
+    monkeypatch.setattr(main.bot, "send_message", fake_bot_send_message)
+    monkeypatch.setattr(main, "add_comment_log", fake_add_comment_log)
+    monkeypatch.setattr(main, "generate_comment", fake_generate_comment)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(main.random, "randint", lambda a, b: 1)
+    monkeypatch.setattr(main.random, "uniform", lambda a, b: (a + b) / 2)
+    monkeypatch.setattr(main, "is_quiet_period", lambda: False)
+
+    try:
+        result = await main._handle_linked_channel_message(
+            client,
+            message,
+            userid=userid,
+            session=session,
+            account_id=account_id,
+            chance=100,
+            xsleep=1,
+            ysleep=2,
+            system_promt="prompt",
+            reaction_emojis=[],
+            reaction_chance=0,
+            reaction_discussion_chance=None,
+            discussion_reply_prompt=None,
+            discussion_reply_chance=None,
+            reaction_sleep_min=0,
+            reaction_sleep_max=0,
+            reaction_limit_per_message=None,
+            reactions_enabled=False,
+            last_reaction_at=None,
+        )
+    finally:
+        main.active_sessions.clear()
+        main.active_sessions.update(original_active_sessions)
+        main.quiet_sessions_notified.clear()
+        main.quiet_sessions_notified.update(original_quiet)
+
+    assert result is None
+    assert client.sent_messages == []
+    assert generate_called is False
+    assert notifications == []
+    assert comment_logs == [] or comment_logs[0][1].get("status") == "comment_skipped"
+
+
+@pytest.mark.anyio
+async def test_comment_not_sent_if_quiet_starts_during_sleep(monkeypatch):
+    userid = 123
+    session = "+100500"
+    account_id = 42
+
+    original_active_sessions = dict(main.active_sessions)
+    original_quiet = set(main.quiet_sessions_notified)
+
+    main.active_sessions.clear()
+    main.quiet_sessions_notified.clear()
+    key = main.make_session_key(userid, session)
+    main.active_sessions[key] = True
+
+    client = DummyClient()
+
+    chat = types.SimpleNamespace(id=-2000000000, permissions=None, type="supergroup")
+    from_user = types.SimpleNamespace(is_self=False)
+    message = types.SimpleNamespace(
+        chat=chat,
+        text="Original post",
+        caption=None,
+        id=111,
+        reply_to_message=None,
+        from_user=from_user,
+    )
+
+    comment_logs = []
+    notifications = []
+    generate_called = False
+    quiet_state = {"value": False}
+    quiet_checks = []
+
+    async def fake_add_comment_log(*args, **kwargs):
+        comment_logs.append((args, kwargs))
+
+    async def fake_bot_send_message(*args, **kwargs):
+        notifications.append((args, kwargs))
+
+    def fake_generate_comment(*args, **kwargs):
+        nonlocal generate_called
+        generate_called = True
+        return "generated"
+
+    def fake_is_quiet_period():
+        quiet_checks.append(quiet_state["value"])
+        return quiet_state["value"]
+
+    sleep_calls = []
+
+    async def fake_sleep(duration):
+        sleep_calls.append(duration)
+        if len(sleep_calls) == 1:
+            quiet_state["value"] = True
+        return None
+
+    monkeypatch.setattr(main.bot, "send_message", fake_bot_send_message)
+    monkeypatch.setattr(main, "add_comment_log", fake_add_comment_log)
+    monkeypatch.setattr(main, "generate_comment", fake_generate_comment)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(main.random, "randint", lambda a, b: 1)
+    monkeypatch.setattr(main.random, "uniform", lambda a, b: (a + b) / 2)
+    monkeypatch.setattr(main, "is_quiet_period", fake_is_quiet_period)
+
+    try:
+        result = await main._handle_linked_channel_message(
+            client,
+            message,
+            userid=userid,
+            session=session,
+            account_id=account_id,
+            chance=100,
+            xsleep=1,
+            ysleep=2,
+            system_promt="prompt",
+            reaction_emojis=[],
+            reaction_chance=0,
+            reaction_discussion_chance=None,
+            discussion_reply_prompt=None,
+            discussion_reply_chance=None,
+            reaction_sleep_min=0,
+            reaction_sleep_max=0,
+            reaction_limit_per_message=None,
+            reactions_enabled=False,
+            last_reaction_at=None,
+        )
+    finally:
+        main.active_sessions.clear()
+        main.active_sessions.update(original_active_sessions)
+        main.quiet_sessions_notified.clear()
+        main.quiet_sessions_notified.update(original_quiet)
+
+    assert result is None
+    assert client.sent_messages == []
+    assert generate_called is False
+    assert quiet_checks.count(True) >= 1
+    assert len(notifications) == 1
     assert comment_logs == []
 
 

@@ -440,6 +440,28 @@ async def _handle_linked_channel_message(
                 return current_last_reaction_at
 
             await asyncio.sleep(random.uniform(xsleep, ysleep))
+
+            if not active_sessions.get(key, False):
+                reason = 'session stopped during delay'
+                enqueue_skip_log(session, "comment", reason)
+                await add_comment_log(
+                    account_id,
+                    channel=str(getattr(getattr(message, "chat", None), "id", "")),
+                    message_id=getattr(message, "id", None),
+                    status='comment_skipped',
+                    error=reason,
+                )
+                return current_last_reaction_at
+
+            if is_quiet_period():
+                if key not in quiet_sessions_notified:
+                    await bot.send_message(
+                        log_channel,
+                        f'Аккаунт {session} приостановлен до {QUIET_END_MSK_STR} МСК (циркадный режим)'
+                    )
+                    quiet_sessions_notified.add(key)
+                return current_last_reaction_at
+
             comment = generate_comment(post_text, comment_prompt)
             msg = await client.send_message(message.chat.id, comment, reply_to_message_id=message.id)
 
