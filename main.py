@@ -303,54 +303,63 @@ async def _handle_linked_channel_message(
         return current_last_reaction_at
 
     try:
+        comment_sent = False
+        post_base_link: Optional[str] = None
+
         roll = random.randint(1, 100)
         if roll > comment_chance:
-            await bot.send_message(log_channel, f'Аккаунт {session} пропустил комментарий (rnd {roll} > {comment_chance})')
+            await bot.send_message(
+                log_channel,
+                f'Аккаунт {session} пропустил комментарий (rnd {roll} > {comment_chance})'
+            )
             await add_comment_log(
                 account_id,
                 channel=str(getattr(getattr(message, "chat", None), "id", "")),
                 message_id=getattr(message, "id", None),
-                status='skipped',
+                status='comment_skipped',
                 error=f'random {roll} > chance {comment_chance}',
             )
-            return current_last_reaction_at
+        else:
+            if is_quiet_period():
+                if key not in quiet_sessions_notified:
+                    await bot.send_message(
+                        log_channel,
+                        f'Аккаунт {session} приостановлен до {QUIET_END_MSK_STR} МСК (циркадный режим)'
+                    )
+                    quiet_sessions_notified.add(key)
+                return current_last_reaction_at
 
-        if is_quiet_period():
-            if key not in quiet_sessions_notified:
-                await bot.send_message(
-                    log_channel,
-                    f'Аккаунт {session} приостановлен до {QUIET_END_MSK_STR} МСК (циркадный режим)'
-                )
-                quiet_sessions_notified.add(key)
-            return current_last_reaction_at
+            await asyncio.sleep(random.uniform(xsleep, ysleep))
+            comment = generate_comment(post_text, comment_prompt)
+            msg = await client.send_message(message.chat.id, comment, reply_to_message_id=message.id)
 
-        await asyncio.sleep(random.uniform(xsleep, ysleep))
-        comment = generate_comment(post_text, comment_prompt)
-        msg = await client.send_message(message.chat.id, comment, reply_to_message_id=message.id)
-
-        post_base_link = _build_post_link(msg, message)
-        comment_link = f"{post_base_link}?comment={msg.id}"
-        await bot.send_message(
-            log_channel,
-            f'Аккаунт {session} отправил комментарий\n{comment_link}'
-        )
-        # Небольшая пауза перед записью в БД
-        await asyncio.sleep(0.2)
-        await add_comment_log(
-            account_id,
-            channel=str(message.chat.id),
-            message_id=msg.id,
-            status='success',
-        )
+            post_base_link = _build_post_link(msg, message)
+            comment_link = f"{post_base_link}?comment={msg.id}"
+            await bot.send_message(
+                log_channel,
+                f'Аккаунт {session} отправил комментарий\n{comment_link}'
+            )
+            # Небольшая пауза перед записью в БД
+            await asyncio.sleep(0.2)
+            await add_comment_log(
+                account_id,
+                channel=str(message.chat.id),
+                message_id=msg.id,
+                status='success',
+            )
+            comment_sent = True
 
         if (
             reactions_enabled
             and reaction_emojis
             and (selected_reaction_chance or 0) > 0
         ):
+            if post_base_link is None:
+                post_base_link = _build_post_link(message, message)
             channel_for_reactions = str(getattr(getattr(message, "chat", None), "id", ""))
             message_id = getattr(message, "id", None)
             limit = reaction_limit_per_message
+            status_suffix = '' if comment_sent else '_no_comment'
 
             if limit is not None:
                 if limit <= 0:
@@ -359,7 +368,7 @@ async def _handle_linked_channel_message(
                         account_id,
                         channel=channel_for_reactions,
                         message_id=message_id,
-                        status='reaction_skipped',
+                        status=f'reaction_skipped{status_suffix}',
                         error=f'reaction limit {limit} reached',
                     )
                     return current_last_reaction_at
@@ -371,7 +380,7 @@ async def _handle_linked_channel_message(
                             account_id,
                             channel=channel_for_reactions,
                             message_id=message_id,
-                            status='reaction_skipped',
+                            status=f'reaction_skipped{status_suffix}',
                             error=f'reaction limit {reaction_count}/{limit}',
                         )
                         return current_last_reaction_at
@@ -393,7 +402,7 @@ async def _handle_linked_channel_message(
                                 account_id,
                                 channel=str(message.chat.id),
                                 message_id=message.id,
-                                status='reaction_skipped',
+                                status=f'reaction_skipped{status_suffix}',
                                 error=(
                                     'reaction cooldown '
                                     f"{int((now - previous).total_seconds())}/{cooldown_seconds}s"
@@ -413,7 +422,7 @@ async def _handle_linked_channel_message(
                         account_id,
                         channel=str(message.chat.id),
                         message_id=message.id,
-                        status='reaction_success',
+                        status=f'reaction_success{status_suffix}',
                     )
                 except Exception as reaction_error:
                     await bot.send_message(
@@ -425,7 +434,7 @@ async def _handle_linked_channel_message(
                         account_id,
                         channel=str(message.chat.id),
                         message_id=message.id,
-                        status='reaction_error',
+                        status=f'reaction_error{status_suffix}',
                         error=str(reaction_error),
                     )
             else:
@@ -434,7 +443,7 @@ async def _handle_linked_channel_message(
                     account_id,
                     channel=str(message.chat.id),
                     message_id=message.id,
-                    status='reaction_skipped',
+                    status=f'reaction_skipped{status_suffix}',
                     error=f'reaction random {reaction_roll} > chance {selected_reaction_chance}',
                 )
 
