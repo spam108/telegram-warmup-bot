@@ -2067,6 +2067,96 @@ async def add_reaction_sleeps(message: Message, state: FSMContext) -> None:
 
 
 @dp.message(reactionsettings.emojis)
+def _extract_available_reaction_emojis(available: Any) -> Set[str]:
+    result: Set[str] = set()
+    if not available:
+        return result
+
+    for item in available:
+        if item is None:
+            continue
+
+        emoji_value = getattr(item, "emoji", None)
+        if emoji_value:
+            result.add(emoji_value)
+            continue
+
+        nested = getattr(item, "reaction", None)
+        emoji_value = getattr(nested, "emoji", None)
+        if emoji_value:
+            result.add(emoji_value)
+
+    return result
+
+
+async def _get_available_quick_reaction_emojis(
+    user_id: int,
+    session: Optional[str],
+    chat_id: Optional[int] = None,
+) -> Optional[Set[str]]:
+    if not session:
+        return None
+
+    key = make_session_key(user_id, session)
+    existing_client = active_pyrogram_clients.get(key)
+
+    async def _query(client_obj: Client) -> Optional[Set[str]]:
+        try:
+            if chat_id is not None:
+                try:
+                    available = await client_obj.get_available_reactions(chat_id)
+                except TypeError:
+                    available = await client_obj.get_available_reactions()
+            else:
+                available = await client_obj.get_available_reactions()
+        except Exception:
+            logging.exception(
+                "Failed to request available reactions for session %s", session
+            )
+            return None
+
+        return _extract_available_reaction_emojis(available)
+
+    if existing_client and getattr(existing_client, "is_connected", False):
+        return await _query(existing_client)
+
+    session_dir = os.path.join("sessions", str(user_id))
+    session_name = os.path.join(session_dir, session)
+    session_file = f"{session_name}.session"
+
+    if not os.path.exists(session_file):
+        alt_session_file = f"{session_file}.session"
+        if os.path.exists(alt_session_file):
+            try:
+                shutil.copy2(alt_session_file, session_file)
+            except Exception:
+                logging.exception(
+                    "Не удалось подготовить файл сессии для получения доступных реакций: %s",
+                    alt_session_file,
+                )
+                return None
+        else:
+            logging.warning(
+                "Session file %s not found while fetching available reactions", session_file
+            )
+            return None
+
+    client = Client(
+        name=session_name,
+        api_id=API_ID,
+        api_hash=API_HASH,
+    )
+
+    try:
+        async with client:
+            return await _query(client)
+    except Exception:
+        logging.exception(
+            "Failed to fetch available reactions for session %s", session
+        )
+        return None
+
+
 async def add_reaction_emojis(message: Message, state: FSMContext) -> None:
     data, _, account = await _load_account_data(state)
 
@@ -2098,7 +2188,44 @@ async def add_reaction_emojis(message: Message, state: FSMContext) -> None:
             await _prompt_reaction_emojis(message, state)
             return
 
-        emoji_list = unique_emojis
+        session_name = data.get("account")
+        chat_id = data.get("reaction_channel_id")
+        available_emojis = await _get_available_quick_reaction_emojis(
+            message.from_user.id,
+            str(session_name) if isinstance(session_name, str) else None,
+            int(chat_id) if isinstance(chat_id, int) else None,
+        )
+
+        if available_emojis is not None:
+            filtered = [emoji for emoji in unique_emojis if emoji in available_emojis]
+            invalid = [emoji for emoji in unique_emojis if emoji not in available_emojis]
+
+            available_text = " ".join(sorted(available_emojis)) if available_emojis else "нет доступных реакций"
+
+            if not filtered:
+                await bot.send_message(
+                    message.from_user.id,
+                    (
+                        "Ни один из указанных эмодзи недоступен для быстрых реакций.\n"
+                        f"Доступные реакции: {available_text}."
+                    ),
+                )
+                await _prompt_reaction_emojis(message, state)
+                return
+
+            if invalid:
+                invalid_text = " ".join(invalid)
+                await bot.send_message(
+                    message.from_user.id,
+                    (
+                        "Следующие эмодзи недоступны и будут пропущены: "
+                        f"{invalid_text}.\nДоступные реакции: {available_text}."
+                    ),
+                )
+
+            emoji_list = filtered
+        else:
+            emoji_list = unique_emojis
 
     await state.update_data({"reaction_emojis": emoji_list, "apply_reactions_to_all": False})
 

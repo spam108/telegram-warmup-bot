@@ -362,3 +362,55 @@ async def test_discussion_settings_dash_keeps_previous(monkeypatch):
 
     await main.add_discussion_reply_prompt(DummyMessage("off", user_id), state)
     assert state._data["discussion_reply_prompt"] is None
+
+
+@pytest.mark.anyio("asyncio")
+async def test_reaction_emojis_rejects_unsupported(monkeypatch):
+    user_id = 77
+    state_data = {"account": "79991110000", "account_id": 900}
+    state = DummyState(state_data)
+    account_info = {"reaction_emojis": None}
+
+    sent_messages: list[tuple[int, str]] = []
+    reprompt_called = False
+    save_calls = 0
+
+    async def fake_load_account_data(dummy_state):  # noqa: ANN001
+        return state_data, state_data["account_id"], account_info
+
+    async def fake_send_message(chat_id: int, text: str, **kwargs):  # noqa: ANN001
+        sent_messages.append((chat_id, text))
+        return types.SimpleNamespace(message_id=1)
+
+    async def fake_prompt_reaction_emojis(message, dummy_state):  # noqa: ANN001
+        nonlocal reprompt_called
+        reprompt_called = True
+
+    async def fake_save_reaction_settings(message, dummy_state, *, finalize=True, notify=True):  # noqa: ANN001,ARG001
+        nonlocal save_calls
+        save_calls += 1
+
+    async def fake_get_available(user: int, session: str | None, chat_id: int | None = None):  # noqa: ANN001
+        assert user == user_id
+        assert session == state_data["account"]
+        assert chat_id is None
+        return {"🔥", "👍"}
+
+    monkeypatch.setattr(main, "_load_account_data", fake_load_account_data)
+    monkeypatch.setattr(main.bot, "send_message", fake_send_message)
+    monkeypatch.setattr(main, "_prompt_reaction_emojis", fake_prompt_reaction_emojis)
+    monkeypatch.setattr(main, "_save_reaction_settings", fake_save_reaction_settings)
+    monkeypatch.setattr(main, "_get_available_quick_reaction_emojis", fake_get_available)
+
+    await main.add_reaction_emojis(DummyMessage("😀 😎", user_id), state)
+
+    assert save_calls == 0, "Настройки не должны сохраняться при полностью неподдерживаемом вводе"
+    assert reprompt_called is True, "Пользователь должен получить повторный запрос"
+    assert "reaction_emojis" not in state._data, "Ввод не должен попадать в состояние"
+    assert any(
+        "Ни один из указанных эмодзи недоступен" in text for _, text in sent_messages
+    )
+    assert any(
+        "Доступные реакции:" in text and "🔥" in text and "👍" in text
+        for _, text in sent_messages
+    )
