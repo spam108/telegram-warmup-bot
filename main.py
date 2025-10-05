@@ -46,6 +46,7 @@ from db import (
     set_user_authenticated,
     sync_warmup_channels,
     update_account_settings,
+    update_last_reaction_at,
     update_warmup_settings,
     _require_pool,
 )
@@ -109,6 +110,7 @@ WARMUP_VERBOSE_LOGS = _get_bool_env("WARMUP_VERBOSE_LOGS", default=False)
 WARMUP_VERBOSE_NOTIFICATIONS = _get_bool_env("WARMUP_VERBOSE_NOTIFICATIONS", default=False)
 
 DEFAULT_REACTION_LIMIT_PER_MESSAGE = _get_int_env("REACTION_LIMIT_PER_MESSAGE")
+REACTION_MIN_INTERVAL_SECONDS = _get_int_env("REACTION_MIN_INTERVAL_SECONDS") or 0
 
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN)
@@ -235,15 +237,18 @@ async def _handle_linked_channel_message(
     reaction_sleep_min: int,
     reaction_sleep_max: int,
     reaction_limit_per_message: Optional[int],
-) -> None:
+    last_reaction_at: Optional[datetime] = None,
+) -> Optional[datetime]:
     key = make_session_key(userid, session)
     if not active_sessions.get(key, False):
-        return
+        return last_reaction_at
+
+    current_last_reaction_at = last_reaction_at
 
     is_discussion_message = _is_discussion_reply_message(message)
     if is_discussion_message and _is_self_generated_message(message):
         logging.debug("Обнаружен собственный комментарий в обсуждении для %s", session)
-        return
+        return current_last_reaction_at
 
     post_text = _extract_post_text(message)
     if post_text is None:
@@ -254,7 +259,7 @@ async def _handle_linked_channel_message(
             status='no_comments',
             error='no text or caption',
         )
-        return
+        return current_last_reaction_at
 
     can_send, reason = _chat_allows_sending_message(message)
     if not can_send:
@@ -265,7 +270,7 @@ async def _handle_linked_channel_message(
             status='no_comments',
             error=reason or 'comments disabled',
         )
-        return
+        return current_last_reaction_at
 
     try:
         roll = random.randint(1, 100)
@@ -278,7 +283,7 @@ async def _handle_linked_channel_message(
                 status='skipped',
                 error=f'random {roll} > chance {chance}',
             )
-            return
+            return current_last_reaction_at
 
         if is_quiet_period():
             if key not in quiet_sessions_notified:
@@ -287,7 +292,7 @@ async def _handle_linked_channel_message(
                     f'Аккаунт {session} приостановлен до {QUIET_END_MSK_STR} МСК (циркадный режим)'
                 )
                 quiet_sessions_notified.add(key)
-            return
+            return current_last_reaction_at
 
         await asyncio.sleep(random.uniform(xsleep, ysleep))
         comment = generate_comment(post_text, system_promt)
@@ -323,7 +328,7 @@ async def _handle_linked_channel_message(
                         status='reaction_skipped',
                         error=f'reaction limit {limit} reached',
                     )
-                    return
+                    return current_last_reaction_at
                 if channel_for_reactions and message_id is not None:
                     reaction_count = await count_reactions_for_message(channel_for_reactions, message_id)
                     if reaction_count >= limit:
@@ -335,18 +340,40 @@ async def _handle_linked_channel_message(
                             status='reaction_skipped',
                             error=f'reaction limit {reaction_count}/{limit}',
                         )
-                        return
+                        return current_last_reaction_at
 
             reaction_roll = random.randint(1, 100)
             if reaction_roll <= reaction_chance:
                 await asyncio.sleep(random.uniform(reaction_sleep_min, reaction_sleep_max))
                 reaction_emoji = random.choice(reaction_emojis)
                 try:
+                    now = datetime.now(timezone.utc)
+                    previous = current_last_reaction_at
+                    if previous is not None and previous.tzinfo is None:
+                        previous = previous.replace(tzinfo=timezone.utc)
+                    cooldown_seconds = REACTION_MIN_INTERVAL_SECONDS
+                    if previous is not None and cooldown_seconds:
+                        if now - previous < timedelta(seconds=cooldown_seconds):
+                            await asyncio.sleep(0.2)
+                            await add_comment_log(
+                                account_id,
+                                channel=str(message.chat.id),
+                                message_id=message.id,
+                                status='reaction_skipped',
+                                error=(
+                                    'reaction cooldown '
+                                    f"{int((now - previous).total_seconds())}/{cooldown_seconds}s"
+                                ),
+                            )
+                            return current_last_reaction_at
+
                     await client.send_reaction(message.chat.id, message.id, reaction_emoji)
                     await bot.send_message(
                         log_channel,
                         f'Аккаунт {session} поставил реакцию {reaction_emoji}\n{post_base_link}'
                     )
+                    await update_last_reaction_at(account_id, now)
+                    current_last_reaction_at = now
                     await asyncio.sleep(0.2)
                     await add_comment_log(
                         account_id,
@@ -398,6 +425,8 @@ async def _handle_linked_channel_message(
             status='error',
             error=str(e),
         )
+
+    return current_last_reaction_at
 
 
 class TransientJoinError(Exception):
@@ -2152,6 +2181,17 @@ async def send_comments(userid, session, account_id):
         if reaction_sleep_min > reaction_sleep_max:
             reaction_sleep_min, reaction_sleep_max = reaction_sleep_max, reaction_sleep_min
 
+        last_reaction_at_str = account.get("last_reaction_at")
+        last_reaction_at_dt: Optional[datetime] = None
+        if last_reaction_at_str:
+            try:
+                parsed = datetime.fromisoformat(last_reaction_at_str)
+            except ValueError:
+                parsed = None
+            if parsed is not None and parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            last_reaction_at_dt = parsed
+
         @app.on_message(filters.channel)
         async def channel_handler(client: Client, message: Message):
             key = make_session_key(userid, session)
@@ -2172,7 +2212,8 @@ async def send_comments(userid, session, account_id):
 
         @app.on_message(filters.linked_channel | discussion_filter)
         async def linked_channel_handler(client: Client, message: Message):
-            await _handle_linked_channel_message(
+            nonlocal last_reaction_at_dt
+            last_reaction_at_dt = await _handle_linked_channel_message(
                 client,
                 message,
                 userid=userid,
@@ -2187,6 +2228,7 @@ async def send_comments(userid, session, account_id):
                 reaction_sleep_min=reaction_sleep_min,
                 reaction_sleep_max=reaction_sleep_max,
                 reaction_limit_per_message=reaction_limit_per_message,
+                last_reaction_at=last_reaction_at_dt,
             )
         try:
             await app.start()
