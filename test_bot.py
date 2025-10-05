@@ -65,6 +65,13 @@ async def test_get_global_statistics_and_report(tmp_path, monkeypatch):
     await db_module.add_comment_log(account2["id"], channel="chat", message_id=6, status="reaction_error")
     await db_module.add_comment_log(account3["id"], channel="chat", message_id=7, status="reaction_skipped")
 
+    conn = await db_module._require_conn()
+    await conn.execute(
+        "UPDATE comment_logs SET created_at = datetime('now', '-2 day') WHERE message_id = ?",
+        (7,),
+    )
+    await conn.commit()
+
     await db_module.sync_warmup_channels(account1["id"], ["@one", "@two"])
     await db_module.mark_warmup_channel_joined(account1["id"], "@one")
     await db_module.record_warmup_channel_error(account1["id"], "@two", "denied")
@@ -79,15 +86,16 @@ async def test_get_global_statistics_and_report(tmp_path, monkeypatch):
     assert stats["accounts"]["running_by_mode"].get("warmup") == 1
     assert stats["accounts"]["running_by_mode"].get("standard") == 1
 
-    assert stats["comments"]["total"] == 7
+    assert stats["comments"]["total"] == 6
     assert stats["comments"]["by_status"].get("success") == 1
     assert stats["comments"]["by_status"].get("error") == 1
     assert stats["comments"]["by_status"].get("skipped") == 1
     assert stats["comments"]["by_status"].get("no_comments") == 1
-    assert stats["comments"]["reactions_total"] == 3
+    assert stats["comments"]["by_status"].get("reaction_skipped") is None
+    assert stats["comments"]["reactions_total"] == 2
     assert stats["comments"]["reactions"].get("success") == 1
     assert stats["comments"]["reactions"].get("error") == 1
-    assert stats["comments"]["reactions"].get("skipped") == 1
+    assert stats["comments"]["reactions"].get("skipped") is None
 
     assert stats["warmup"]["by_status"].get("joined") == 1
     assert stats["warmup"]["by_status"].get("error") == 1
@@ -108,7 +116,7 @@ async def test_get_global_statistics_and_report(tmp_path, monkeypatch):
     assert "Прогрев" in report
     assert "Попыток вступления: 1" in report
     assert "😊 *Реакции*" in report
-    assert "😊 *Реакции*\n• Всего: 3" in report
+    assert "😊 *Реакции*\n• Всего: 2" in report
 
     await db_module.close_db()
 

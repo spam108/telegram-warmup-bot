@@ -971,7 +971,12 @@ async def get_global_statistics() -> Dict[str, Any]:
     )
 
     comment_counts = await _fetch_counts(
-        "SELECT status, COUNT(*) FROM comment_logs GROUP BY status"
+        """
+        SELECT status, COUNT(*)
+        FROM comment_logs
+        WHERE created_at >= datetime('now', '-1 day')
+        GROUP BY status
+        """
     )
     comments_total = sum(comment_counts.values())
 
