@@ -137,12 +137,15 @@ class startaccount(StatesGroup):
     systempromt = State()
     sleeps = State()
     chance = State()
-    reaction_limit = State()
-    reaction_chance = State()
-    reaction_sleeps = State()
-    reaction_emojis = State()
     regular_channels = State()
     warmup_channels = State()
+
+
+class reactionsettings(StatesGroup):
+    limit = State()
+    chance = State()
+    sleeps = State()
+    emojis = State()
 
 
 class warmupsettings(StatesGroup):
@@ -882,11 +885,13 @@ async def main_message(message):
         button_status = types.InlineKeyboardButton(text=status_button_text, callback_data=status_button_callback)
         button_delete = types.InlineKeyboardButton(text="Удалить", callback_data=f"del_{call}")
         button_warmup = types.InlineKeyboardButton(text="Прогрев", callback_data=f"warmup_{call}")
+        button_reactions = types.InlineKeyboardButton(
+            text="🎯 Реакции на посты и ответы", callback_data=f"reaction_{call}"
+        )
 
-        if is_running:
-            builder.row(button_info, button_status, button_warmup)
-        else:
-            builder.row(button_info, button_status, button_warmup)
+        builder.row(button_info, button_status, button_warmup)
+        builder.row(button_reactions)
+        if not is_running:
             builder.row(button_delete)
 
 
@@ -1178,6 +1183,28 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
         return
 
 
+    elif call.startswith('reaction_'):
+        session = str(call).split('_', 1)[1]
+
+        account_row = await get_account_by_session(callback_query.from_user.id, session)
+        if not account_row:
+            await bot.send_message(callback_query.from_user.id, "Аккаунт не найден в базе данных")
+            await main_message(callback_query)
+            return
+
+        await state.clear()
+        await state.update_data(
+            {
+                "account": session,
+                "account_id": account_row["id"],
+                "reaction_limit_set": False,
+                "apply_reactions_to_all": False,
+            }
+        )
+        await callback_query.answer()
+        await _prompt_reaction_limit(callback_query, state)
+        await state.set_state(reactionsettings.limit)
+
     elif 'start_' in call:
 
         session = str(call).split('_')[1]
@@ -1186,7 +1213,7 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
         if active_sessions.get(key):
             await bot.send_message(callback_query.from_user.id, f"Аккаунт {session} уже запущен")
             return
-        
+
 
         if await check_account(callback_query.from_user.id, session):
 
@@ -1197,29 +1224,17 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
                     await main_message(callback_query)
                     return
 
-                # Все аккаунты проходят через диалог настройки
                 account_id = account_row["id"]
+                await state.clear()
                 await state.update_data({"account": session, "account_id": account_id})
-                await state.update_data({"apply_reactions_to_all": False})
 
-                current_chance = account_row.get("chance")
-                if current_chance is None:
-                    chance_hint = "не задан"
-                else:
-                    chance_hint = f"{current_chance}%"
-
-                await bot.send_message(
-                    callback_query.from_user.id,
-                    "Текущий шанс комментирования: {hint}.\n"
-                    "Отправьте новое значение от 0 до 100 или '-' для сохранения текущего.".format(
-                        hint=chance_hint
-                    ),
-                )
-                await state.set_state(startaccount.chance)
+                await callback_query.answer()
+                await _prompt_system_prompt(callback_query, state)
+                await state.set_state(startaccount.systempromt)
             except Exception as e:
                 await bot.send_message(callback_query.from_user.id, f"Ошибка: {str(e)}")
                 await main_message(callback_query)
-        else:   
+        else:
             await main_message(callback_query)
             return
 
@@ -1550,8 +1565,15 @@ async def _prompt_reaction_chance(message: Message, state: FSMContext) -> None:
     if stored_discussion is None:
         stored_discussion = stored
 
-    display = _format_chance(stored)
-    discussion_display = _format_chance(stored_discussion)
+    if stored is None:
+        display = "0% (по умолчанию)"
+    else:
+        display = _format_chance(stored)
+
+    if stored_discussion is None:
+        discussion_display = "0% (по умолчанию)"
+    else:
+        discussion_display = _format_chance(stored_discussion)
     await bot.send_message(
         message.from_user.id,
         (
@@ -1563,7 +1585,7 @@ async def _prompt_reaction_chance(message: Message, state: FSMContext) -> None:
     )
 
 
-@dp.message(startaccount.reaction_limit)
+@dp.message(reactionsettings.limit)
 async def add_reaction_limit(message: Message, state: FSMContext) -> None:
     data, _, account = await _load_account_data(state)
 
@@ -1585,7 +1607,7 @@ async def add_reaction_limit(message: Message, state: FSMContext) -> None:
             }
         )
         await _prompt_reaction_chance(message, state)
-        await state.set_state(startaccount.reaction_chance)
+        await state.set_state(reactionsettings.chance)
         return
 
     lowered = incoming.lower()
@@ -1597,7 +1619,7 @@ async def add_reaction_limit(message: Message, state: FSMContext) -> None:
             }
         )
         await _prompt_reaction_chance(message, state)
-        await state.set_state(startaccount.reaction_chance)
+        await state.set_state(reactionsettings.chance)
         return
 
     try:
@@ -1633,7 +1655,7 @@ async def add_reaction_limit(message: Message, state: FSMContext) -> None:
         }
     )
     await _prompt_reaction_chance(message, state)
-    await state.set_state(startaccount.reaction_chance)
+    await state.set_state(reactionsettings.chance)
 
 
 async def _prompt_reaction_sleeps(message: Message, state: FSMContext) -> None:
@@ -1673,7 +1695,12 @@ async def _prompt_reaction_emojis(message: Message, state: FSMContext) -> None:
     if stored_emojis is None:
         stored_emojis = data.get("reaction_emojis")
 
-    display = " ".join(stored_emojis) if stored_emojis else "не заданы"
+    if stored_emojis:
+        display = " ".join(stored_emojis)
+    elif stored_emojis == []:
+        display = "не заданы"
+    else:
+        display = "не заданы (по умолчанию)"
     builder = InlineKeyboardBuilder()
     builder.button(text="Применить всем аккаунтам", callback_data="reaction_apply_all")
     builder.adjust(1)
@@ -1727,7 +1754,7 @@ async def _prepare_regular_channels_prompt(message: Message, state: FSMContext) 
         await main_message(message)
 
 
-@dp.message(startaccount.reaction_chance)
+@dp.message(reactionsettings.chance)
 async def add_reaction_chance(message: Message, state: FSMContext) -> None:
     data, _, account = await _load_account_data(state)
 
@@ -1748,18 +1775,17 @@ async def add_reaction_chance(message: Message, state: FSMContext) -> None:
     incoming = (message.text or "").strip()
 
     if incoming == "-":
-        if stored_chance is None:
-            await bot.send_message(
-                message.from_user.id,
-                "Текущий шанс реакции не задан. Укажите значение от 0 до 100.",
-            )
-            await _prompt_reaction_chance(message, state)
-            return
+        def _convert_optional(value: Optional[Union[int, str]]) -> Optional[int]:
+            if value is None or value == "":
+                return None
+            converted = int(value)
+            if converted < 0 or converted > 100:
+                raise ValueError
+            return converted
+
         try:
-            reaction_chance_value = int(stored_chance)
-            reaction_discussion_value = int(
-                stored_discussion if stored_discussion is not None else stored_chance
-            )
+            reaction_chance_value = _convert_optional(stored_chance)
+            reaction_discussion_value = _convert_optional(stored_discussion)
         except (TypeError, ValueError):
             await bot.send_message(
                 message.from_user.id,
@@ -1811,10 +1837,10 @@ async def add_reaction_chance(message: Message, state: FSMContext) -> None:
     )
 
     await _prompt_reaction_sleeps(message, state)
-    await state.set_state(startaccount.reaction_sleeps)
+    await state.set_state(reactionsettings.sleeps)
 
 
-@dp.message(startaccount.reaction_sleeps)
+@dp.message(reactionsettings.sleeps)
 async def add_reaction_sleeps(message: Message, state: FSMContext) -> None:
     data, _, account = await _load_account_data(state)
 
@@ -1848,10 +1874,10 @@ async def add_reaction_sleeps(message: Message, state: FSMContext) -> None:
         await state.update_data({"reaction_sleeps": f"{reaction_min}-{reaction_max}"})
 
     await _prompt_reaction_emojis(message, state)
-    await state.set_state(startaccount.reaction_emojis)
+    await state.set_state(reactionsettings.emojis)
 
 
-@dp.message(startaccount.reaction_emojis)
+@dp.message(reactionsettings.emojis)
 async def add_reaction_emojis(message: Message, state: FSMContext) -> None:
     data, _, account = await _load_account_data(state)
 
@@ -1864,7 +1890,7 @@ async def add_reaction_emojis(message: Message, state: FSMContext) -> None:
     incoming = (message.text or "").strip()
 
     if incoming == "-":
-        emoji_list = stored_emojis or []
+        emoji_list = stored_emojis
     else:
         normalized = incoming.replace("\n", " ").replace(",", " ")
         tokens = [token for token in normalized.split(" ") if token]
@@ -1887,7 +1913,60 @@ async def add_reaction_emojis(message: Message, state: FSMContext) -> None:
 
     await state.update_data({"reaction_emojis": emoji_list})
 
-    await _prepare_regular_channels_prompt(message, state)
+    await _save_reaction_settings(message, state)
+
+
+async def _save_reaction_settings(message: Message, state: FSMContext) -> None:
+    data, account_id, _ = await _load_account_data(state)
+    session = data.get("account") if data else None
+
+    if not account_id:
+        await bot.send_message(message.from_user.id, "Ошибка: аккаунт не найден. Попробуйте снова.")
+        await state.clear()
+        await main_message(message)
+        return
+
+    reaction_sleep_min = reaction_sleep_max = None
+    reaction_range_raw = data.get("reaction_sleeps") if data else None
+    if reaction_range_raw:
+        parsed = _parse_sleep_range_input(str(reaction_range_raw))
+        if parsed:
+            reaction_sleep_min, reaction_sleep_max = parsed
+
+    update_kwargs: Dict[str, Any] = {
+        "reaction_chance": data.get("reaction_chance"),
+        "reaction_discussion_chance": data.get("reaction_discussion_chance"),
+        "reaction_sleep_min": reaction_sleep_min,
+        "reaction_sleep_max": reaction_sleep_max,
+        "reaction_emojis": data.get("reaction_emojis"),
+    }
+
+    if data.get("reaction_limit_set"):
+        update_kwargs["reaction_limit_per_message"] = data.get("reaction_limit")
+
+    await update_account_settings(account_id, **update_kwargs)
+
+    if data.get("apply_reactions_to_all"):
+        bulk_kwargs = dict(update_kwargs)
+        await bulk_update_reaction_settings(message.from_user.id, **bulk_kwargs)
+        await bot.send_message(
+            message.from_user.id,
+            "Настройки реакций применены ко всем вашим аккаунтам.",
+        )
+        await bot.send_message(
+            log_channel,
+            f"Аккаунт {session}: настройки реакций применены ко всем аккаунтам пользователя.",
+        )
+
+    await bot.send_message(message.from_user.id, "Настройки реакций сохранены.")
+    if session:
+        await bot.send_message(
+            log_channel,
+            f"Аккаунт {session}: настройки реакций обновлены.",
+        )
+
+    await state.clear()
+    await main_message(message)
 
 
 def _parse_sleep_range_input(text: str) -> Optional[Tuple[int, int]]:
@@ -1954,8 +2033,7 @@ async def add_chance(message: Message, state: FSMContext) -> None:
 
     await state.update_data({"chance": chance_value})
 
-    await _prompt_system_prompt(message, state)
-    await state.set_state(startaccount.systempromt)
+    await _prepare_regular_channels_prompt(message, state)
         
 
 
@@ -2037,8 +2115,8 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
         sleep_min, sleep_max = parsed_range
         await state.update_data({"sleeps": f"{sleep_min}-{sleep_max}"})
 
-    await _prompt_reaction_limit(message, state)
-    await state.set_state(startaccount.reaction_limit)
+    await _prompt_chance(message, state)
+    await state.set_state(startaccount.chance)
 
 
 @dp.message(startaccount.channels)
@@ -2050,14 +2128,6 @@ async def add_channels(message: Message, state: FSMContext) -> None:
     sleeps = state_data.get("sleeps")
     system_promt = state_data.get("systempromt")
     chance = state_data.get("chance")
-    reaction_sleeps = state_data.get("reaction_sleeps")
-    reaction_chance = state_data.get("reaction_chance")
-    reaction_discussion_chance = state_data.get("reaction_discussion_chance")
-    reaction_emojis = state_data.get("reaction_emojis")
-    reaction_limit = state_data.get("reaction_limit")
-    reaction_limit_set = state_data.get("reaction_limit_set")
-    apply_reactions_to_all = state_data.get("apply_reactions_to_all")
-
     print(f"DEBUG: State data - sleeps: {sleeps}, system_promt: {system_promt}, chance: {chance}")
 
     account_id = state_data.get("account_id")
@@ -2110,7 +2180,6 @@ async def add_channels(message: Message, state: FSMContext) -> None:
 
     # Сохраняем все настройки в базу данных
     sleep_min, sleep_max = None, None
-    reaction_sleep_min, reaction_sleep_max = None, None
     if sleeps and '-' in sleeps:
         try:
             sleep_parts = sleeps.split('-')
@@ -2119,72 +2188,26 @@ async def add_channels(message: Message, state: FSMContext) -> None:
                 sleep_max = int(sleep_parts[1])
         except ValueError:
             pass
-
-    if isinstance(reaction_sleeps, str) and '-' in reaction_sleeps:
-        try:
-            reaction_parts = reaction_sleeps.split('-')
-            if len(reaction_parts) == 2:
-                reaction_sleep_min = int(reaction_parts[0])
-                reaction_sleep_max = int(reaction_parts[1])
-        except ValueError:
-            pass
-
     print(
         "DEBUG: About to save settings - "
         f"account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, "
-        f"system_promt={system_promt}, reaction_sleep_min={reaction_sleep_min}, "
-        f"reaction_sleep_max={reaction_sleep_max}, reaction_chance={reaction_chance}, "
-        f"reaction_discussion_chance={reaction_discussion_chance}, "
-        f"reaction_emojis={reaction_emojis}, reaction_limit={reaction_limit}"
+        f"system_promt={system_promt}"
     )
     await bot.send_message(
         log_channel,
         "DEBUG: About to save settings - "
         f"account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, "
-        f"system_promt={system_promt}, reaction_sleep_min={reaction_sleep_min}, "
-        f"reaction_sleep_max={reaction_sleep_max}, reaction_chance={reaction_chance}, "
-        f"reaction_discussion_chance={reaction_discussion_chance}, "
-        f"reaction_emojis={reaction_emojis}, reaction_limit={reaction_limit}"
+        f"system_promt={system_promt}"
     )
 
     update_kwargs: Dict[str, Any] = {
-        "channels": channels,
         "sleep_min": sleep_min,
         "sleep_max": sleep_max,
         "chance": chance,
         "system_prompt": system_promt,
-        "reaction_sleep_min": reaction_sleep_min,
-        "reaction_sleep_max": reaction_sleep_max,
-        "reaction_chance": reaction_chance,
-        "reaction_discussion_chance": reaction_discussion_chance,
-        "reaction_emojis": reaction_emojis,
     }
-    if reaction_limit_set:
-        update_kwargs["reaction_limit_per_message"] = reaction_limit
 
     await update_account_settings(account_id, **update_kwargs)
-
-    if apply_reactions_to_all:
-        bulk_kwargs: Dict[str, Any] = {
-            "reaction_sleep_min": reaction_sleep_min,
-            "reaction_sleep_max": reaction_sleep_max,
-            "reaction_chance": reaction_chance,
-            "reaction_discussion_chance": reaction_discussion_chance,
-            "reaction_emojis": reaction_emojis,
-        }
-        if reaction_limit_set:
-            bulk_kwargs["reaction_limit_per_message"] = reaction_limit
-
-        await bulk_update_reaction_settings(message.from_user.id, **bulk_kwargs)
-        await bot.send_message(
-            message.from_user.id,
-            "Настройки реакций применены ко всем вашим аккаунтам."
-        )
-        await bot.send_message(
-            log_channel,
-            f"Аккаунт {session}: настройки реакций применены ко всем аккаунтам пользователя."
-        )
-        await state.update_data({"apply_reactions_to_all": False})
 
     print(f"DEBUG: Settings saved successfully for account_id={account_id}")
     await bot.send_message(log_channel, f"DEBUG: Settings saved successfully for account_id={account_id}")
@@ -2842,12 +2865,6 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
         "sleep_min": sleep_min,
         "sleep_max": sleep_max,
     }
-    if data is not None:
-        update_kwargs["reaction_chance"] = data.get("reaction_chance")
-        update_kwargs["reaction_discussion_chance"] = data.get("reaction_discussion_chance")
-        update_kwargs["reaction_sleep_min"] = reaction_sleep_min
-        update_kwargs["reaction_sleep_max"] = reaction_sleep_max
-        update_kwargs["reaction_emojis"] = data.get("reaction_emojis")
     if channels_to_update is not None:
         update_kwargs["channels"] = channels_to_update
 
