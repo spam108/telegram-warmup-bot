@@ -93,6 +93,7 @@ def test_sql_generation():
     sleep_max = 25
     channels = ["@test1", "@test2"]
     reaction_chance = 40
+    reaction_discussion_chance = 35
     reaction_sleep_min = 5
     reaction_sleep_max = 12
     reaction_emojis = ["🔥", "👍"]
@@ -116,6 +117,9 @@ def test_sql_generation():
     if reaction_chance is not None:
         updates.append("reaction_chance = $%d" % (len(values) + 1))
         values.append(reaction_chance)
+    if reaction_discussion_chance is not None:
+        updates.append("reaction_discussion_chance = $%d" % (len(values) + 1))
+        values.append(reaction_discussion_chance)
     if reaction_sleep_min is not None:
         updates.append("reaction_sleep_min = $%d" % (len(values) + 1))
         values.append(reaction_sleep_min)

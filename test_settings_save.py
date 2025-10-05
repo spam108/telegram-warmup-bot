@@ -37,6 +37,7 @@ async def test_settings_save(tmp_path, monkeypatch):
         sleep_min=15,
         sleep_max=25,
         reaction_chance=70,
+        reaction_discussion_chance=55,
         reaction_sleep_min=3,
         reaction_sleep_max=6,
         reaction_emojis=["🔥", "👍"],
@@ -48,6 +49,7 @@ async def test_settings_save(tmp_path, monkeypatch):
     assert stored["sleep_min"] == 15
     assert stored["sleep_max"] == 25
     assert stored["reaction_chance"] == 70
+    assert stored["reaction_discussion_chance"] == 55
     assert stored["reaction_sleep_min"] == 3
     assert stored["reaction_sleep_max"] == 6
     assert stored["reaction_emojis"] == ["🔥", "👍"]
