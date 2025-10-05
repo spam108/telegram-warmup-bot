@@ -785,6 +785,8 @@ async def test_reaction_happens_when_comment_skipped(monkeypatch):
     assert result is not None
     assert client.sent_messages == []
     assert client.sent_reactions == [(message.chat.id, message.id, "🔥")]
+    assert any("пропустил комментарий" in log[1] for log in bot_logs)
+    assert any("поставил реакцию" in log[1] for log in bot_logs)
     statuses = [kwargs.get("status") for _, kwargs in comment_logs]
     assert "comment_skipped" in statuses
     assert "reaction_success_no_comment" in statuses
