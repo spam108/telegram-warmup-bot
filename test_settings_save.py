@@ -326,6 +326,73 @@ async def test_reaction_apply_all_notifies_user_from_bot_message(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_reaction_apply_all_returns_main_menu_to_real_user(monkeypatch):
+    user_id = 501
+    bot_id = 1000001
+    state_data = {
+        "account": "79991119911",
+        "account_id": 991,
+        "reaction_limit_set": True,
+        "reaction_limit": 3,
+        "reaction_chance": 65,
+        "reaction_discussion_chance": 15,
+        "discussion_reply_chance": 5,
+        "discussion_reply_prompt": "Ответ",
+        "reaction_sleeps": "2-4",
+        "reaction_emojis": ["🔥"],
+        "apply_reactions_to_all": True,
+    }
+    state = DummyState(state_data)
+    account_info: dict[str, object] = {}
+
+    captured_updates: list[tuple[int, dict[str, object]]] = []
+    captured_bulk: list[tuple[int, dict[str, object]]] = []
+    sent_messages: list[tuple[int, str]] = []
+    captured_main_messages: list[object] = []
+
+    async def fake_load_account_data(dummy_state):  # noqa: ANN001
+        return state_data, state_data["account_id"], account_info
+
+    async def fake_update_account_settings(account_id: int, **kwargs):  # noqa: ANN001
+        captured_updates.append((account_id, kwargs))
+
+    async def fake_bulk_update(user: int, **kwargs):  # noqa: ANN001
+        captured_bulk.append((user, kwargs))
+
+    async def fake_send_message(chat_id: int, text: str, **kwargs):  # noqa: ANN001
+        sent_messages.append((chat_id, text))
+        return types.SimpleNamespace(message_id=1)
+
+    async def fake_main_message(message):  # noqa: ANN001
+        captured_main_messages.append(message)
+
+    monkeypatch.setattr(main, "_load_account_data", fake_load_account_data)
+    monkeypatch.setattr(main, "update_account_settings", fake_update_account_settings)
+    monkeypatch.setattr(main, "bulk_update_reaction_settings", fake_bulk_update)
+    monkeypatch.setattr(main.bot, "send_message", fake_send_message)
+    monkeypatch.setattr(main, "main_message", fake_main_message)
+
+    class DummyCallback:
+        def __init__(self) -> None:
+            self.data = "reaction_apply_all"
+            self.from_user = types.SimpleNamespace(id=user_id)
+            self.message = DummyMessage("", user_id, from_user_id=bot_id, chat_id=user_id)
+
+        async def answer(self, *args, **kwargs):  # noqa: ANN001
+            return None
+
+    await main.callbacks(DummyCallback(), state)
+
+    assert captured_updates and captured_updates[0][0] == state_data["account_id"]
+    assert captured_bulk and captured_bulk[0][0] == user_id
+    assert any(chat_id == user_id for chat_id, _ in sent_messages)
+    assert state.cleared is True
+    assert captured_main_messages, "Главное меню должно быть показано пользователю"
+    returned_message = captured_main_messages[-1]
+    assert getattr(getattr(returned_message, "from_user", None), "id", None) == user_id
+
+
+@pytest.mark.anyio("asyncio")
 async def test_reaction_settings_flow_with_defaults(monkeypatch):
     user_id = 43
     state_data = {"account": "79995550000", "account_id": 321}
