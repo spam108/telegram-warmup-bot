@@ -10,6 +10,7 @@ import aiosqlite
 
 
 _CONN: Optional[aiosqlite.Connection] = None
+_UNSET = object()
 
 
 class DatabaseNotInitialized(RuntimeError):
@@ -194,6 +195,7 @@ async def init_db() -> None:
     await _ensure_column("accounts", "reaction_chance", "INTEGER")
     await _ensure_column("accounts", "reaction_sleep_min", "INTEGER")
     await _ensure_column("accounts", "reaction_sleep_max", "INTEGER")
+    await _ensure_column("accounts", "reaction_limit_per_message", "INTEGER")
 
     await conn.commit()
     _CONN = conn
@@ -451,6 +453,7 @@ async def update_account_settings(
     reaction_sleep_min: Optional[int] = None,
     reaction_sleep_max: Optional[int] = None,
     reaction_emojis: Optional[List[str]] = None,
+    reaction_limit_per_message: Any = _UNSET,
     channels: Optional[List[str]] = None,
 ) -> None:
     print(
@@ -486,6 +489,9 @@ async def update_account_settings(
     if reaction_emojis is not None:
         updates.append("reaction_emojis = ?")
         values.append(_serialize_list(reaction_emojis))
+    if reaction_limit_per_message is not _UNSET:
+        updates.append("reaction_limit_per_message = ?")
+        values.append(reaction_limit_per_message)
     if channels is not None:
         updates.append("channels = ?")
         values.append(_serialize_list(channels))
@@ -515,6 +521,7 @@ async def bulk_update_reaction_settings(
     reaction_sleep_min: Optional[int] = None,
     reaction_sleep_max: Optional[int] = None,
     reaction_emojis: Optional[List[str]] = None,
+    reaction_limit_per_message: Any = _UNSET,
 ) -> None:
     updates: List[str] = []
     values: List[Any] = []
@@ -531,6 +538,9 @@ async def bulk_update_reaction_settings(
     if reaction_emojis is not None:
         updates.append("reaction_emojis = ?")
         values.append(_serialize_list(reaction_emojis))
+    if reaction_limit_per_message is not _UNSET:
+        updates.append("reaction_limit_per_message = ?")
+        values.append(reaction_limit_per_message)
 
     if not updates:
         return
@@ -845,6 +855,22 @@ async def add_comment_log(
         await conn.commit()
 
     await _retry_db_operation(_execute_log)
+
+
+async def count_reactions_for_message(channel: str, message_id: int) -> int:
+    conn = await _require_conn()
+    async with conn.execute(
+        """
+        SELECT COUNT(*) AS reaction_count
+        FROM comment_logs
+        WHERE status = 'reaction_success' AND channel = ? AND message_id = ?
+        """,
+        (channel, message_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if not row:
+        return 0
+    return int(row["reaction_count"] or 0)
 
 
 async def get_global_statistics() -> Dict[str, Any]:
