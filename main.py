@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, time, timezone, timedelta
 from typing import Dict, List, Optional, Set, Any, Union, Tuple
+from types import SimpleNamespace
 import random
 import re
 from pyrogram import Client, filters
@@ -1155,6 +1156,7 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
             state,
             finalize=True,
             notify=False,
+            user_id=callback_query.from_user.id,
         )
         return
 
@@ -2317,16 +2319,24 @@ async def finish_reaction_settings(message: Message, state: FSMContext) -> None:
 
 
 async def _save_reaction_settings(
-    message: Message, state: FSMContext, *, finalize: bool = True, notify: bool = True
+    message: Message,
+    state: FSMContext,
+    *,
+    finalize: bool = True,
+    notify: bool = True,
+    user_id: Optional[int] = None,
 ) -> None:
     data, account_id, _ = await _load_account_data(state)
     session = data.get("account") if data else None
 
     chat = getattr(message, "chat", None)
     chat_id = getattr(chat, "id", None)
-    if chat_id is None:
-        from_user = getattr(message, "from_user", None)
-        chat_id = getattr(from_user, "id", None)
+    from_user = getattr(message, "from_user", None)
+    message_user_id = getattr(from_user, "id", None)
+    target_user_id = user_id if user_id is not None else message_user_id
+
+    if chat_id is None and target_user_id is not None:
+        chat_id = target_user_id
 
     if not account_id:
         if chat_id is not None:
@@ -2366,8 +2376,10 @@ async def _save_reaction_settings(
 
     if data.get("apply_reactions_to_all"):
         bulk_kwargs = dict(update_kwargs)
+        bulk_user_id = target_user_id if target_user_id is not None else chat_id
+        if bulk_user_id is not None:
+            await bulk_update_reaction_settings(bulk_user_id, **bulk_kwargs)
         if chat_id is not None:
-            await bulk_update_reaction_settings(chat_id, **bulk_kwargs)
             await bot.send_message(
                 chat_id,
                 "Настройки реакций применены ко всем вашим аккаунтам.",
@@ -2388,7 +2400,10 @@ async def _save_reaction_settings(
 
     if finalize:
         await state.clear()
-        await main_message(message)
+        if target_user_id is not None:
+            await main_message(SimpleNamespace(from_user=SimpleNamespace(id=target_user_id)))
+        else:
+            await main_message(message)
 
 
 def _parse_sleep_range_input(text: str) -> Optional[Tuple[int, int]]:
