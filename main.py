@@ -20,16 +20,21 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from comment_engine import generate_comment
 from db import (
     add_comment_log,
+    bulk_update_reaction_settings,
+    count_reactions_for_message,
+    db_update_warmup_schedule,
     delete_account,
     ensure_account,
     ensure_user,
+    ensure_warmup_settings,
     get_account_by_id,
     get_account_by_session,
     get_accounts_for_user,
-    get_running_accounts,
     get_global_statistics,
+    get_running_accounts,
     get_warmup_pending,
     get_warmup_settings,
+    increment_warmup_joined,
     init_db,
     is_user_authenticated,
     mark_account_running,
@@ -37,16 +42,12 @@ from db import (
     mark_warmup_channel_joined,
     record_warmup_channel_error,
     reset_warmup_daily_state,
-    ensure_warmup_settings,
-    db_update_warmup_schedule,
     set_account_mode,
     set_user_authenticated,
     sync_warmup_channels,
     update_account_settings,
-    increment_warmup_joined,
     update_warmup_settings,
     _require_pool,
-    bulk_update_reaction_settings,
 )
 from dotenv import load_dotenv
 
@@ -80,6 +81,19 @@ def _get_bool_env(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _get_int_env(name: str) -> Optional[int]:
+    value = env_vars.get(name)
+    if value is None:
+        value = os.getenv(name)
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logging.warning("Invalid integer value for %s: %s", name, value)
+        return None
+
+
 BOT_TOKEN = env_vars.get("BOT_TOKEN") or os.getenv("BOT_TOKEN")
 print(f"BOT_TOKEN loaded: {BOT_TOKEN}")
 #APCDXBOT0310 @AP_comment_bot
@@ -93,6 +107,8 @@ print(f"API_HASH loaded: {API_HASH}")
 
 WARMUP_VERBOSE_LOGS = _get_bool_env("WARMUP_VERBOSE_LOGS", default=False)
 WARMUP_VERBOSE_NOTIFICATIONS = _get_bool_env("WARMUP_VERBOSE_NOTIFICATIONS", default=False)
+
+DEFAULT_REACTION_LIMIT_PER_MESSAGE = _get_int_env("REACTION_LIMIT_PER_MESSAGE")
 
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN)
@@ -118,6 +134,7 @@ class startaccount(StatesGroup):
     systempromt = State()
     sleeps = State()
     chance = State()
+    reaction_limit = State()
     reaction_chance = State()
     reaction_sleeps = State()
     reaction_emojis = State()
@@ -217,6 +234,7 @@ async def _handle_linked_channel_message(
     reaction_chance: int,
     reaction_sleep_min: int,
     reaction_sleep_max: int,
+    reaction_limit_per_message: Optional[int],
 ) -> None:
     key = make_session_key(userid, session)
     if not active_sessions.get(key, False):
@@ -291,6 +309,34 @@ async def _handle_linked_channel_message(
         )
 
         if reaction_emojis and reaction_chance > 0:
+            channel_for_reactions = str(getattr(getattr(message, "chat", None), "id", ""))
+            message_id = getattr(message, "id", None)
+            limit = reaction_limit_per_message
+
+            if limit is not None:
+                if limit <= 0:
+                    await asyncio.sleep(0.2)
+                    await add_comment_log(
+                        account_id,
+                        channel=channel_for_reactions,
+                        message_id=message_id,
+                        status='reaction_skipped',
+                        error=f'reaction limit {limit} reached',
+                    )
+                    return
+                if channel_for_reactions and message_id is not None:
+                    reaction_count = await count_reactions_for_message(channel_for_reactions, message_id)
+                    if reaction_count >= limit:
+                        await asyncio.sleep(0.2)
+                        await add_comment_log(
+                            account_id,
+                            channel=channel_for_reactions,
+                            message_id=message_id,
+                            status='reaction_skipped',
+                            error=f'reaction limit {reaction_count}/{limit}',
+                        )
+                        return
+
             reaction_roll = random.randint(1, 100)
             if reaction_roll <= reaction_chance:
                 await asyncio.sleep(random.uniform(reaction_sleep_min, reaction_sleep_max))
@@ -1368,6 +1414,12 @@ def _format_chance(value: Optional[Union[int, str]]) -> str:
         return str(value)
 
 
+def _format_reaction_limit(value: Optional[Union[int, str]]) -> str:
+    if value is None or value == "":
+        return "не задан"
+    return str(value)
+
+
 async def _prompt_chance(message: Message, state: FSMContext) -> None:
     data, _, account = await _load_account_data(state)
     stored = account.get("chance") if account else None
@@ -1428,6 +1480,29 @@ async def _prompt_sleeps(message: Message, state: FSMContext) -> None:
     )
 
 
+async def _prompt_reaction_limit(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+
+    stored: Optional[Union[int, str]] = None
+    if data.get("reaction_limit_set"):
+        stored = data.get("reaction_limit")
+    elif account:
+        stored = account.get("reaction_limit_per_message")
+        if stored is None:
+            stored = data.get("reaction_limit")
+    else:
+        stored = data.get("reaction_limit")
+
+    display = _format_reaction_limit(stored)
+    await bot.send_message(
+        message.from_user.id,
+        (
+            f"Текущий лимит реакций на пост: {display}.\n"
+            "Отправьте целое число ≥ 0 или '-' для сохранения текущего. Значение 0 отключит реакции, 'none' — снимет лимит."
+        ),
+    )
+
+
 async def _prompt_reaction_chance(message: Message, state: FSMContext) -> None:
     data, _, account = await _load_account_data(state)
     stored = account.get("reaction_chance") if account else None
@@ -1442,6 +1517,79 @@ async def _prompt_reaction_chance(message: Message, state: FSMContext) -> None:
             "Отправьте значение от 0 до 100 или '-' для сохранения текущего."
         ),
     )
+
+
+@dp.message(startaccount.reaction_limit)
+async def add_reaction_limit(message: Message, state: FSMContext) -> None:
+    data, _, account = await _load_account_data(state)
+
+    if data.get("reaction_limit_set"):
+        stored_limit: Optional[Union[int, str]] = data.get("reaction_limit")
+    elif account:
+        stored_limit = account.get("reaction_limit_per_message")
+    else:
+        stored_limit = data.get("reaction_limit")
+
+    incoming_raw = message.text or ""
+    incoming = incoming_raw.strip()
+
+    if incoming == "-":
+        await state.update_data(
+            {
+                "reaction_limit": stored_limit,
+                "reaction_limit_set": False,
+            }
+        )
+        await _prompt_reaction_chance(message, state)
+        await state.set_state(startaccount.reaction_chance)
+        return
+
+    lowered = incoming.lower()
+    if lowered in {"none", "нет", "no", "off"}:
+        await state.update_data(
+            {
+                "reaction_limit": None,
+                "reaction_limit_set": True,
+            }
+        )
+        await _prompt_reaction_chance(message, state)
+        await state.set_state(startaccount.reaction_chance)
+        return
+
+    try:
+        limit_value = int(incoming)
+    except ValueError:
+        current_display = _format_reaction_limit(stored_limit)
+        await bot.send_message(
+            message.from_user.id,
+            (
+                f"Некорректное значение. Текущий лимит: {current_display}.\n"
+                "Отправьте целое число ≥ 0, '-' для сохранения текущего или 'none' для отключения лимита."
+            ),
+        )
+        await _prompt_reaction_limit(message, state)
+        return
+
+    if limit_value < 0:
+        current_display = _format_reaction_limit(stored_limit)
+        await bot.send_message(
+            message.from_user.id,
+            (
+                f"Лимит не может быть отрицательным. Текущий лимит: {current_display}.\n"
+                "Укажите число ≥ 0, '-' для сохранения текущего или 'none' для отключения лимита."
+            ),
+        )
+        await _prompt_reaction_limit(message, state)
+        return
+
+    await state.update_data(
+        {
+            "reaction_limit": limit_value,
+            "reaction_limit_set": True,
+        }
+    )
+    await _prompt_reaction_chance(message, state)
+    await state.set_state(startaccount.reaction_chance)
 
 
 async def _prompt_reaction_sleeps(message: Message, state: FSMContext) -> None:
@@ -1814,8 +1962,8 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
         sleep_min, sleep_max = parsed_range
         await state.update_data({"sleeps": f"{sleep_min}-{sleep_max}"})
 
-    await _prompt_reaction_chance(message, state)
-    await state.set_state(startaccount.reaction_chance)
+    await _prompt_reaction_limit(message, state)
+    await state.set_state(startaccount.reaction_limit)
 
 
 @dp.message(startaccount.channels)
@@ -1830,6 +1978,8 @@ async def add_channels(message: Message, state: FSMContext) -> None:
     reaction_sleeps = state_data.get("reaction_sleeps")
     reaction_chance = state_data.get("reaction_chance")
     reaction_emojis = state_data.get("reaction_emojis")
+    reaction_limit = state_data.get("reaction_limit")
+    reaction_limit_set = state_data.get("reaction_limit_set")
     apply_reactions_to_all = state_data.get("apply_reactions_to_all")
 
     print(f"DEBUG: State data - sleeps: {sleeps}, system_promt: {system_promt}, chance: {chance}")
@@ -1908,7 +2058,7 @@ async def add_channels(message: Message, state: FSMContext) -> None:
         f"account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, "
         f"system_promt={system_promt}, reaction_sleep_min={reaction_sleep_min}, "
         f"reaction_sleep_max={reaction_sleep_max}, reaction_chance={reaction_chance}, "
-        f"reaction_emojis={reaction_emojis}"
+        f"reaction_emojis={reaction_emojis}, reaction_limit={reaction_limit}"
     )
     await bot.send_message(
         log_channel,
@@ -1916,30 +2066,36 @@ async def add_channels(message: Message, state: FSMContext) -> None:
         f"account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, "
         f"system_promt={system_promt}, reaction_sleep_min={reaction_sleep_min}, "
         f"reaction_sleep_max={reaction_sleep_max}, reaction_chance={reaction_chance}, "
-        f"reaction_emojis={reaction_emojis}"
+        f"reaction_emojis={reaction_emojis}, reaction_limit={reaction_limit}"
     )
 
-    await update_account_settings(
-        account_id,
-        channels=channels,
-        sleep_min=sleep_min,
-        sleep_max=sleep_max,
-        chance=chance,
-        system_prompt=system_promt,
-        reaction_sleep_min=reaction_sleep_min,
-        reaction_sleep_max=reaction_sleep_max,
-        reaction_chance=reaction_chance,
-        reaction_emojis=reaction_emojis,
-    )
+    update_kwargs: Dict[str, Any] = {
+        "channels": channels,
+        "sleep_min": sleep_min,
+        "sleep_max": sleep_max,
+        "chance": chance,
+        "system_prompt": system_promt,
+        "reaction_sleep_min": reaction_sleep_min,
+        "reaction_sleep_max": reaction_sleep_max,
+        "reaction_chance": reaction_chance,
+        "reaction_emojis": reaction_emojis,
+    }
+    if reaction_limit_set:
+        update_kwargs["reaction_limit_per_message"] = reaction_limit
+
+    await update_account_settings(account_id, **update_kwargs)
 
     if apply_reactions_to_all:
-        await bulk_update_reaction_settings(
-            message.from_user.id,
-            reaction_sleep_min=reaction_sleep_min,
-            reaction_sleep_max=reaction_sleep_max,
-            reaction_chance=reaction_chance,
-            reaction_emojis=reaction_emojis,
-        )
+        bulk_kwargs: Dict[str, Any] = {
+            "reaction_sleep_min": reaction_sleep_min,
+            "reaction_sleep_max": reaction_sleep_max,
+            "reaction_chance": reaction_chance,
+            "reaction_emojis": reaction_emojis,
+        }
+        if reaction_limit_set:
+            bulk_kwargs["reaction_limit_per_message"] = reaction_limit
+
+        await bulk_update_reaction_settings(message.from_user.id, **bulk_kwargs)
         await bot.send_message(
             message.from_user.id,
             "Настройки реакций применены ко всем вашим аккаунтам."
@@ -1986,6 +2142,9 @@ async def send_comments(userid, session, account_id):
         reaction_chance = account.get("reaction_chance") or 0
         reaction_sleep_min = account.get("reaction_sleep_min")
         reaction_sleep_max = account.get("reaction_sleep_max")
+        reaction_limit_per_message = account.get("reaction_limit_per_message")
+        if reaction_limit_per_message is None:
+            reaction_limit_per_message = DEFAULT_REACTION_LIMIT_PER_MESSAGE
         if reaction_sleep_min is None:
             reaction_sleep_min = sleep_min
         if reaction_sleep_max is None:
@@ -2027,6 +2186,7 @@ async def send_comments(userid, session, account_id):
                 reaction_chance=reaction_chance,
                 reaction_sleep_min=reaction_sleep_min,
                 reaction_sleep_max=reaction_sleep_max,
+                reaction_limit_per_message=reaction_limit_per_message,
             )
         try:
             await app.start()
@@ -3055,6 +3215,8 @@ async def get_account_summary(account_id):
     reaction_chance_display = _format_chance(reaction_chance_value)
     reaction_sleep_min_value = account.get('reaction_sleep_min')
     reaction_sleep_max_value = account.get('reaction_sleep_max')
+    reaction_limit_value = account.get('reaction_limit_per_message')
+    reaction_limit_display = _format_reaction_limit(reaction_limit_value)
     if reaction_sleep_min_value is None or reaction_sleep_max_value is None:
         reaction_delay_display = "не заданы"
     else:
@@ -3064,6 +3226,7 @@ async def get_account_summary(account_id):
     reaction_chance = escape_markdown_text(reaction_chance_display)
     reaction_delay = escape_markdown_text(reaction_delay_display)
     reaction_emojis = escape_markdown_text(reaction_emojis_display)
+    reaction_limit = escape_markdown_text(reaction_limit_display)
     mode = sanitize_field(account.get('mode', 'N/A'))
     status = sanitize_field(account.get('status', 'N/A'))
     warmup_end_at = sanitize_field(account.get('warmup_end_at', 'N/A'))
@@ -3082,6 +3245,7 @@ async def get_account_summary(account_id):
 • Шанс реакции: {reaction_chance}
 • Задержка реакции: {reaction_delay}
 • Эмодзи реакций: {reaction_emojis}
+• Лимит реакций на пост: {reaction_limit}
 • Режим: {mode}
 • Статус: {status}
 
