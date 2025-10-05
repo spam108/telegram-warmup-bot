@@ -15,6 +15,7 @@ class DummyClient:
     def __init__(self):
         self.sent_messages = []
         self.sent_reactions = []
+        self.available_reactions = [types.SimpleNamespace(emoji="🔥")]
 
     async def send_message(self, chat_id, text, reply_to_message_id=None):
         self.sent_messages.append((chat_id, text, reply_to_message_id))
@@ -27,10 +28,24 @@ class DummyClient:
     async def send_reaction(self, chat_id, message_id, emoji):
         self.sent_reactions.append((chat_id, message_id, emoji))
 
+    async def get_available_reactions(self, chat_id=None):
+        return self.available_reactions
+
 
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def clear_reaction_cache():
+    original_cache = dict(main._chat_available_reactions_cache)
+    main._chat_available_reactions_cache.clear()
+    try:
+        yield
+    finally:
+        main._chat_available_reactions_cache.clear()
+        main._chat_available_reactions_cache.update(original_cache)
 
 
 @pytest.mark.anyio
@@ -220,6 +235,112 @@ async def test_discussion_reply_from_user_triggers_comment_and_reaction(monkeypa
     assert "success" in statuses
     assert "reaction_success" in statuses
     assert len(updated_reactions) == 1
+
+
+@pytest.mark.anyio
+async def test_reaction_skipped_when_not_in_allowed_set(monkeypatch):
+    userid = 123
+    session = "+100500"
+    account_id = 42
+
+    original_active_sessions = dict(main.active_sessions)
+    original_quiet = set(main.quiet_sessions_notified)
+
+    main.active_sessions.clear()
+    main.quiet_sessions_notified.clear()
+    key = main.make_session_key(userid, session)
+    main.active_sessions[key] = True
+
+    client = DummyClient()
+    client.available_reactions = [types.SimpleNamespace(emoji="👍")]
+
+    chat = types.SimpleNamespace(id=-2000000000, permissions=None, type="supergroup")
+    from_user = types.SimpleNamespace(is_self=False)
+    message = types.SimpleNamespace(
+        chat=chat,
+        text="Channel post",
+        caption=None,
+        id=111,
+        reply_to_message=None,
+        from_user=from_user,
+    )
+
+    comment_logs = []
+    skip_logs = []
+
+    async def fake_bot_send_message(*args, **kwargs):
+        return None
+
+    async def fake_add_comment_log(*args, **kwargs):
+        comment_logs.append((args, kwargs))
+
+    async def fake_sleep(*args, **kwargs):
+        return None
+
+    async def fake_count_reactions(*args, **kwargs):
+        return 0
+
+    def fake_randint(a, b):
+        return 1
+
+    def fake_uniform(a, b):
+        return 0
+
+    async def fake_update_last_reaction_at(*args, **kwargs):
+        return None
+
+    def fake_enqueue_skip_log(session_name, event_type, message_text):
+        skip_logs.append((session_name, event_type, message_text))
+
+    monkeypatch.setattr(main, "REACTION_MIN_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(main.bot, "send_message", fake_bot_send_message)
+    monkeypatch.setattr(main, "add_comment_log", fake_add_comment_log)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(main, "count_reactions_for_message", fake_count_reactions)
+    monkeypatch.setattr(main.random, "randint", fake_randint)
+    monkeypatch.setattr(main.random, "uniform", fake_uniform)
+    monkeypatch.setattr(main, "is_quiet_period", lambda: False)
+    monkeypatch.setattr(main, "update_last_reaction_at", fake_update_last_reaction_at)
+    monkeypatch.setattr(main, "enqueue_skip_log", fake_enqueue_skip_log)
+
+    try:
+        await main._handle_linked_channel_message(
+            client,
+            message,
+            userid=userid,
+            session=session,
+            account_id=account_id,
+            chance=0,
+            xsleep=0,
+            ysleep=0,
+            system_promt="prompt",
+            reaction_emojis=["🔥"],
+            reaction_chance=100,
+            reaction_discussion_chance=100,
+            discussion_reply_prompt="discussion",
+            discussion_reply_chance=100,
+            reaction_sleep_min=0,
+            reaction_sleep_max=0,
+            reaction_limit_per_message=5,
+            reactions_enabled=True,
+            last_reaction_at=None,
+        )
+    finally:
+        main.active_sessions.clear()
+        main.active_sessions.update(original_active_sessions)
+        main.quiet_sessions_notified.clear()
+        main.quiet_sessions_notified.update(original_quiet)
+
+    assert not client.sent_reactions, "Реакция не должна отправляться при отсутствии доступных эмодзи"
+    assert skip_logs, "Должен быть записан пропуск реакции"
+    assert any("no allowed quick reactions" in entry[2] for entry in skip_logs)
+
+    reaction_statuses = [kwargs.get("status") for _, kwargs in comment_logs]
+    assert any(status and status.startswith("reaction_skipped") for status in reaction_statuses)
+    assert any(
+        "no allowed quick reactions" in kwargs.get("error", "")
+        for _, kwargs in comment_logs
+    )
 
 
 @pytest.mark.anyio
