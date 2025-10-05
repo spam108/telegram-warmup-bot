@@ -85,11 +85,11 @@ def test_add_regular_channels_success_and_failure(monkeypatch):
     assert captured_update["kwargs"]["system_prompt"] == "Test prompt"
     assert captured_update["kwargs"]["sleep_min"] == 5
     assert captured_update["kwargs"]["sleep_max"] == 10
-    assert captured_update["kwargs"]["reaction_chance"] == 60
-    assert captured_update["kwargs"]["reaction_sleep_min"] == 3
-    assert captured_update["kwargs"]["reaction_sleep_max"] == 7
-    assert captured_update["kwargs"]["reaction_emojis"] == ["🔥", "👍"]
-    assert captured_update["kwargs"]["reaction_discussion_chance"] == 40
+    assert "reaction_chance" not in captured_update["kwargs"]
+    assert "reaction_sleep_min" not in captured_update["kwargs"]
+    assert "reaction_sleep_max" not in captured_update["kwargs"]
+    assert "reaction_emojis" not in captured_update["kwargs"]
+    assert "reaction_discussion_chance" not in captured_update["kwargs"]
 
     failure_notifications = [msg for msg in recorded_messages if "Не удалось вступить" in msg[1]]
     assert failure_notifications, "Пользователь должен получать уведомление об ошибке"
