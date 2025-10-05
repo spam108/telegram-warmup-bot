@@ -944,6 +944,20 @@ async def count_reactions_for_message(channel: str, message_id: int) -> int:
     return int(row["reaction_count"] or 0)
 
 
+async def cleanup_comment_logs(retention_days: int = 2) -> int:
+    """Remove comment log entries older than the specified number of days."""
+
+    conn = await _require_conn()
+    cursor = await conn.execute(
+        "DELETE FROM comment_logs WHERE created_at < datetime('now', ?)",
+        (f"-{retention_days} day",),
+    )
+    await conn.commit()
+    deleted = cursor.rowcount if cursor.rowcount is not None else 0
+    await cursor.close()
+    return max(deleted, 0)
+
+
 async def get_global_statistics() -> Dict[str, Any]:
     """Aggregate high-level metrics for accounts, comments and warmup channels."""
 
