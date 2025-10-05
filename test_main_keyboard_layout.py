@@ -58,16 +58,17 @@ async def test_main_menu_keyboard_layout_no_accounts(monkeypatch):
     async def fake_ensure_account(user_id: int, phone: str, session_path: str):  # noqa: ARG001
         return None
 
-    sent: dict[str, object] = {}
+    sent_messages: list[dict[str, object]] = []
 
     async def fake_send_message(chat_id: int, text: str, reply_markup=None, **kwargs):  # noqa: ANN001
-        sent.update({
+        payload = {
             "chat_id": chat_id,
             "text": text,
             "markup": reply_markup,
             "kwargs": kwargs,
-        })
-        return types.SimpleNamespace(message_id=1)
+        }
+        sent_messages.append(payload)
+        return types.SimpleNamespace(message_id=len(sent_messages))
 
     monkeypatch.setattr(main.os.path, "isdir", fake_isdir)
     monkeypatch.setattr(main.os, "makedirs", fake_makedirs)
@@ -80,23 +81,25 @@ async def test_main_menu_keyboard_layout_no_accounts(monkeypatch):
 
     await main.main_message(DummyMessage(user_id))
 
-    markup = sent.get("markup")
-    assert markup is not None, "Ожидается, что главное меню отправляется пользователю"
+    assert len(sent_messages) == 2, "Должны отправляться сообщения с аккаунтами и с клавиатурой действий"
 
-    rows = markup.inline_keyboard
-    assert len(rows) == 2, "Без аккаунтов должно быть две строки действий"
+    account_message, actions_message = sent_messages
 
-    add_row = rows[0]
-    assert [button.callback_data for button in add_row] == ["add_account", "add_warmup"], (
-        "Первый ряд должен содержать кнопки добавления аккаунта и прогрева"
+    account_markup = account_message.get("markup")
+    assert isinstance(account_markup, main.InlineKeyboardMarkup), (
+        "Первое сообщение должно содержать inline-клавиатуру с аккаунтами"
     )
+    assert account_message["text"] == "Ваши аккаунты"
+    assert account_markup.inline_keyboard == [], "Без аккаунтов inline-клавиатура должна быть пустой"
 
-    bottom_row = rows[1]
-    assert [button.callback_data for button in bottom_row] == ["global_stats", "warmup_settings"], (
-        "Нижний ряд должен содержать сервисные кнопки статистики и настроек"
-    )
-    assert bottom_row[0].text == "📊 Общая статистика"
-    assert bottom_row[1].text == "⚙️ Настройки прогрева"
+    actions_markup = actions_message.get("markup")
+    assert actions_message["text"] == "Доступные действия"
+    assert isinstance(actions_markup, main.ReplyKeyboardMarkup), "Ожидается reply-клавиатура действий"
+    keyboard_layout = [[button.text for button in row] for row in actions_markup.keyboard]
+    assert keyboard_layout == [
+        ["Добавить аккаунт", "Добавить прогрев"],
+        ["📊 Общая статистика", "⚙️ Настройки прогрева"],
+    ]
 
 
 @pytest.mark.anyio
@@ -141,18 +144,17 @@ async def test_main_menu_keyboard_layout_with_account_shows_reaction_button(monk
     async def fake_ensure_account(user_id: int, phone: str, session_path: str):  # noqa: ARG001
         return None
 
-    sent: dict[str, object] = {}
+    sent_messages: list[dict[str, object]] = []
 
     async def fake_send_message(chat_id: int, text: str, reply_markup=None, **kwargs):  # noqa: ANN001
-        sent.update(
-            {
-                "chat_id": chat_id,
-                "text": text,
-                "markup": reply_markup,
-                "kwargs": kwargs,
-            }
-        )
-        return types.SimpleNamespace(message_id=1)
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "markup": reply_markup,
+            "kwargs": kwargs,
+        }
+        sent_messages.append(payload)
+        return types.SimpleNamespace(message_id=len(sent_messages))
 
     monkeypatch.setattr(main.os.path, "isdir", fake_isdir)
     monkeypatch.setattr(main.os, "makedirs", fake_makedirs)
@@ -166,8 +168,12 @@ async def test_main_menu_keyboard_layout_with_account_shows_reaction_button(monk
 
     await main.main_message(DummyMessage(user_id))
 
-    markup = sent.get("markup")
-    assert markup is not None, "Главное меню должно содержать клавиатуру"
+    assert len(sent_messages) == 2, "Должны отправляться сообщения с аккаунтами и действиями"
+
+    account_message, actions_message = sent_messages
+
+    markup = account_message.get("markup")
+    assert markup is not None, "Главное меню должно содержать inline-клавиатуру"
 
     reaction_buttons = [
         button
@@ -177,3 +183,7 @@ async def test_main_menu_keyboard_layout_with_account_shows_reaction_button(monk
     ]
     assert reaction_buttons, "Для аккаунта должна появиться кнопка настроек реакций"
     assert reaction_buttons[0].text == "🎯 Реакции на посты и ответы"
+
+    actions_markup = actions_message.get("markup")
+    assert actions_message["text"] == "Доступные действия"
+    assert isinstance(actions_markup, main.ReplyKeyboardMarkup)
