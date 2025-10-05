@@ -188,6 +188,8 @@ SKIP_LOG_EVENT_LABELS = {
     "reaction": "Реакции",
 }
 
+SKIP_SUMMARY_BUTTON_TEXT = "🕒 Сводка пропусков (лог-канал)"
+
 
 COMMENT_LOG_RETENTION_DAYS = 2
 COMMENT_LOG_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
@@ -1205,6 +1207,9 @@ def build_main_actions_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="📊 Общая статистика"),
                 KeyboardButton(text="⚙️ Настройки прогрева"),
             ],
+            [
+                KeyboardButton(text=SKIP_SUMMARY_BUTTON_TEXT),
+            ],
         ],
         resize_keyboard=True,
     )
@@ -1311,6 +1316,22 @@ async def handle_global_stats_button(message: types.Message, state: FSMContext):
         return
 
     await send_global_stats_report(message.from_user.id)
+    await flush_skip_logs()
+    await main_message(message)
+
+
+@dp.message(lambda message: message.text == SKIP_SUMMARY_BUTTON_TEXT)
+async def handle_skip_summary_button(message: types.Message, state: FSMContext):  # noqa: ARG001
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+
+    if not skip_log_counters:
+        await message.answer("Сводка пропусков пуста, в лог-канал ничего не отправлено.")
+    else:
+        await message.answer("Сводка пропусков отправлена в лог-канал.")
+
+    await flush_skip_logs()
     await main_message(message)
 
 
@@ -4228,7 +4249,6 @@ async def main():
                     log_file.flush()
 
             asyncio.create_task(process_warmup_accounts())
-            asyncio.create_task(skip_log_flush_worker())
             asyncio.create_task(comment_log_cleanup_worker())
             log_file.write("Starting bot polling...\n")
             log_file.flush()
@@ -4247,4 +4267,3 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
     # asyncio.run(bot.run())
-
