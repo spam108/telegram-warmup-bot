@@ -29,6 +29,7 @@ from db import (
     delete_account,
     ensure_account,
     ensure_user,
+    cleanup_comment_logs,
     ensure_warmup_settings,
     get_account_by_id,
     get_account_by_session,
@@ -180,6 +181,10 @@ SKIP_LOG_EVENT_LABELS = {
 }
 
 
+COMMENT_LOG_RETENTION_DAYS = 2
+COMMENT_LOG_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
+
+
 CHECK_ACCOUNT_SHUTDOWN_TIMEOUT = 5.0
 CHECK_ACCOUNT_SHUTDOWN_INTERVAL = 0.2
 
@@ -309,6 +314,20 @@ async def skip_log_flush_worker() -> None:
             raise
         except Exception:
             logging.exception("Ошибка фоновой отправки сводки пропусков")
+
+
+async def comment_log_cleanup_worker() -> None:
+    """Periodically remove outdated comment log entries."""
+
+    while True:
+        try:
+            await asyncio.sleep(COMMENT_LOG_CLEANUP_INTERVAL_SECONDS)
+            deleted = await cleanup_comment_logs(COMMENT_LOG_RETENTION_DAYS)
+            logging.info("Удалено устаревших записей comment_logs: %d", deleted)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("Ошибка очистки журнала комментариев")
 
 
 async def _handle_linked_channel_message(
@@ -3967,7 +3986,14 @@ async def main():
             await ensure_latest_warmup_settings(force=True)
             log_file.write("Database initialized successfully\n")
             log_file.flush()
-            
+
+            deleted_logs = await cleanup_comment_logs(COMMENT_LOG_RETENTION_DAYS)
+            logging.info("Удалено устаревших записей comment_logs при запуске: %d", deleted_logs)
+            log_file.write(
+                f"Removed {deleted_logs} outdated comment log entries at startup\\n"
+            )
+            log_file.flush()
+
             await bot.delete_webhook(drop_pending_updates=True)
             log_file.write("Webhook deleted\n")
             log_file.flush()
@@ -4003,9 +4029,10 @@ async def main():
                     await mark_account_stopped(account["id"])
                     log_file.write(f"Stopped account {phone} - no session file\n")
                     log_file.flush()
-            
+
             asyncio.create_task(process_warmup_accounts())
             asyncio.create_task(skip_log_flush_worker())
+            asyncio.create_task(comment_log_cleanup_worker())
             log_file.write("Starting bot polling...\n")
             log_file.flush()
 
