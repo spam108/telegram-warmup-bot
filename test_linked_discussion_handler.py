@@ -754,6 +754,9 @@ async def test_reaction_happens_when_comment_skipped(monkeypatch):
     monkeypatch.setattr(main, "is_quiet_period", lambda: False)
     monkeypatch.setattr(main, "update_last_reaction_at", fake_update_last_reaction_at)
 
+    main.skip_log_counters.clear()
+    main.skip_log_last_reasons.clear()
+
     try:
         result = await main._handle_linked_channel_message(
             client,
@@ -776,16 +779,21 @@ async def test_reaction_happens_when_comment_skipped(monkeypatch):
             reactions_enabled=True,
             last_reaction_at=None,
         )
+        comment_counter = main.skip_log_counters.get(session)
+        assert comment_counter is not None
+        assert comment_counter["comment"] == 1
+        assert "проверяем реакцию" in main.skip_log_last_reasons[session]["comment"]
     finally:
         main.active_sessions.clear()
         main.active_sessions.update(original_active_sessions)
         main.quiet_sessions_notified.clear()
         main.quiet_sessions_notified.update(original_quiet)
+        main.skip_log_counters.clear()
+        main.skip_log_last_reasons.clear()
 
     assert result is not None
     assert client.sent_messages == []
     assert client.sent_reactions == [(message.chat.id, message.id, "🔥")]
-    assert any("пропустил комментарий" in log[1] for log in bot_logs)
     assert any("поставил реакцию" in log[1] for log in bot_logs)
     statuses = [kwargs.get("status") for _, kwargs in comment_logs]
     assert "comment_skipped" in statuses
