@@ -103,7 +103,7 @@ async def test_reaction_settings_flow_saves_values(monkeypatch):
         "reaction_emojis": None,
     }
 
-    captured_update: dict[str, object] = {}
+    captured_updates: list[tuple[int, dict[str, object]]] = []
     captured_bulk: list[tuple[int, dict[str, object]]] = []
     sent_messages: list[tuple[int, str]] = []
     main_message_called = False
@@ -112,8 +112,7 @@ async def test_reaction_settings_flow_saves_values(monkeypatch):
         return state_data, state_data["account_id"], account_info
 
     async def fake_update_account_settings(account_id: int, **kwargs):  # noqa: ANN001
-        captured_update["account_id"] = account_id
-        captured_update["kwargs"] = kwargs
+        captured_updates.append((account_id, kwargs))
 
     async def fake_bulk_update(user: int, **kwargs):  # noqa: ANN001
         captured_bulk.append((user, kwargs))
@@ -152,9 +151,11 @@ async def test_reaction_settings_flow_saves_values(monkeypatch):
 
     await main.add_reaction_emojis(DummyMessage("🔥 👍", user_id), state)
 
-    assert captured_update, "update_account_settings должна вызываться"
-    assert captured_update["account_id"] == 123
-    kwargs = captured_update["kwargs"]
+    assert state.set_states[-1] == main.reactionsettings.apply_all
+
+    assert captured_updates, "update_account_settings должна вызываться"
+    account_id, kwargs = captured_updates[-1]
+    assert account_id == 123
     assert kwargs["reaction_limit_per_message"] == 10
     assert kwargs["reaction_chance"] == 70
     assert kwargs["reaction_discussion_chance"] == 50
@@ -164,9 +165,93 @@ async def test_reaction_settings_flow_saves_values(monkeypatch):
     assert kwargs["reaction_sleep_max"] == 4
     assert kwargs["reaction_emojis"] == ["🔥", "👍"]
     assert not captured_bulk, "Применение ко всем аккаунтам не должно вызываться без кнопки"
+    assert state.cleared is False
+    assert main_message_called is False
+    assert sent_messages, "Пользователь должен получить подтверждение сохранения"
+    assert any("Настройки реакций сохранены." in text for _, text in sent_messages)
+    assert any("Нажмите кнопку" in text for _, text in sent_messages)
+
+    await main.finish_reaction_settings(DummyMessage("-", user_id), state)
+
+    assert len(captured_updates) == 1
+
     assert state.cleared is True
     assert main_message_called is True
-    assert sent_messages, "Пользователь должен получить подтверждение сохранения"
+
+
+@pytest.mark.anyio("asyncio")
+async def test_reaction_settings_apply_all_triggers_bulk(monkeypatch):
+    user_id = 55
+    state_data = {"account": "78889990000", "account_id": 222}
+    state = DummyState(state_data)
+    account_info = {
+        "reaction_chance": None,
+        "reaction_discussion_chance": None,
+        "reaction_sleep_min": None,
+        "reaction_sleep_max": None,
+        "reaction_emojis": None,
+    }
+
+    captured_updates: list[tuple[int, dict[str, object]]] = []
+    captured_bulk: list[tuple[int, dict[str, object]]] = []
+    sent_messages: list[tuple[int, str]] = []
+    main_message_called = False
+
+    async def fake_load_account_data(dummy_state):  # noqa: ANN001
+        return state_data, state_data["account_id"], account_info
+
+    async def fake_update_account_settings(account_id: int, **kwargs):  # noqa: ANN001
+        captured_updates.append((account_id, kwargs))
+
+    async def fake_bulk_update(user: int, **kwargs):  # noqa: ANN001
+        captured_bulk.append((user, kwargs))
+
+    async def fake_send_message(chat_id: int, text: str, **kwargs):  # noqa: ANN001
+        sent_messages.append((chat_id, text))
+        return types.SimpleNamespace(message_id=1)
+
+    async def fake_main_message(message):  # noqa: ANN001
+        nonlocal main_message_called
+        main_message_called = True
+
+    monkeypatch.setattr(main, "_load_account_data", fake_load_account_data)
+    monkeypatch.setattr(main, "update_account_settings", fake_update_account_settings)
+    monkeypatch.setattr(main, "bulk_update_reaction_settings", fake_bulk_update)
+    monkeypatch.setattr(main.bot, "send_message", fake_send_message)
+    monkeypatch.setattr(main, "main_message", fake_main_message)
+
+    await main.add_reaction_limit(DummyMessage("5", user_id), state)
+    await main.add_post_reaction_chance(DummyMessage("70", user_id), state)
+    await main.add_discussion_reaction_chance(DummyMessage("30", user_id), state)
+    await main.add_discussion_reply_chance(DummyMessage("60", user_id), state)
+    await main.add_discussion_reply_prompt(DummyMessage("Промт", user_id), state)
+    await main.add_reaction_sleeps(DummyMessage("1-2", user_id), state)
+    await main.add_reaction_emojis(DummyMessage("🔥", user_id), state)
+
+    assert captured_updates, "Настройки должны сохраняться для текущего аккаунта"
+    assert state.set_states[-1] == main.reactionsettings.apply_all
+    assert captured_bulk == []
+
+    class DummyCallback:
+        def __init__(self) -> None:
+            self.data = "reaction_apply_all"
+            self.from_user = types.SimpleNamespace(id=user_id)
+            self.message = DummyMessage("", user_id)
+
+        async def answer(self, *args, **kwargs):  # noqa: ANN001
+            return None
+
+    await main.callbacks(DummyCallback(), state)
+
+    assert len(captured_updates) == 2
+    assert captured_bulk and captured_bulk[-1][0] == user_id
+    bulk_kwargs = captured_bulk[-1][1]
+    assert bulk_kwargs["reaction_emojis"] == ["🔥"]
+    assert bulk_kwargs["reaction_sleep_min"] == 1
+    assert bulk_kwargs["reaction_sleep_max"] == 2
+    assert state.cleared is True
+    assert main_message_called is True
+    assert any("Настройки реакций применены" in text for _, text in sent_messages)
 
 
 @pytest.mark.anyio("asyncio")
@@ -185,14 +270,13 @@ async def test_reaction_settings_flow_with_defaults(monkeypatch):
         "reaction_emojis": ["🔥", "👍"],
     }
 
-    captured_update: dict[str, object] = {}
+    captured_updates: list[tuple[int, dict[str, object]]] = []
 
     async def fake_load_account_data(dummy_state):  # noqa: ANN001
         return state_data, state_data["account_id"], account_info
 
     async def fake_update_account_settings(account_id: int, **kwargs):  # noqa: ANN001
-        captured_update["account_id"] = account_id
-        captured_update["kwargs"] = kwargs
+        captured_updates.append((account_id, kwargs))
 
     async def fake_send_message(chat_id: int, text: str, **kwargs):  # noqa: ANN001
         return types.SimpleNamespace(message_id=1)
@@ -213,9 +297,11 @@ async def test_reaction_settings_flow_with_defaults(monkeypatch):
     await main.add_discussion_reply_prompt(DummyMessage("-", user_id), state)
     await main.add_reaction_sleeps(DummyMessage("-", user_id), state)
     await main.add_reaction_emojis(DummyMessage("-", user_id), state)
+    await main.finish_reaction_settings(DummyMessage("-", user_id), state)
 
-    assert captured_update["account_id"] == 321
-    kwargs = captured_update["kwargs"]
+    assert captured_updates, "update_account_settings должна вызываться"
+    account_id, kwargs = captured_updates[-1]
+    assert account_id == 321
     assert "reaction_limit_per_message" not in kwargs
     assert kwargs["reaction_chance"] == 60
     assert kwargs["reaction_discussion_chance"] == 40

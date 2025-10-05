@@ -149,6 +149,7 @@ class reactionsettings(StatesGroup):
     discussion_prompt = State()
     sleeps = State()
     emojis = State()
+    apply_all = State()
 
 
 class warmupsettings(StatesGroup):
@@ -1072,10 +1073,12 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
 
     if call == "reaction_apply_all":
         await state.update_data({"apply_reactions_to_all": True})
-        await callback_query.answer("Настройки реакций будут применены ко всем аккаунтам")
-        await bot.send_message(
-            callback_query.from_user.id,
-            "После завершения ввода текущие настройки реакций будут сохранены для всех аккаунтов."
+        await callback_query.answer("Применяем настройки ко всем аккаунтам")
+        await _save_reaction_settings(
+            callback_query.message,
+            state,
+            finalize=True,
+            notify=False,
         )
         return
 
@@ -1768,6 +1771,16 @@ async def _prompt_reaction_emojis(message: Message, state: FSMContext) -> None:
         display = "не заданы"
     else:
         display = "не заданы (по умолчанию)"
+    await bot.send_message(
+        message.from_user.id,
+        (
+            f"Текущий набор эмодзи для реакций: {display}.\n"
+            "Отправьте эмодзи через пробел или в столбик. Используйте '-' для сохранения текущего."
+        ),
+    )
+
+
+async def _prompt_reaction_apply_all(message: Message) -> None:
     builder = InlineKeyboardBuilder()
     builder.button(text="Применить всем аккаунтам", callback_data="reaction_apply_all")
     builder.adjust(1)
@@ -1775,8 +1788,9 @@ async def _prompt_reaction_emojis(message: Message, state: FSMContext) -> None:
     await bot.send_message(
         message.from_user.id,
         (
-            f"Текущий набор эмодзи для реакций: {display}.\n"
-            "Отправьте эмодзи через пробел или в столбик. Используйте '-' для сохранения текущего."
+            "Настройки реакций сохранены для выбранного аккаунта.\n"
+            "Нажмите кнопку ниже, чтобы применить их ко всем аккаунтам,"
+            " или отправьте '-' для завершения без применения ко всем."
         ),
         reply_markup=builder.as_markup(),
     )
@@ -2086,12 +2100,22 @@ async def add_reaction_emojis(message: Message, state: FSMContext) -> None:
 
         emoji_list = unique_emojis
 
-    await state.update_data({"reaction_emojis": emoji_list})
+    await state.update_data({"reaction_emojis": emoji_list, "apply_reactions_to_all": False})
 
-    await _save_reaction_settings(message, state)
+    await _save_reaction_settings(message, state, finalize=False)
+    await _prompt_reaction_apply_all(message)
+    await state.set_state(reactionsettings.apply_all)
 
 
-async def _save_reaction_settings(message: Message, state: FSMContext) -> None:
+@dp.message(reactionsettings.apply_all)
+async def finish_reaction_settings(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await main_message(message)
+
+
+async def _save_reaction_settings(
+    message: Message, state: FSMContext, *, finalize: bool = True, notify: bool = True
+) -> None:
     data, account_id, _ = await _load_account_data(state)
     session = data.get("account") if data else None
 
@@ -2142,15 +2166,17 @@ async def _save_reaction_settings(message: Message, state: FSMContext) -> None:
             f"Аккаунт {session}: настройки реакций применены ко всем аккаунтам пользователя.",
         )
 
-    await bot.send_message(message.from_user.id, "Настройки реакций сохранены.")
-    if session:
-        await bot.send_message(
-            log_channel,
-            f"Аккаунт {session}: настройки реакций обновлены.",
-        )
+    if notify:
+        await bot.send_message(message.from_user.id, "Настройки реакций сохранены.")
+        if session:
+            await bot.send_message(
+                log_channel,
+                f"Аккаунт {session}: настройки реакций обновлены.",
+            )
 
-    await state.clear()
-    await main_message(message)
+    if finalize:
+        await state.clear()
+        await main_message(message)
 
 
 def _parse_sleep_range_input(text: str) -> Optional[Tuple[int, int]]:
