@@ -107,6 +107,7 @@ async def init_db() -> None:
             sleep_max INTEGER,
             reaction_emojis TEXT,
             reaction_chance INTEGER,
+            reaction_discussion_chance INTEGER,
             reaction_sleep_min INTEGER,
             reaction_sleep_max INTEGER,
             channels TEXT,
@@ -193,6 +194,7 @@ async def init_db() -> None:
 
     await _ensure_column("accounts", "reaction_emojis", "TEXT")
     await _ensure_column("accounts", "reaction_chance", "INTEGER")
+    await _ensure_column("accounts", "reaction_discussion_chance", "INTEGER")
     await _ensure_column("accounts", "reaction_sleep_min", "INTEGER")
     await _ensure_column("accounts", "reaction_sleep_max", "INTEGER")
     await _ensure_column("accounts", "reaction_limit_per_message", "INTEGER")
@@ -451,6 +453,7 @@ async def update_account_settings(
     sleep_min: Optional[int] = None,
     sleep_max: Optional[int] = None,
     reaction_chance: Optional[int] = None,
+    reaction_discussion_chance: Optional[int] = None,
     reaction_sleep_min: Optional[int] = None,
     reaction_sleep_max: Optional[int] = None,
     reaction_emojis: Optional[List[str]] = None,
@@ -482,6 +485,9 @@ async def update_account_settings(
     if reaction_chance is not None:
         updates.append("reaction_chance = ?")
         values.append(reaction_chance)
+    if reaction_discussion_chance is not None:
+        updates.append("reaction_discussion_chance = ?")
+        values.append(reaction_discussion_chance)
     if reaction_sleep_min is not None:
         updates.append("reaction_sleep_min = ?")
         values.append(reaction_sleep_min)
@@ -526,6 +532,7 @@ async def bulk_update_reaction_settings(
     user_id: int,
     *,
     reaction_chance: Optional[int] = None,
+    reaction_discussion_chance: Optional[int] = None,
     reaction_sleep_min: Optional[int] = None,
     reaction_sleep_max: Optional[int] = None,
     reaction_emojis: Optional[List[str]] = None,
@@ -537,6 +544,9 @@ async def bulk_update_reaction_settings(
     if reaction_chance is not None:
         updates.append("reaction_chance = ?")
         values.append(reaction_chance)
+    if reaction_discussion_chance is not None:
+        updates.append("reaction_discussion_chance = ?")
+        values.append(reaction_discussion_chance)
     if reaction_sleep_min is not None:
         updates.append("reaction_sleep_min = ?")
         values.append(reaction_sleep_min)

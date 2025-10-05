@@ -117,6 +117,7 @@ async def test_discussion_reply_from_user_triggers_comment_and_reaction(monkeypa
             system_promt="prompt",
             reaction_emojis=["🔥"],
             reaction_chance=100,
+            reaction_discussion_chance=100,
             reaction_sleep_min=0,
             reaction_sleep_max=0,
             reaction_limit_per_message=5,
@@ -135,6 +136,134 @@ async def test_discussion_reply_from_user_triggers_comment_and_reaction(monkeypa
     assert "success" in statuses
     assert "reaction_success" in statuses
     assert len(updated_reactions) == 1
+
+
+@pytest.mark.anyio
+async def test_discussion_and_channel_reaction_chances_are_distinct(monkeypatch):
+    userid = 123
+    session = "+100500"
+    account_id = 42
+
+    original_active_sessions = dict(main.active_sessions)
+    original_quiet = set(main.quiet_sessions_notified)
+
+    main.active_sessions.clear()
+    main.quiet_sessions_notified.clear()
+    key = main.make_session_key(userid, session)
+    main.active_sessions[key] = True
+
+    client = DummyClient()
+
+    chat = types.SimpleNamespace(id=-2000000000, permissions=None, type="supergroup")
+    reply_to_message = types.SimpleNamespace(
+        forward_from_chat=types.SimpleNamespace(username="source_channel"),
+        forward_from_message_id=321,
+    )
+    from_user = types.SimpleNamespace(is_self=False)
+
+    discussion_message = types.SimpleNamespace(
+        chat=chat,
+        text="Discussion reply",
+        caption=None,
+        id=111,
+        reply_to_message=reply_to_message,
+        from_user=from_user,
+    )
+
+    channel_message = types.SimpleNamespace(
+        chat=chat,
+        text="Channel post",
+        caption=None,
+        id=222,
+        reply_to_message=None,
+        from_user=from_user,
+    )
+
+    async def fake_bot_send_message(chat_id, text):
+        return None
+
+    async def fake_add_comment_log(*args, **kwargs):
+        return None
+
+    def fake_generate_comment(post_text, system_prompt):
+        return f"comment:{post_text}:{system_prompt}"
+
+    async def fake_sleep(*args, **kwargs):
+        return None
+
+    async def fake_count_reactions(*args, **kwargs):
+        return 0
+
+    def fake_randint(a, b):
+        return 1
+
+    def fake_uniform(a, b):
+        return 0
+
+    updated_reactions: list[tuple[int, datetime]] = []
+
+    async def fake_update_last_reaction_at(account, ts):
+        updated_reactions.append((account, ts))
+
+    monkeypatch.setattr(main, "REACTION_MIN_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(main.bot, "send_message", fake_bot_send_message)
+    monkeypatch.setattr(main, "add_comment_log", fake_add_comment_log)
+    monkeypatch.setattr(main, "generate_comment", fake_generate_comment)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(main, "count_reactions_for_message", fake_count_reactions)
+    monkeypatch.setattr(main.random, "randint", fake_randint)
+    monkeypatch.setattr(main.random, "uniform", fake_uniform)
+    monkeypatch.setattr(main, "is_quiet_period", lambda: False)
+    monkeypatch.setattr(main, "update_last_reaction_at", fake_update_last_reaction_at)
+
+    try:
+        await main._handle_linked_channel_message(
+            client,
+            discussion_message,
+            userid=userid,
+            session=session,
+            account_id=account_id,
+            chance=100,
+            xsleep=0,
+            ysleep=0,
+            system_promt="prompt",
+            reaction_emojis=["🔥"],
+            reaction_chance=100,
+            reaction_discussion_chance=0,
+            reaction_sleep_min=0,
+            reaction_sleep_max=0,
+            reaction_limit_per_message=5,
+            last_reaction_at=None,
+        )
+
+        assert not client.sent_reactions, "Реакции на обсуждение не должны отправляться при нулевом шансе"
+
+        await main._handle_linked_channel_message(
+            client,
+            channel_message,
+            userid=userid,
+            session=session,
+            account_id=account_id,
+            chance=100,
+            xsleep=0,
+            ysleep=0,
+            system_promt="prompt",
+            reaction_emojis=["🔥"],
+            reaction_chance=100,
+            reaction_discussion_chance=0,
+            reaction_sleep_min=0,
+            reaction_sleep_max=0,
+            reaction_limit_per_message=5,
+            last_reaction_at=None,
+        )
+    finally:
+        main.active_sessions.clear()
+        main.active_sessions.update(original_active_sessions)
+        main.quiet_sessions_notified.clear()
+        main.quiet_sessions_notified.update(original_quiet)
+
+    assert client.sent_reactions, "Реакция для поста канала должна быть отправлена"
+    assert len(updated_reactions) >= 1
 
 
 @pytest.mark.anyio
@@ -216,6 +345,7 @@ async def test_reaction_skipped_when_limit_reached(monkeypatch):
             system_promt="prompt",
             reaction_emojis=["🔥"],
             reaction_chance=100,
+            reaction_discussion_chance=100,
             reaction_sleep_min=0,
             reaction_sleep_max=0,
             reaction_limit_per_message=5,
@@ -321,6 +451,7 @@ async def test_reaction_skipped_when_cooldown_active(monkeypatch):
             system_promt="prompt",
             reaction_emojis=["🔥"],
             reaction_chance=100,
+            reaction_discussion_chance=100,
             reaction_sleep_min=0,
             reaction_sleep_max=0,
             reaction_limit_per_message=5,
@@ -431,6 +562,7 @@ async def test_reaction_occurs_after_cooldown(monkeypatch):
             system_promt="prompt",
             reaction_emojis=["🔥"],
             reaction_chance=100,
+            reaction_discussion_chance=100,
             reaction_sleep_min=0,
             reaction_sleep_max=0,
             reaction_limit_per_message=5,
