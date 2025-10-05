@@ -2066,7 +2066,6 @@ async def add_reaction_sleeps(message: Message, state: FSMContext) -> None:
     await state.set_state(reactionsettings.emojis)
 
 
-@dp.message(reactionsettings.emojis)
 def _extract_available_reaction_emojis(available: Any) -> Set[str]:
     result: Set[str] = set()
     if not available:
@@ -2157,6 +2156,7 @@ async def _get_available_quick_reaction_emojis(
         return None
 
 
+@dp.message(reactionsettings.emojis)
 async def add_reaction_emojis(message: Message, state: FSMContext) -> None:
     data, _, account = await _load_account_data(state)
 
