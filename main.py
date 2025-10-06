@@ -238,14 +238,21 @@ async def _is_reply_to_account_comment(message: Any, account_id: int) -> bool:
 
     reply = getattr(message, "reply_to_message", None)
     if not reply:
-        return False
-
-    reply_message_id = getattr(reply, "id", None)
-    if reply_message_id is None:
-        return False
+        reply_message_id = getattr(message, "reply_to_message_id", None)
+        if reply_message_id is None:
+            return False
+    else:
+        reply_message_id = getattr(reply, "id", None)
+        if reply_message_id is None:
+            reply_message_id = getattr(message, "reply_to_message_id", None)
+        if reply_message_id is None:
+            return False
 
     chat = getattr(message, "chat", None)
     channel_id = getattr(chat, "id", None)
+    if channel_id is None and reply is not None:
+        reply_chat = getattr(reply, "chat", None)
+        channel_id = getattr(reply_chat, "id", None)
     if channel_id is None:
         return False
 
@@ -846,9 +853,13 @@ async def _handle_linked_channel_message(
                 )
                 # Небольшая пауза перед записью в БД
                 await asyncio.sleep(0.2)
+                comment_chat_id = getattr(getattr(msg, "chat", None), "id", None)
+                if comment_chat_id is None:
+                    comment_chat_id = getattr(getattr(message, "chat", None), "id", None)
+
                 await add_comment_log(
                     account_id,
-                    channel=str(message.chat.id),
+                    channel=str(comment_chat_id) if comment_chat_id is not None else None,
                     message_id=msg.id,
                     status='success',
                 )
