@@ -853,9 +853,13 @@ async def _handle_linked_channel_message(
                 )
                 # Небольшая пауза перед записью в БД
                 await asyncio.sleep(0.2)
+                comment_chat_id = getattr(getattr(msg, "chat", None), "id", None)
+                if comment_chat_id is None:
+                    comment_chat_id = getattr(getattr(message, "chat", None), "id", None)
+
                 await add_comment_log(
                     account_id,
-                    channel=str(message.chat.id),
+                    channel=str(comment_chat_id) if comment_chat_id is not None else None,
                     message_id=msg.id,
                     status='success',
                 )
