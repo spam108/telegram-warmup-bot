@@ -1328,7 +1328,7 @@ async def test_reaction_sent_for_reply_to_own_comment(monkeypatch):
     async def fake_bot_send_message(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(main, "REACTION_MIN_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(main, "REACTION_MIN_INTERVAL_SECONDS", 60)
     monkeypatch.setattr(main.bot, "send_message", fake_bot_send_message)
     monkeypatch.setattr(main, "add_comment_log", fake_add_comment_log)
     monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
@@ -1339,6 +1339,8 @@ async def test_reaction_sent_for_reply_to_own_comment(monkeypatch):
 
     main.skip_log_counters.clear()
     main.skip_log_last_reasons.clear()
+
+    recent_reaction = datetime.now(timezone.utc)
 
     try:
         result = await main._handle_linked_channel_message(
@@ -1360,7 +1362,7 @@ async def test_reaction_sent_for_reply_to_own_comment(monkeypatch):
             reaction_sleep_max=0,
             reaction_limit_per_message=5,
             reactions_enabled=True,
-            last_reaction_at=None,
+            last_reaction_at=recent_reaction,
         )
     finally:
         main.active_sessions.clear()
@@ -1374,6 +1376,7 @@ async def test_reaction_sent_for_reply_to_own_comment(monkeypatch):
     assert updated_reactions
     assert updated_reactions[-1][0] == account_id
     assert updated_reactions[-1][1] == result
+    assert result >= recent_reaction
 
 
 @pytest.mark.anyio
@@ -1428,7 +1431,7 @@ async def test_reaction_for_reply_detected_via_comment_log(monkeypatch):
         assert message_id == reply_message.id
         return True
 
-    monkeypatch.setattr(main, "REACTION_MIN_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(main, "REACTION_MIN_INTERVAL_SECONDS", 60)
     monkeypatch.setattr(main.bot, "send_message", fake_bot_send_message)
     monkeypatch.setattr(main, "add_comment_log", fake_add_comment_log)
     monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
@@ -1440,6 +1443,8 @@ async def test_reaction_for_reply_detected_via_comment_log(monkeypatch):
 
     main.skip_log_counters.clear()
     main.skip_log_last_reasons.clear()
+
+    recent_reaction = datetime.now(timezone.utc)
 
     try:
         result = await main._handle_linked_channel_message(
@@ -1461,7 +1466,7 @@ async def test_reaction_for_reply_detected_via_comment_log(monkeypatch):
             reaction_sleep_max=0,
             reaction_limit_per_message=5,
             reactions_enabled=True,
-            last_reaction_at=None,
+            last_reaction_at=recent_reaction,
         )
     finally:
         main.active_sessions.clear()
@@ -1475,6 +1480,7 @@ async def test_reaction_for_reply_detected_via_comment_log(monkeypatch):
     assert updated_reactions
     assert updated_reactions[-1][0] == account_id
     assert updated_reactions[-1][1] == result
+    assert result >= recent_reaction
 
 
 @pytest.mark.anyio
