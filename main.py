@@ -576,15 +576,18 @@ async def _handle_linked_channel_message(
                     return current_last_reaction_at
 
                 max_reaction_attempts = 3
-                reaction_attempt = 0
                 reaction_sent = False
                 last_reaction_error: Optional[BaseException] = None
                 last_reaction_error_text: Optional[str] = None
+                attempts_performed = 0
 
-                while reaction_attempt < max_reaction_attempts and working_reaction_emojis:
-                    reaction_attempt += 1
+                for reaction_attempt in range(1, max_reaction_attempts + 1):
+                    if not working_reaction_emojis:
+                        break
+
                     reaction_emoji = random.choice(working_reaction_emojis)
                     working_reaction_emojis.remove(reaction_emoji)
+                    attempts_performed = reaction_attempt
                     await asyncio.sleep(random.uniform(reaction_sleep_min, reaction_sleep_max))
 
                     try:
@@ -640,6 +643,8 @@ async def _handle_linked_channel_message(
                             chat_id_for_reactions,
                             force_refresh=True,
                         )
+                        if refreshed_allowed is not None:
+                            allowed_reaction_emojis = refreshed_allowed
                         invalid_emojis: Set[str] = {reaction_emoji}
                         if refreshed_allowed is not None:
                             invalid_emojis.update(
@@ -703,11 +708,12 @@ async def _handle_linked_channel_message(
 
                 if not reaction_sent and last_reaction_error is not None:
                     error_text = last_reaction_error_text or str(last_reaction_error)
+                    attempts_text = attempts_performed or max_reaction_attempts
                     await bot.send_message(
                         log_channel,
                         (
                             f'Аккаунт {session} ошибка при установке реакции '
-                            f"после {reaction_attempt} попыток: {error_text}"
+                            f"после {attempts_text} попыток: {error_text}"
                         ),
                     )
                     await asyncio.sleep(0.2)
@@ -718,6 +724,7 @@ async def _handle_linked_channel_message(
                         status=f'reaction_error{status_suffix}',
                         error=error_text,
                     )
+
             else:
                 reason = (
                     f'reaction random {reaction_roll} > chance {selected_reaction_chance}'
