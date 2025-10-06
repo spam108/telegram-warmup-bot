@@ -204,8 +204,21 @@ def _is_discussion_reply_message(message: Any) -> bool:
     reply = getattr(message, "reply_to_message", None)
     if not reply:
         return False
+
     forward_chat = getattr(reply, "forward_from_chat", None)
-    return forward_chat is not None
+    if forward_chat is not None:
+        return True
+
+    chat = getattr(message, "chat", None)
+    chat_type = getattr(chat, "type", None)
+    if chat_type not in {"supergroup", "group"}:
+        return False
+
+    reply_author = getattr(reply, "from_user", None)
+    if reply_author and getattr(reply_author, "is_self", False):
+        return True
+
+    return False
 
 
 def _is_self_generated_message(message: Any) -> bool:

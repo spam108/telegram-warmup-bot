@@ -53,6 +53,30 @@ def clear_reaction_cache():
         main._chat_available_reactions_cache.update(original_cache)
 
 
+def test_discussion_reply_detection_for_account_comment():
+    chat = types.SimpleNamespace(type="supergroup")
+    reply_author = types.SimpleNamespace(is_self=True)
+    reply = types.SimpleNamespace(
+        forward_from_chat=None,
+        from_user=reply_author,
+    )
+    message = types.SimpleNamespace(chat=chat, reply_to_message=reply)
+
+    assert main._is_discussion_reply_message(message)
+
+
+def test_discussion_reply_detection_skips_private_chat():
+    chat = types.SimpleNamespace(type="private")
+    reply_author = types.SimpleNamespace(is_self=True)
+    reply = types.SimpleNamespace(
+        forward_from_chat=None,
+        from_user=reply_author,
+    )
+    message = types.SimpleNamespace(chat=chat, reply_to_message=reply)
+
+    assert not main._is_discussion_reply_message(message)
+
+
 @pytest.mark.anyio
 async def test_discussion_without_settings_skips_actions(monkeypatch):
     userid = 123
