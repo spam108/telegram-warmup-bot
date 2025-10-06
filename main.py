@@ -618,11 +618,19 @@ async def _handle_linked_channel_message(
                                 return current_last_reaction_at
 
                         await client.send_reaction(message.chat.id, message.id, reaction_emoji)
+                        reaction_link = post_base_link
+                        if (
+                            reaction_link
+                            and _is_discussion_reply_message(message)
+                            and getattr(message, "id", None) is not None
+                        ):
+                            reaction_link = f"{reaction_link}?comment={message.id}"
+
                         await bot.send_message(
                             log_channel,
                             (
                                 f'Аккаунт {session} поставил реакцию {reaction_emoji}'
-                                f'{reaction_comment_context}\n{post_base_link}'
+                                f'{reaction_comment_context}\n{reaction_link}'
                             )
                         )
                         await update_last_reaction_at(account_id, now)
