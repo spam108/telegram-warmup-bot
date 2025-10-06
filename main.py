@@ -301,6 +301,7 @@ async def _maybe_send_reaction(
     post_base_link: Optional[str],
     current_last_reaction_at: Optional[datetime],
     force: bool = False,
+    ignore_cooldown: bool = False,
 ) -> Tuple[Optional[datetime], bool]:
     if not reactions_enabled or not reaction_emojis:
         return current_last_reaction_at, False
@@ -432,7 +433,11 @@ async def _maybe_send_reaction(
             if previous is not None and previous.tzinfo is None:
                 previous = previous.replace(tzinfo=timezone.utc)
             cooldown_seconds = REACTION_MIN_INTERVAL_SECONDS
-            if previous is not None and cooldown_seconds:
+            if (
+                previous is not None
+                and cooldown_seconds
+                and not ignore_cooldown
+            ):
                 if now - previous < timedelta(seconds=cooldown_seconds):
                     reason = (
                         'reaction cooldown '
@@ -723,6 +728,7 @@ async def _handle_linked_channel_message(
             post_base_link=None,
             current_last_reaction_at=current_last_reaction_at,
             force=True,
+            ignore_cooldown=True,
         )
         current_last_reaction_at = updated_last_reaction_at
         return current_last_reaction_at
