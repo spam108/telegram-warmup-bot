@@ -922,3 +922,284 @@ async def test_reaction_happens_when_comment_skipped(monkeypatch):
     assert updated_reactions
     assert updated_reactions[-1][0] == account_id
     assert updated_reactions[-1][1] == result
+
+
+@pytest.mark.anyio
+async def test_reaction_retries_transient_failure_until_success(monkeypatch):
+    userid = 123
+    session = "+100500"
+    account_id = 42
+
+    original_active_sessions = dict(main.active_sessions)
+    original_quiet = set(main.quiet_sessions_notified)
+
+    main.active_sessions.clear()
+    main.quiet_sessions_notified.clear()
+    key = main.make_session_key(userid, session)
+    main.active_sessions[key] = True
+
+    class RetryClient(DummyClient):
+        def __init__(self):
+            super().__init__()
+            self.available_reactions = [
+                types.SimpleNamespace(emoji="🔥"),
+                types.SimpleNamespace(emoji="❤️"),
+                types.SimpleNamespace(emoji="👍"),
+            ]
+            self.attempts = 0
+
+        async def send_reaction(self, chat_id, message_id, emoji):
+            self.sent_reactions.append((chat_id, message_id, emoji))
+            self.attempts += 1
+            if self.attempts < 3:
+                raise Exception(f"temporary failure {self.attempts}")
+
+    client = RetryClient()
+
+    chat = types.SimpleNamespace(id=-2000000000, permissions=None, type="supergroup")
+    reply_to_message = types.SimpleNamespace(
+        forward_from_chat=types.SimpleNamespace(username="source_channel"),
+        forward_from_message_id=321,
+    )
+    from_user = types.SimpleNamespace(is_self=False)
+    message = types.SimpleNamespace(
+        chat=chat,
+        text="Original post",
+        caption=None,
+        id=111,
+        reply_to_message=reply_to_message,
+        from_user=from_user,
+    )
+
+    bot_logs = []
+    comment_logs = []
+    sleep_calls = []
+
+    async def fake_bot_send_message(chat_id, text):
+        bot_logs.append((chat_id, text))
+
+    async def fake_add_comment_log(*args, **kwargs):
+        comment_logs.append((args, kwargs))
+
+    def fake_generate_comment(post_text, system_prompt):
+        return f"comment:{post_text}:{system_prompt}"
+
+    async def fake_sleep(duration):
+        sleep_calls.append(duration)
+
+    async def fake_count_reactions(*args, **kwargs):
+        return 0
+
+    def fake_randint(a, b):
+        return 1
+
+    def fake_uniform(a, b):
+        return 0
+
+    def fake_choice(seq):
+        return seq[0]
+
+    updated_reactions = []
+
+    async def fake_update_last_reaction_at(account, ts):
+        updated_reactions.append((account, ts))
+
+    monkeypatch.setattr(main, "REACTION_MIN_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(main.bot, "send_message", fake_bot_send_message)
+    monkeypatch.setattr(main, "add_comment_log", fake_add_comment_log)
+    monkeypatch.setattr(main, "generate_comment", fake_generate_comment)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(main, "count_reactions_for_message", fake_count_reactions)
+    monkeypatch.setattr(main.random, "randint", fake_randint)
+    monkeypatch.setattr(main.random, "uniform", fake_uniform)
+    monkeypatch.setattr(main.random, "choice", fake_choice)
+    monkeypatch.setattr(main, "update_last_reaction_at", fake_update_last_reaction_at)
+    monkeypatch.setattr(main, "is_quiet_period", lambda: False)
+
+    try:
+        await main._handle_linked_channel_message(
+            client,
+            message,
+            userid=userid,
+            session=session,
+            account_id=account_id,
+            chance=100,
+            xsleep=0,
+            ysleep=0,
+            system_promt="prompt",
+            reaction_emojis=["🔥", "❤️", "👍"],
+            reaction_chance=100,
+            reaction_discussion_chance=100,
+            discussion_reply_prompt="prompt",
+            discussion_reply_chance=100,
+            reaction_sleep_min=0,
+            reaction_sleep_max=0,
+            reaction_limit_per_message=5,
+            reactions_enabled=True,
+            last_reaction_at=None,
+        )
+    finally:
+        main.active_sessions.clear()
+        main.active_sessions.update(original_active_sessions)
+        main.quiet_sessions_notified.clear()
+        main.quiet_sessions_notified.update(original_quiet)
+
+    assert [emoji for _, _, emoji in client.sent_reactions] == ["🔥", "❤️", "👍"]
+    assert any("поставил реакцию" in log[1] for log in bot_logs)
+    reaction_logs = [entry for entry in comment_logs if entry[1]["status"].startswith("reaction_")]
+    assert reaction_logs
+    assert reaction_logs == [reaction_logs[0]]
+    assert reaction_logs[0][1]["status"].startswith("reaction_success")
+    assert sleep_calls.count(2) == 2
+    assert len(updated_reactions) == 1
+
+
+@pytest.mark.anyio
+async def test_reaction_retries_record_single_error(monkeypatch):
+    userid = 123
+    session = "+100500"
+    account_id = 42
+
+    original_active_sessions = dict(main.active_sessions)
+    original_quiet = set(main.quiet_sessions_notified)
+    original_skip_counters = {
+        key: counter.copy() for key, counter in main.skip_log_counters.items()
+    }
+    original_skip_reasons = {
+        key: dict(value) for key, value in main.skip_log_last_reasons.items()
+    }
+
+    main.active_sessions.clear()
+    main.quiet_sessions_notified.clear()
+    main.skip_log_counters.clear()
+    main.skip_log_last_reasons.clear()
+    key = main.make_session_key(userid, session)
+    main.active_sessions[key] = True
+
+    class AlwaysFailClient(DummyClient):
+        def __init__(self):
+            super().__init__()
+            self.available_reactions = [
+                types.SimpleNamespace(emoji="🔥"),
+                types.SimpleNamespace(emoji="❤️"),
+                types.SimpleNamespace(emoji="👍"),
+            ]
+            self.attempts = 0
+
+        async def send_reaction(self, chat_id, message_id, emoji):
+            self.sent_reactions.append((chat_id, message_id, emoji))
+            self.attempts += 1
+            raise Exception("permanent failure")
+
+    client = AlwaysFailClient()
+
+    chat = types.SimpleNamespace(id=-2000000000, permissions=None, type="supergroup")
+    reply_to_message = types.SimpleNamespace(
+        forward_from_chat=types.SimpleNamespace(username="source_channel"),
+        forward_from_message_id=321,
+    )
+    from_user = types.SimpleNamespace(is_self=False)
+    message = types.SimpleNamespace(
+        chat=chat,
+        text="Original post",
+        caption=None,
+        id=111,
+        reply_to_message=reply_to_message,
+        from_user=from_user,
+    )
+
+    bot_logs = []
+    comment_logs = []
+    sleep_calls = []
+
+    async def fake_bot_send_message(chat_id, text):
+        bot_logs.append((chat_id, text))
+
+    async def fake_add_comment_log(*args, **kwargs):
+        comment_logs.append((args, kwargs))
+
+    def fake_generate_comment(post_text, system_prompt):
+        return f"comment:{post_text}:{system_prompt}"
+
+    async def fake_sleep(duration):
+        sleep_calls.append(duration)
+
+    async def fake_count_reactions(*args, **kwargs):
+        return 0
+
+    def fake_randint(a, b):
+        return 1
+
+    def fake_uniform(a, b):
+        return 0
+
+    def fake_choice(seq):
+        return seq[0]
+
+    monkeypatch.setattr(main, "REACTION_MIN_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(main.bot, "send_message", fake_bot_send_message)
+    monkeypatch.setattr(main, "add_comment_log", fake_add_comment_log)
+    monkeypatch.setattr(main, "generate_comment", fake_generate_comment)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(main, "count_reactions_for_message", fake_count_reactions)
+    monkeypatch.setattr(main.random, "randint", fake_randint)
+    monkeypatch.setattr(main.random, "uniform", fake_uniform)
+    monkeypatch.setattr(main.random, "choice", fake_choice)
+    monkeypatch.setattr(main, "is_quiet_period", lambda: False)
+
+    reaction_skip_counter = None
+    reaction_skip_reason = None
+
+    try:
+        await main._handle_linked_channel_message(
+            client,
+            message,
+            userid=userid,
+            session=session,
+            account_id=account_id,
+            chance=100,
+            xsleep=0,
+            ysleep=0,
+            system_promt="prompt",
+            reaction_emojis=["🔥", "❤️", "👍"],
+            reaction_chance=100,
+            reaction_discussion_chance=100,
+            discussion_reply_prompt="prompt",
+            discussion_reply_chance=100,
+            reaction_sleep_min=0,
+            reaction_sleep_max=0,
+            reaction_limit_per_message=5,
+            reactions_enabled=True,
+            last_reaction_at=None,
+        )
+        counter = main.skip_log_counters.get(session)
+        if counter is not None:
+            reaction_skip_counter = counter.copy()
+        reaction_skip_reason = main.skip_log_last_reasons.get(session, {}).get(
+            "reaction"
+        )
+    finally:
+        main.active_sessions.clear()
+        main.active_sessions.update(original_active_sessions)
+        main.quiet_sessions_notified.clear()
+        main.quiet_sessions_notified.update(original_quiet)
+        main.skip_log_counters.clear()
+        for key, counter in original_skip_counters.items():
+            main.skip_log_counters[key] = counter.copy()
+        main.skip_log_last_reasons.clear()
+        for key, value in original_skip_reasons.items():
+            main.skip_log_last_reasons[key] = dict(value)
+
+    assert [emoji for _, _, emoji in client.sent_reactions] == ["🔥", "❤️", "👍"]
+    error_messages = [log for log in bot_logs if "ошибка при установке реакции" in log[1]]
+    assert len(error_messages) == 1
+    reaction_logs = [entry for entry in comment_logs if entry[1]["status"].startswith("reaction_")]
+    assert reaction_logs
+    assert reaction_logs == [reaction_logs[0]]
+    assert reaction_logs[0][1]["status"].startswith("reaction_error")
+    assert reaction_logs[0][1]["error"].startswith("reaction error after")
+    assert sleep_calls.count(2) == 2
+    assert reaction_skip_counter is not None
+    assert reaction_skip_counter["reaction"] == 1
+    assert reaction_skip_reason is not None
+    assert "reaction error after" in reaction_skip_reason
