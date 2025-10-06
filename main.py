@@ -238,14 +238,21 @@ async def _is_reply_to_account_comment(message: Any, account_id: int) -> bool:
 
     reply = getattr(message, "reply_to_message", None)
     if not reply:
-        return False
-
-    reply_message_id = getattr(reply, "id", None)
-    if reply_message_id is None:
-        return False
+        reply_message_id = getattr(message, "reply_to_message_id", None)
+        if reply_message_id is None:
+            return False
+    else:
+        reply_message_id = getattr(reply, "id", None)
+        if reply_message_id is None:
+            reply_message_id = getattr(message, "reply_to_message_id", None)
+        if reply_message_id is None:
+            return False
 
     chat = getattr(message, "chat", None)
     channel_id = getattr(chat, "id", None)
+    if channel_id is None and reply is not None:
+        reply_chat = getattr(reply, "chat", None)
+        channel_id = getattr(reply_chat, "id", None)
     if channel_id is None:
         return False
 
