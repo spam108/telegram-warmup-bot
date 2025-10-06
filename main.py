@@ -324,7 +324,7 @@ async def _maybe_send_reaction(
     message_id = getattr(message, "id", None)
     limit = reaction_limit_per_message
 
-    if limit is not None and not force:
+    if limit is not None:
         if limit <= 0:
             reason = f'reaction limit {limit} reached'
             enqueue_skip_log(
