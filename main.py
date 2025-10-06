@@ -32,6 +32,7 @@ from db import (
     bulk_update_reaction_settings,
     count_reactions_for_message,
     db_update_warmup_schedule,
+    has_successful_comment_log_entry,
     delete_account,
     ensure_account,
     ensure_user,
@@ -227,6 +228,42 @@ def _is_reply_to_own_comment(message: Any) -> bool:
     if from_user and getattr(from_user, "is_self", False):
         return False
     return True
+
+
+async def _is_reply_to_account_comment(message: Any, account_id: int) -> bool:
+    """Check whether message replies to a comment previously sent by the account."""
+
+    if _is_reply_to_own_comment(message):
+        return True
+
+    reply = getattr(message, "reply_to_message", None)
+    if not reply:
+        return False
+
+    reply_message_id = getattr(reply, "id", None)
+    if reply_message_id is None:
+        reply_message_id = getattr(reply, "message_id", None)
+    if reply_message_id is None:
+        reply_message_id = getattr(message, "reply_to_message_id", None)
+    if reply_message_id is None:
+        return False
+
+    chat = getattr(message, "chat", None)
+    channel_id = getattr(chat, "id", None)
+    if channel_id is None:
+        return False
+
+    channel_for_lookup = str(channel_id)
+
+    try:
+        return await has_successful_comment_log_entry(
+            account_id,
+            channel_for_lookup,
+            reply_message_id,
+        )
+    except Exception:  # pragma: no cover - defensive logging
+        logging.exception("Не удалось проверить лог комментариев для ответа")
+        return False
 
 
 def _chat_allows_sending_message(message: Any) -> Tuple[bool, Optional[str]]:
@@ -671,7 +708,7 @@ async def _handle_linked_channel_message(
 
     current_last_reaction_at = last_reaction_at
 
-    if _is_reply_to_own_comment(message):
+    if await _is_reply_to_account_comment(message, account_id):
         reaction_comment_context = ' (ответ на комментарий аккаунта)'
         status_suffix = '_reply'
         updated_last_reaction_at, should_exit = await _maybe_send_reaction(

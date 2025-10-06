@@ -944,6 +944,34 @@ async def count_reactions_for_message(channel: str, message_id: int) -> int:
     return int(row["reaction_count"] or 0)
 
 
+async def has_successful_comment_log_entry(
+    account_id: int,
+    channel: Optional[str],
+    message_id: Optional[int],
+) -> bool:
+    """Return True if we previously stored a successful comment for the message."""
+
+    if channel is None or message_id is None:
+        return False
+
+    conn = await _require_conn()
+    async with conn.execute(
+        """
+        SELECT 1
+        FROM comment_logs
+        WHERE account_id = ?
+          AND channel = ?
+          AND message_id = ?
+          AND status = 'success'
+        LIMIT 1
+        """,
+        (account_id, channel, message_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    return row is not None
+
+
 async def cleanup_comment_logs(retention_days: int = 2) -> int:
     """Remove comment log entries older than the specified number of days."""
 
