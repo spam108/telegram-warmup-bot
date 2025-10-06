@@ -427,6 +427,106 @@ async def test_discussion_reply_from_user_triggers_comment_and_reaction(monkeypa
 
 
 @pytest.mark.anyio
+async def test_reply_to_account_comment_without_reply_object(monkeypatch):
+    userid = 555
+    session = "+200"
+    account_id = 99
+
+    original_active_sessions = dict(main.active_sessions)
+    original_quiet = set(main.quiet_sessions_notified)
+
+    main.active_sessions.clear()
+    main.quiet_sessions_notified.clear()
+    key = main.make_session_key(userid, session)
+    main.active_sessions[key] = True
+
+    client = DummyClient()
+
+    chat = types.SimpleNamespace(id=-3000000000, permissions=None, type="supergroup")
+    from_user = types.SimpleNamespace(is_self=False)
+    message = types.SimpleNamespace(
+        chat=chat,
+        text="Follow-up reply",
+        caption=None,
+        id=222,
+        reply_to_message=None,
+        reply_to_message_id=777,
+        from_user=from_user,
+    )
+
+    bot_logs = []
+    comment_logs = []
+
+    async def fake_bot_send_message(chat_id, text):
+        bot_logs.append((chat_id, text))
+
+    async def fake_add_comment_log(*args, **kwargs):
+        comment_logs.append((args, kwargs))
+
+    async def fake_has_successful_comment_log_entry(account, channel, msg_id):
+        return account == account_id and channel == str(chat.id) and msg_id == 777
+
+    async def fake_sleep(*args, **kwargs):
+        return None
+
+    async def fake_count_reactions(*args, **kwargs):
+        return 0
+
+    def fake_uniform(a, b):
+        return 0
+
+    updated_reactions = []
+
+    async def fake_update_last_reaction_at(account, ts):
+        updated_reactions.append((account, ts))
+
+    monkeypatch.setattr(main, "REACTION_MIN_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(main.bot, "send_message", fake_bot_send_message)
+    monkeypatch.setattr(main, "add_comment_log", fake_add_comment_log)
+    monkeypatch.setattr(main, "has_successful_comment_log_entry", fake_has_successful_comment_log_entry)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(main, "count_reactions_for_message", fake_count_reactions)
+    monkeypatch.setattr(main.random, "uniform", fake_uniform)
+    monkeypatch.setattr(main, "is_quiet_period", lambda: False)
+    monkeypatch.setattr(main, "update_last_reaction_at", fake_update_last_reaction_at)
+
+    try:
+        await main._handle_linked_channel_message(
+            client,
+            message,
+            userid=userid,
+            session=session,
+            account_id=account_id,
+            chance=0,
+            xsleep=0,
+            ysleep=0,
+            system_promt="prompt",
+            reaction_emojis=["🔥"],
+            reaction_chance=0,
+            reaction_discussion_chance=0,
+            discussion_reply_prompt=None,
+            discussion_reply_chance=None,
+            reaction_sleep_min=0,
+            reaction_sleep_max=0,
+            reaction_limit_per_message=None,
+            reactions_enabled=True,
+            last_reaction_at=None,
+        )
+    finally:
+        main.active_sessions.clear()
+        main.active_sessions.update(original_active_sessions)
+        main.quiet_sessions_notified.clear()
+        main.quiet_sessions_notified.update(original_quiet)
+
+    assert not client.sent_messages, "Комментарий не должен отправляться"
+    assert client.sent_reactions, "Реакция должна быть установлена"
+    assert any("поставил реакцию" in log[1] for log in bot_logs)
+    statuses = {kwargs.get("status") for _, kwargs in comment_logs}
+    assert statuses == {"reaction_success_reply"}
+    assert len(updated_reactions) == 1
+
+
+@pytest.mark.anyio
 async def test_reaction_skipped_when_not_in_allowed_set(monkeypatch):
     userid = 123
     session = "+100500"
