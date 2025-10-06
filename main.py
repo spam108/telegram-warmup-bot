@@ -556,12 +556,15 @@ async def _handle_linked_channel_message(
                 await asyncio.sleep(random.uniform(reaction_sleep_min, reaction_sleep_max))
                 max_reaction_attempts = 3
                 retry_delay_seconds = 2
-                reaction_attempt = 0
                 reaction_sent = False
                 last_reaction_exception: Optional[Exception] = None
+                last_reaction_attempt = 0
 
-                while reaction_attempt < max_reaction_attempts and working_reaction_emojis:
-                    reaction_attempt += 1
+                for reaction_attempt in range(1, max_reaction_attempts + 1):
+                    if not working_reaction_emojis:
+                        break
+
+                    last_reaction_attempt = reaction_attempt
                     reaction_emoji = random.choice(working_reaction_emojis)
                     try:
                         now = datetime.now(timezone.utc)
@@ -618,7 +621,7 @@ async def _handle_linked_channel_message(
                             chat_id_for_reactions,
                             reaction_error,
                         )
-                        working_reaction_emojis = [
+                        remaining_candidates = [
                             emoji for emoji in working_reaction_emojis if emoji != reaction_emoji
                         ]
                         refreshed_allowed = await _get_chat_available_quick_reactions(
@@ -626,20 +629,16 @@ async def _handle_linked_channel_message(
                             chat_id_for_reactions,
                             force_refresh=True,
                         )
-                        invalid_emojis: Set[str] = set()
+                        invalid_emojis: Set[str] = {reaction_emoji}
                         if refreshed_allowed is not None:
-                            invalid_emojis = {
-                                emoji
-                                for emoji in [reaction_emoji] + working_reaction_emojis
-                                if emoji not in refreshed_allowed
-                            }
+                            invalid_emojis.update(
+                                emoji for emoji in remaining_candidates if emoji not in refreshed_allowed
+                            )
                             working_reaction_emojis = [
-                                emoji
-                                for emoji in working_reaction_emojis
-                                if emoji in refreshed_allowed
+                                emoji for emoji in remaining_candidates if emoji in refreshed_allowed
                             ]
                         else:
-                            invalid_emojis = set([reaction_emoji] + working_reaction_emojis)
+                            invalid_emojis.update(remaining_candidates)
                             working_reaction_emojis = []
 
                         if not working_reaction_emojis:
@@ -667,7 +666,8 @@ async def _handle_linked_channel_message(
                             )
                             return current_last_reaction_at
 
-                        await asyncio.sleep(retry_delay_seconds)
+                        if reaction_attempt < max_reaction_attempts:
+                            await asyncio.sleep(retry_delay_seconds)
                     except Exception as reaction_error:
                         last_reaction_exception = reaction_error
                         logging.warning(
@@ -688,7 +688,8 @@ async def _handle_linked_channel_message(
 
                 if not reaction_sent:
                     error_message = (
-                        f'Аккаунт {session} ошибка при установке реакции: '
+                        f'Аккаунт {session} ошибка при установке реакции '
+                        f"после {last_reaction_attempt or 0} попыток: "
                         f"{last_reaction_exception or 'unknown error'}"
                     )
                     await bot.send_message(log_channel, error_message)
