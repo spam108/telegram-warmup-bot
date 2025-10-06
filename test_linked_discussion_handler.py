@@ -1062,9 +1062,17 @@ async def test_reaction_retries_record_single_error(monkeypatch):
 
     original_active_sessions = dict(main.active_sessions)
     original_quiet = set(main.quiet_sessions_notified)
+    original_skip_counters = {
+        key: counter.copy() for key, counter in main.skip_log_counters.items()
+    }
+    original_skip_reasons = {
+        key: dict(value) for key, value in main.skip_log_last_reasons.items()
+    }
 
     main.active_sessions.clear()
     main.quiet_sessions_notified.clear()
+    main.skip_log_counters.clear()
+    main.skip_log_last_reasons.clear()
     key = main.make_session_key(userid, session)
     main.active_sessions[key] = True
 
@@ -1139,6 +1147,9 @@ async def test_reaction_retries_record_single_error(monkeypatch):
     monkeypatch.setattr(main.random, "choice", fake_choice)
     monkeypatch.setattr(main, "is_quiet_period", lambda: False)
 
+    reaction_skip_counter = None
+    reaction_skip_reason = None
+
     try:
         await main._handle_linked_channel_message(
             client,
@@ -1161,11 +1172,23 @@ async def test_reaction_retries_record_single_error(monkeypatch):
             reactions_enabled=True,
             last_reaction_at=None,
         )
+        counter = main.skip_log_counters.get(session)
+        if counter is not None:
+            reaction_skip_counter = counter.copy()
+        reaction_skip_reason = main.skip_log_last_reasons.get(session, {}).get(
+            "reaction"
+        )
     finally:
         main.active_sessions.clear()
         main.active_sessions.update(original_active_sessions)
         main.quiet_sessions_notified.clear()
         main.quiet_sessions_notified.update(original_quiet)
+        main.skip_log_counters.clear()
+        for key, counter in original_skip_counters.items():
+            main.skip_log_counters[key] = counter.copy()
+        main.skip_log_last_reasons.clear()
+        for key, value in original_skip_reasons.items():
+            main.skip_log_last_reasons[key] = dict(value)
 
     assert [emoji for _, _, emoji in client.sent_reactions] == ["🔥", "❤️", "👍"]
     error_messages = [log for log in bot_logs if "ошибка при установке реакции" in log[1]]
@@ -1175,3 +1198,7 @@ async def test_reaction_retries_record_single_error(monkeypatch):
     assert reaction_logs == [reaction_logs[0]]
     assert reaction_logs[0][1]["status"].startswith("reaction_error")
     assert sleep_calls.count(2) == 2
+    assert reaction_skip_counter is not None
+    assert reaction_skip_counter["reaction"] == 1
+    assert reaction_skip_reason is not None
+    assert "reaction error after" in reaction_skip_reason

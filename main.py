@@ -687,10 +687,24 @@ async def _handle_linked_channel_message(
                             await asyncio.sleep(retry_delay_seconds)
 
                 if not reaction_sent:
+                    exception_text = (
+                        str(last_reaction_exception)
+                        if last_reaction_exception
+                        else 'unknown error'
+                    )
+                    failure_reason = (
+                        f"reaction error after {last_reaction_attempt or 0} attempts: "
+                        f"{exception_text}"
+                    )
+                    enqueue_skip_log(
+                        session,
+                        "reaction",
+                        f"{failure_reason}{reaction_comment_context}",
+                    )
                     error_message = (
                         f'Аккаунт {session} ошибка при установке реакции '
                         f"после {last_reaction_attempt or 0} попыток: "
-                        f"{last_reaction_exception or 'unknown error'}"
+                        f"{exception_text}"
                     )
                     await bot.send_message(log_channel, error_message)
                     await asyncio.sleep(0.2)
@@ -699,7 +713,7 @@ async def _handle_linked_channel_message(
                         channel=str(message.chat.id),
                         message_id=message.id,
                         status=f'reaction_error{status_suffix}',
-                        error=str(last_reaction_exception) if last_reaction_exception else 'unknown error',
+                        error=exception_text,
                     )
             else:
                 reason = (
