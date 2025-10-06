@@ -33,6 +33,7 @@ from db import (
     count_reactions_for_message,
     db_update_warmup_schedule,
     has_successful_comment_log_entry,
+    has_successful_comment_log_entry_any_channel,
     delete_account,
     ensure_account,
     ensure_user,
@@ -238,23 +239,53 @@ async def _is_reply_to_account_comment(message: Any, account_id: int) -> bool:
 
     reply = getattr(message, "reply_to_message", None)
     if not reply:
-        return False
+        reply_message_id = getattr(message, "reply_to_message_id", None)
+        if reply_message_id is None:
+            return False
+    else:
+        reply_message_id = getattr(reply, "id", None)
+        if reply_message_id is None:
+            reply_message_id = getattr(message, "reply_to_message_id", None)
+        if reply_message_id is None:
+            return False
 
-    reply_message_id = getattr(reply, "id", None)
-    if reply_message_id is None:
-        return False
+    channel_candidates: List[str] = []
 
     chat = getattr(message, "chat", None)
     channel_id = getattr(chat, "id", None)
-    if channel_id is None:
-        return False
+    if channel_id is not None:
+        channel_candidates.append(str(channel_id))
 
-    channel_for_lookup = str(channel_id)
+    if reply is not None:
+        reply_chat = getattr(reply, "chat", None)
+        reply_chat_id = getattr(reply_chat, "id", None)
+        if reply_chat_id is not None:
+            channel_candidates.append(str(reply_chat_id))
+
+        forward_chat = getattr(reply, "forward_from_chat", None)
+        forward_chat_id = getattr(forward_chat, "id", None)
+        if forward_chat_id is not None:
+            channel_candidates.append(str(forward_chat_id))
+
+    # Remove duplicates while preserving order
+    seen_channels: Set[str] = set()
+    unique_candidates = []
+    for candidate in channel_candidates:
+        if candidate not in seen_channels:
+            unique_candidates.append(candidate)
+            seen_channels.add(candidate)
 
     try:
-        return await has_successful_comment_log_entry(
+        for channel_for_lookup in unique_candidates:
+            if await has_successful_comment_log_entry(
+                account_id,
+                channel_for_lookup,
+                reply_message_id,
+            ):
+                return True
+
+        return await has_successful_comment_log_entry_any_channel(
             account_id,
-            channel_for_lookup,
             reply_message_id,
         )
     except Exception:  # pragma: no cover - defensive logging
@@ -846,9 +877,13 @@ async def _handle_linked_channel_message(
                 )
                 # Небольшая пауза перед записью в БД
                 await asyncio.sleep(0.2)
+                comment_chat_id = getattr(getattr(msg, "chat", None), "id", None)
+                if comment_chat_id is None:
+                    comment_chat_id = getattr(getattr(message, "chat", None), "id", None)
+
                 await add_comment_log(
                     account_id,
-                    channel=str(message.chat.id),
+                    channel=str(comment_chat_id) if comment_chat_id is not None else None,
                     message_id=msg.id,
                     status='success',
                 )

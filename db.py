@@ -972,6 +972,32 @@ async def has_successful_comment_log_entry(
     return row is not None
 
 
+async def has_successful_comment_log_entry_any_channel(
+    account_id: int,
+    message_id: Optional[int],
+) -> bool:
+    """Return True if a successful comment exists regardless of channel."""
+
+    if message_id is None:
+        return False
+
+    conn = await _require_conn()
+    async with conn.execute(
+        """
+        SELECT 1
+        FROM comment_logs
+        WHERE account_id = ?
+          AND message_id = ?
+          AND status = 'success'
+        LIMIT 1
+        """,
+        (account_id, message_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    return row is not None
+
+
 async def cleanup_comment_logs(retention_days: int = 2) -> int:
     """Remove comment log entries older than the specified number of days."""
 
