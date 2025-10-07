@@ -835,8 +835,15 @@ async def update_account_settings(
         WHERE id = ?
     """
 
-    await _execute(query, tuple(values))
-    await _commit()
+    async def _perform_update() -> None:
+        await _execute(query, tuple(values))
+        await _commit()
+
+    if _is_sqlite():
+        await _retry_db_operation(_perform_update, max_retries=5)
+    else:
+        await _perform_update()
+
     print(f"DEBUG: SQL update completed successfully for account_id={account_id}")
 
 
@@ -902,8 +909,14 @@ async def bulk_update_reaction_settings(
         WHERE user_id = ?
     """
 
-    await _execute(query, tuple(values))
-    await _commit()
+    async def _perform_update() -> None:
+        await _execute(query, tuple(values))
+        await _commit()
+
+    if _is_sqlite():
+        await _retry_db_operation(_perform_update, max_retries=5)
+    else:
+        await _perform_update()
 
 
 async def update_last_reaction_at(account_id: int, timestamp: Optional[datetime]) -> None:
