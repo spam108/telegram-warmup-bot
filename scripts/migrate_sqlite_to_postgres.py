@@ -238,10 +238,10 @@ async def migrate(sqlite_path: str, postgres_dsn: str) -> None:
                     ("warmup_channels_id_seq", "warmup_channels"),
                     ("comment_logs_id_seq", "comment_logs"),
                 ):
-                    next_value = await pg.fetchval(
-                        f"SELECT COALESCE(MAX(id), 0) + 1 FROM {table_name}"
+                    await pg.execute(
+                        f"SELECT setval($1, COALESCE((SELECT MAX(id) FROM {table_name}), 0) + 1, false)",
+                        sequence_name,
                     )
-                    await pg.execute("SELECT setval($1, $2, false)", sequence_name, next_value)
 
     sqlite_conn.close()
 
