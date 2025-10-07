@@ -1487,22 +1487,24 @@ async def main_message(message):
 def build_main_actions_keyboard() -> ReplyKeyboardMarkup:
     """Возвращает клавиатуру с основными действиями под строкой ввода."""
 
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="Добавить аккаунт"),
-                KeyboardButton(text="Добавить прогрев"),
-            ],
-            [
-                KeyboardButton(text="📊 Общая статистика"),
-                KeyboardButton(text="⚙️ Настройки прогрева"),
-            ],
-            [
-                KeyboardButton(text=SKIP_SUMMARY_BUTTON_TEXT),
-            ],
+    keyboard = [
+        [
+            KeyboardButton(text="Добавить аккаунт"),
+            KeyboardButton(text="Добавить прогрев"),
         ],
-        resize_keyboard=True,
-    )
+        [
+            KeyboardButton(text="📊 Общая статистика"),
+            KeyboardButton(text="⚙️ Настройки прогрева"),
+        ],
+    ]
+
+    # Кнопка перехода в лог-канал полезна только когда включены подробные
+    # уведомления/логи.  Без этих режимов она путает пользователей и ломает
+    # ожидаемую раскладку клавиатуры в тестах.
+    if WARMUP_VERBOSE_LOGS or WARMUP_VERBOSE_NOTIFICATIONS:
+        keyboard.append([KeyboardButton(text=SKIP_SUMMARY_BUTTON_TEXT)])
+
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 async def start_add_account_flow(user_id: int, state: FSMContext, *, warmup_only: bool = False) -> None:
@@ -2152,7 +2154,7 @@ async def _prompt_chance(message: Message, state: FSMContext) -> None:
     await bot.send_message(
         message.from_user.id,
         (
-            f"Текущий шанс комментирования: {display}.\n"
+            f"Текущий шанс реакции (комментирования): {display}.\n"
             "Отправьте значение от 0 до 100 или '-' для сохранения текущего."
         ),
     )
