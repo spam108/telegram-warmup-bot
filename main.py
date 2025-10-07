@@ -192,6 +192,32 @@ SKIP_LOG_EVENT_LABELS = {
 SKIP_SUMMARY_BUTTON_TEXT = "🕒 Сводка пропусков (лог-канал)"
 
 
+def ensure_session_file_permissions(session_file: str) -> None:
+    """Ensure that a session SQLite database file is writable."""
+
+    try:
+        directory = os.path.dirname(session_file)
+        if directory and not os.path.isdir(directory):
+            os.makedirs(directory, exist_ok=True)
+
+        if directory and not os.access(directory, os.W_OK):
+            try:
+                os.chmod(directory, 0o700)
+            except PermissionError:
+                logging.warning("Не удалось изменить права доступа каталога сессий: %s", directory)
+
+        if os.path.exists(session_file):
+            desired_mode = 0o666 if os.name == "nt" else 0o600
+            try:
+                os.chmod(session_file, desired_mode)
+            except PermissionError:
+                logging.warning(
+                    "Не удалось изменить права доступа к файлу сессии: %s", session_file
+                )
+    except Exception:
+        logging.exception("Ошибка при настройке прав доступа для файла сессии: %s", session_file)
+
+
 COMMENT_LOG_RETENTION_DAYS = 2
 COMMENT_LOG_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
 
@@ -1310,6 +1336,9 @@ async def check_account(user_id, phone):
             active_pyrogram_clients.pop(key, None)
             active_client_locks.pop(key, None)
 
+    session_path = f"sessions/{user_id}/{phone}.session"
+    ensure_session_file_permissions(session_path)
+
     client = Client(
         name=f"sessions/{user_id}/{phone}",
         api_id=API_ID,
@@ -1329,7 +1358,6 @@ async def check_account(user_id, phone):
         await asyncio.sleep(1)
         await bot.send_message(user_id, f"Аккаунт удален ошибка: {str(e)}")
 
-        session_path = f'sessions/{user_id}/{phone}.session'
         if os.path.exists(session_path):
             os.remove(session_path)
         await delete_account(user_id, phone)
@@ -2367,6 +2395,9 @@ async def _prepare_regular_channels_prompt(message: Message, state: FSMContext) 
     channels: List[str] = []
     seen_channels: Set[str] = set()
 
+    session_file = os.path.join("sessions", str(message.from_user.id), f"{session}.session")
+    ensure_session_file_permissions(session_file)
+
     app = Client(
         name=f"sessions/{message.from_user.id}/{session}",
         api_id=API_ID,
@@ -2738,6 +2769,8 @@ async def _get_available_quick_reaction_emojis(
             )
             return None
 
+    ensure_session_file_permissions(session_file)
+
     client = Client(
         name=session_name,
         api_id=API_ID,
@@ -3094,6 +3127,9 @@ async def add_channels(message: Message, state: FSMContext) -> None:
     if str(message.text) != '-':
         channels = str(message.text).splitlines()
 
+        session_file = os.path.join("sessions", str(message.from_user.id), f"{session}.session")
+        ensure_session_file_permissions(session_file)
+
         app = Client(
             name=f"sessions/{message.from_user.id}/{session}",
             api_id=API_ID,
@@ -3176,6 +3212,9 @@ async def add_channels(message: Message, state: FSMContext) -> None:
 async def send_comments(userid, session, account_id):
     async with account_semaphore:
         key = make_session_key(userid, session)
+        session_file = os.path.join("sessions", str(userid), f"{session}.session")
+        ensure_session_file_permissions(session_file)
+
         app = Client(
             name=f"sessions/{userid}/{session}",
             api_id=API_ID,
@@ -3326,10 +3365,13 @@ async def join_channel(
                     )
                     await bot.send_message(log_channel, error_message)
                     return False, error_message
+                ensure_session_file_permissions(session_file)
             else:
                 error_message = f"Аккаунт {session_key} - файл сессии не найден: {session_file}"
                 await bot.send_message(log_channel, error_message)
                 return False, error_message
+        else:
+            ensure_session_file_permissions(session_file)
 
         key = make_session_key(user_id, session_key)
 
@@ -3404,6 +3446,8 @@ async def join_channel(
             busy_message = "Аккаунт запускается, попробуйте позже"
             await bot.send_message(log_channel, f"Аккаунт {session_key}: {busy_message}")
             return False, busy_message
+
+        ensure_session_file_permissions(session_file)
 
         client = Client(
             name=session_name,
@@ -3650,6 +3694,9 @@ async def add_number(message: Message, state: FSMContext) -> None:
             await message.answer("Пришлите каналы для прогрева (каждый канал с новой строки). Для отмены отправьте '-'.")
             await state.set_state(startaccount.warmup_channels)
             return
+
+        session_file = os.path.join("sessions", str(message.from_user.id), f"{message.text}.session")
+        ensure_session_file_permissions(session_file)
 
         client = Client(
             name=f"sessions/{message.from_user.id}/{message.text}",
@@ -4255,6 +4302,8 @@ async def get_account_summary(account_id):
     try:
         session_path = account.get('session_path', '')
         if session_path and os.path.exists(session_path):
+            ensure_session_file_permissions(session_path)
+
             app = Client(
                 name=session_path.replace('.session', ''),
                 api_id=API_ID,
