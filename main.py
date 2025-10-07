@@ -228,75 +228,6 @@ COMMENT_LOG_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
 _SQLITE_LOCK_MESSAGES: Tuple[str, ...] = ("database is locked", "db is locked")
 
 
-def _is_sqlite_lock_error(exc: BaseException) -> bool:
-    message = str(exc).lower()
-    return any(marker in message for marker in _SQLITE_LOCK_MESSAGES)
-
-
-def _ensure_session_sqlite_configuration(session_file: str) -> None:
-    """Ensure the session database uses WAL and sensible pragmas."""
-
-    try:
-        with sqlite3.connect(session_file, timeout=30) as conn:
-            try:
-                conn.execute("PRAGMA journal_mode=WAL")
-            except sqlite3.OperationalError as exc:
-                if not _is_sqlite_lock_error(exc):
-                    logging.debug(
-                        "Не удалось установить WAL для %s: %s", session_file, exc
-                    )
-
-            try:
-                conn.execute("PRAGMA synchronous=NORMAL")
-            except sqlite3.OperationalError as exc:
-                if not _is_sqlite_lock_error(exc):
-                    logging.debug(
-                        "Не удалось установить synchronous=NORMAL для %s: %s", session_file, exc
-                    )
-
-            try:
-                conn.execute("PRAGMA locking_mode=NORMAL")
-            except sqlite3.OperationalError as exc:
-                if not _is_sqlite_lock_error(exc):
-                    logging.debug(
-                        "Не удалось установить locking_mode=NORMAL для %s: %s", session_file, exc
-                    )
-
-            try:
-                conn.commit()
-            except sqlite3.Error:
-                # Игнорируем ошибки коммита для pragma-команд
-                pass
-    except sqlite3.OperationalError as exc:
-        if not _is_sqlite_lock_error(exc):
-            logging.debug("Не удалось открыть файл сессии %s для настройки: %s", session_file, exc)
-
-
-def _configure_client_storage(client: Client) -> None:
-    """Apply defensive SQLite pragmas to an active Pyrogram client."""
-
-    storage = getattr(client, "storage", None)
-    conn = getattr(storage, "conn", None)
-    if conn is None:
-        return
-
-    def _apply_pragma(statement: str, description: str) -> None:
-        try:
-            conn.execute(statement)
-        except sqlite3.OperationalError as exc:
-            if not _is_sqlite_lock_error(exc):
-                logging.debug(
-                    "Не удалось применить %s для клиента %s: %s",
-                    description,
-                    getattr(client, "name", "<unknown>"),
-                    exc,
-                )
-
-    _apply_pragma("PRAGMA busy_timeout=30000", "busy_timeout")
-    _apply_pragma("PRAGMA journal_mode=WAL", "journal_mode=WAL")
-    _apply_pragma("PRAGMA synchronous=NORMAL", "synchronous=NORMAL")
-
-
 async def _run_with_sqlite_retries(
     action: Callable[[], Awaitable[Any]],
     *,
@@ -326,12 +257,10 @@ async def _run_with_sqlite_retries(
 
 async def _connect_client_with_retries(client: Client, *, attempts: int = 5, base_delay: float = 0.5) -> None:
     await _run_with_sqlite_retries(client.connect, attempts=attempts, base_delay=base_delay)
-    _configure_client_storage(client)
 
 
 async def _start_client_with_retries(client: Client, *, attempts: int = 5, base_delay: float = 0.5) -> None:
     await _run_with_sqlite_retries(client.start, attempts=attempts, base_delay=base_delay)
-    _configure_client_storage(client)
 
 
 @asynccontextmanager
