@@ -194,7 +194,7 @@ SKIP_SUMMARY_BUTTON_TEXT = "🕒 Сводка пропусков (лог-кан�
 
 
 def ensure_session_file_permissions(session_file: str) -> None:
-    """Ensure that a session SQLite database file is writable."""
+    """Ensure that a session SQLite database file is writable and configured."""
 
     try:
         directory = os.path.dirname(session_file)
@@ -215,6 +215,8 @@ def ensure_session_file_permissions(session_file: str) -> None:
                 logging.warning(
                     "Не удалось изменить права доступа к файлу сессии: %s", session_file
                 )
+
+            _ensure_session_sqlite_configuration(session_file)
     except Exception:
         logging.exception("Ошибка при настройке прав доступа для файла сессии: %s", session_file)
 
