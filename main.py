@@ -5,7 +5,7 @@ import logging
 import shutil
 import sqlite3
 from collections import Counter, defaultdict
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, time, timezone, timedelta
 from typing import Awaitable, Callable, Dict, List, Optional, Set, Any, Union, Tuple
@@ -33,6 +33,7 @@ from db import (
     bulk_update_reaction_settings,
     count_reactions_for_message,
     db_update_warmup_schedule,
+    DatabaseNotInitialized,
     has_successful_comment_log_entry,
     delete_account,
     ensure_account,
@@ -42,6 +43,7 @@ from db import (
     get_account_by_id,
     get_account_by_session,
     get_accounts_for_user,
+    get_telegram_session,
     get_global_statistics,
     get_running_accounts,
     get_warmup_pending,
@@ -57,6 +59,8 @@ from db import (
     set_account_mode,
     set_user_authenticated,
     sync_warmup_channels,
+    upsert_telegram_session,
+    delete_telegram_session,
     update_account_settings,
     update_last_reaction_at,
     update_warmup_settings,
@@ -177,6 +181,7 @@ active_account_ids: Dict[str, int] = {}
 quiet_sessions_notified: Set[str] = set()
 active_pyrogram_clients: Dict[str, Client] = {}
 active_client_locks: Dict[str, asyncio.Lock] = {}
+session_refresh_locks: Dict[str, asyncio.Lock] = {}
 
 _chat_available_reactions_cache: Dict[int, Set[str]] = {}
 
@@ -238,6 +243,130 @@ def _ensure_session_sqlite_configuration(session_file: str) -> None:
             session_file,
             exc,
         )
+
+
+def _decode_session_payload(payload: Optional[bytes]) -> Optional[str]:
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        return payload
+    data = payload
+    if isinstance(payload, memoryview):
+        data = payload.tobytes()
+    if isinstance(data, (bytes, bytearray)):
+        try:
+            return bytes(data).decode("utf-8")
+        except UnicodeDecodeError:
+            logging.warning("Повреждённые данные сессии, выполняем частичное восстановление")
+            return bytes(data).decode("utf-8", errors="ignore")
+    logging.warning("Неизвестный тип данных сессии: %s", type(payload))
+    return None
+
+
+def _resolve_session_file(session_file: str) -> Optional[str]:
+    if os.path.exists(session_file):
+        ensure_session_file_permissions(session_file)
+        return session_file
+
+    session_file_alt = f"{session_file}.session"
+    if os.path.exists(session_file_alt):
+        try:
+            shutil.copy2(session_file_alt, session_file)
+            ensure_session_file_permissions(session_file)
+            return session_file
+        except Exception:
+            logging.exception("Не удалось скопировать резервную сессию %s", session_file_alt)
+            ensure_session_file_permissions(session_file_alt)
+            return session_file_alt
+    return None
+
+
+async def _load_session_string(user_id: int, phone: str, session_file: Optional[str]) -> Optional[str]:
+    try:
+        stored = await get_telegram_session(user_id, phone)
+    except Exception:
+        stored = None
+    decoded = _decode_session_payload(stored)
+    if decoded:
+        return decoded
+
+    if not session_file:
+        return None
+
+    key = make_session_key(user_id, phone)
+    lock = session_refresh_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        try:
+            stored = await get_telegram_session(user_id, phone)
+        except Exception:
+            stored = None
+        decoded = _decode_session_payload(stored)
+        if decoded:
+            return decoded
+
+        resolved = _resolve_session_file(session_file)
+        if not resolved:
+            return None
+
+        temp_client = Client(
+            name=resolved.replace(".session", ""),
+            api_id=API_ID,
+            api_hash=API_HASH,
+        )
+        session_string: Optional[str] = None
+        try:
+            await temp_client.connect()
+            session_string = await temp_client.export_session_string()
+        except Exception:
+            logging.exception("Не удалось конвертировать SQLite-сессию %s в строку", resolved)
+        finally:
+            with suppress(Exception):
+                await temp_client.disconnect()
+
+        if session_string:
+            await upsert_telegram_session(user_id, phone, session_string.encode("utf-8"))
+            return session_string
+
+    return None
+
+
+async def _persist_session_string(user_id: int, phone: str, client: Client) -> None:
+    try:
+        session_string = await client.export_session_string()
+    except Exception:
+        logging.exception("Не удалось экспортировать строку сессии для %s", phone)
+        return
+
+    if session_string:
+        await upsert_telegram_session(user_id, phone, session_string.encode("utf-8"))
+
+
+async def _prepare_client(
+    user_id: int,
+    phone: str,
+    session_file: str,
+) -> Optional[Tuple[Client, bool]]:
+    session_string = await _load_session_string(user_id, phone, session_file)
+    if session_string:
+        client = Client(
+            name=f"session-{user_id}-{phone}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=session_string,
+            in_memory=True,
+        )
+        return client, True
+
+    resolved = _resolve_session_file(session_file)
+    if not resolved:
+        return None
+
+    client = Client(
+        name=resolved.replace(".session", ""),
+        api_id=API_ID,
+        api_hash=API_HASH,
+    )
+    return client, False
 
 
 COMMENT_LOG_RETENTION_DAYS = 2
@@ -347,6 +476,7 @@ async def _client_session(
     attempts: int = 8,
     base_delay: float = 0.5,
     lock_key: Optional[str] = None,
+    on_before_stop: Optional[Callable[[Client], Awaitable[None]]] = None,
 ):
     lock: Optional[asyncio.Lock] = None
     if lock_key is not None:
@@ -372,6 +502,11 @@ async def _client_session(
         yield client
     finally:
         try:
+            if on_before_stop is not None:
+                try:
+                    await on_before_stop(client)
+                except Exception:  # pragma: no cover - defensive logging
+                    logging.exception("Не удалось обновить состояние сессии перед остановкой клиента %s", getattr(client, "name", "<unknown>"))
             if lock is not None:
                 async with lock:
                     await _stop_client_with_retries(
@@ -1536,29 +1671,29 @@ async def check_account(user_id, phone):
                 existing_client = None
 
         session_path = f"sessions/{user_id}/{phone}.session"
-        ensure_session_file_permissions(session_path)
+        prepared = await _prepare_client(user_id, phone, session_path)
+        if not prepared:
+            await bot.send_message(user_id, "Сессия не найдена. Добавьте аккаунт заново.")
+            return False
 
-        client = Client(
-            name=f"sessions/{user_id}/{phone}",
-            api_id=API_ID,
-            api_hash=API_HASH,
-        )
+        client, uses_in_memory = prepared
 
         def _refresh_session(_: int, __: BaseException) -> None:
-            ensure_session_file_permissions(session_path)
+            if not uses_in_memory:
+                ensure_session_file_permissions(session_path)
 
         started = False
 
         try:
             await _start_client_with_retries(
                 client,
-                session_file=session_path,
+                session_file=None if uses_in_memory else session_path,
                 attempts=6,
             )
             started = True
             await _run_with_sqlite_retries(
                 client.get_me,
-                on_retry=_refresh_session,
+                on_retry=_refresh_session if not uses_in_memory else None,
             )
             return True
         except sqlite3.OperationalError as e:
@@ -1575,14 +1710,16 @@ async def check_account(user_id, phone):
                     os.remove(session_path)
                 except OSError:
                     pass
+            await delete_telegram_session(user_id, phone)
             await delete_account(user_id, phone)
             return False
         finally:
             if started:
                 try:
+                    await _persist_session_string(user_id, phone, client)
                     await _stop_client_with_retries(
                         client,
-                        session_file=session_path,
+                        session_file=None if uses_in_memory else session_path,
                         attempts=4,
                     )
                 except sqlite3.OperationalError:
@@ -1622,7 +1759,12 @@ async def main_message(message):
     for account in db_accounts:
         call = account["phone"]
         session_file = os.path.join(user_sessions_dir, f"{call}.session")
-        if not os.path.exists(session_file):
+        try:
+            stored_payload = await get_telegram_session(user_id, call)
+        except DatabaseNotInitialized:
+            stored_payload = None
+        has_session = _decode_session_payload(stored_payload) is not None
+        if not has_session and not os.path.exists(session_file):
             # Проверяем также файл .session.session
             session_file_alt = os.path.join(user_sessions_dir, f"{call}.session.session")
             if not os.path.exists(session_file_alt):
@@ -2628,20 +2770,23 @@ async def _prepare_regular_channels_prompt(message: Message, state: FSMContext) 
     seen_channels: Set[str] = set()
 
     session_file = os.path.join("sessions", str(message.from_user.id), f"{session}.session")
-    ensure_session_file_permissions(session_file)
+    prepared = await _prepare_client(message.from_user.id, session, session_file)
+    if not prepared:
+        await bot.send_message(message.from_user.id, "Сессия не найдена. Авторизуйте аккаунт заново.")
+        await state.clear()
+        await main_message(message)
+        return
 
-    app = Client(
-        name=f"sessions/{message.from_user.id}/{session}",
-        api_id=API_ID,
-        api_hash=API_HASH)
+    app, uses_in_memory = prepared
 
     key = make_session_key(message.from_user.id, str(session))
 
     if await check_account(message.from_user.id, session):
         async with _client_session(
             app,
-            session_file=session_file,
+            session_file=None if uses_in_memory else session_file,
             lock_key=key,
+            on_before_stop=lambda client: _persist_session_string(message.from_user.id, session, client),
         ):
             async for dialog in app.get_dialogs():
                 chat = dialog.chat
@@ -2990,36 +3135,21 @@ async def _get_available_quick_reaction_emojis(
     session_name = os.path.join(session_dir, session)
     session_file = f"{session_name}.session"
 
-    if not os.path.exists(session_file):
-        alt_session_file = f"{session_file}.session"
-        if os.path.exists(alt_session_file):
-            try:
-                shutil.copy2(alt_session_file, session_file)
-            except Exception:
-                logging.exception(
-                    "Не удалось подготовить файл сессии для получения доступных реакций: %s",
-                    alt_session_file,
-                )
-                return None
-        else:
-            logging.warning(
-                "Session file %s not found while fetching available reactions", session_file
-            )
-            return None
+    prepared = await _prepare_client(user_id, session, session_file)
+    if not prepared:
+        logging.warning(
+            "Session %s not found while fetching available reactions", session_file
+        )
+        return None
 
-    ensure_session_file_permissions(session_file)
-
-    client = Client(
-        name=session_name,
-        api_id=API_ID,
-        api_hash=API_HASH,
-    )
+    client, uses_in_memory = prepared
 
     try:
         async with _client_session(
             client,
-            session_file=session_file,
+            session_file=None if uses_in_memory else session_file,
             lock_key=key,
+            on_before_stop=lambda c: _persist_session_string(user_id, session, c),
         ):
             return await _query(client)
     except Exception:
@@ -3370,19 +3500,22 @@ async def add_channels(message: Message, state: FSMContext) -> None:
         channels = str(message.text).splitlines()
 
         session_file = os.path.join("sessions", str(message.from_user.id), f"{session}.session")
-        ensure_session_file_permissions(session_file)
+        prepared = await _prepare_client(message.from_user.id, session, session_file)
+        if not prepared:
+            await bot.send_message(message.from_user.id, "Сессия не найдена. Авторизуйте аккаунт заново.")
+            await state.clear()
+            await main_message(message)
+            return
 
         key = make_session_key(message.from_user.id, str(session))
 
-        app = Client(
-            name=f"sessions/{message.from_user.id}/{session}",
-            api_id=API_ID,
-            api_hash=API_HASH)
+        app, uses_in_memory = prepared
         if await check_account(message.from_user.id, session):
             async with _client_session(
                 app,
-                session_file=session_file,
+                session_file=None if uses_in_memory else session_file,
                 lock_key=key,
+                on_before_stop=lambda client: _persist_session_string(message.from_user.id, session, client),
             ):
                 for chl in channels:
                     await asyncio.sleep(random.uniform(20, 30))
@@ -3461,12 +3594,12 @@ async def send_comments(userid, session, account_id):
     async with account_semaphore:
         key = make_session_key(userid, session)
         session_file = os.path.join("sessions", str(userid), f"{session}.session")
-        ensure_session_file_permissions(session_file)
+        prepared = await _prepare_client(userid, session, session_file)
+        if not prepared:
+            logging.warning("Сессия %s не найдена при запуске комментариев", session)
+            return
 
-        app = Client(
-            name=f"sessions/{userid}/{session}",
-            api_id=API_ID,
-            api_hash=API_HASH)
+        app, uses_in_memory = prepared
         active_pyrogram_clients[key] = app
         lock = active_client_locks.setdefault(key, asyncio.Lock())
 
@@ -3623,26 +3756,6 @@ async def join_channel(
         session_name = os.path.join(session_dir, session_key)
         session_file = f"{session_name}.session"
 
-        if not os.path.exists(session_file):
-            session_file_alt = f"{session_file}.session"
-            if os.path.exists(session_file_alt):
-                try:
-                    shutil.copy2(session_file_alt, session_file)
-                except Exception as copy_error:
-                    error_message = (
-                        f"Аккаунт {session_key} - не удалось подготовить файл сессии: "
-                        f"{copy_error}"
-                    )
-                    await bot.send_message(log_channel, error_message)
-                    return False, error_message
-                ensure_session_file_permissions(session_file)
-            else:
-                error_message = f"Аккаунт {session_key} - файл сессии не найден: {session_file}"
-                await bot.send_message(log_channel, error_message)
-                return False, error_message
-        else:
-            ensure_session_file_permissions(session_file)
-
         key = make_session_key(user_id, session_key)
 
         async def _join_with_client(client_obj: Client) -> Tuple[bool, Optional[str]]:
@@ -3717,18 +3830,19 @@ async def join_channel(
             await bot.send_message(log_channel, f"Аккаунт {session_key}: {busy_message}")
             return False, busy_message
 
-        ensure_session_file_permissions(session_file)
+        prepared = await _prepare_client(user_id, session_key, session_file)
+        if not prepared:
+            error_message = f"Аккаунт {session_key} - сессия отсутствует. Авторизуйте аккаунт заново."
+            await bot.send_message(log_channel, error_message)
+            return False, error_message
 
-        client = Client(
-            name=session_name,
-            api_id=API_ID,
-            api_hash=API_HASH,
-        )
+        client, uses_in_memory = prepared
 
         async with _client_session(
             client,
-            session_file=session_file,
+            session_file=None if uses_in_memory else session_file,
             lock_key=key,
+            on_before_stop=lambda c: _persist_session_string(user_id, session_key, c),
         ):
             return await _join_with_client(client)
 
@@ -4016,12 +4130,22 @@ async def add_code(message: Message, state: FSMContext) -> None:
             await message.answer("✅ Успешная авторизация!")
             session_path = f'sessions/{message.from_user.id}/{number}.session'
             await ensure_account(message.from_user.id, number, session_path)
+            try:
+                session_string = await client.export_session_string()
+            except Exception:
+                logging.exception("Не удалось экспортировать строку сессии для %s", number)
+                session_string = None
+            if session_string:
+                await upsert_telegram_session(message.from_user.id, number, session_string.encode("utf-8"))
         except Exception as e:
             await message.answer(f"Ошибка: {str(e)}")
             await client.disconnect()
             await asyncio.sleep(1)
             os.remove(f'sessions/{message.from_user.id}/{number}.session')
+            await delete_telegram_session(message.from_user.id, number)
         finally:
+            with suppress(Exception):
+                await client.disconnect()
             await main_message(message)
 
     await state.clear()
@@ -4575,29 +4699,23 @@ async def get_account_summary(account_id):
     real_channels = []
     try:
         session_path = account.get('session_path', '')
-        if session_path and os.path.exists(session_path):
-            ensure_session_file_permissions(session_path)
-
-            user_id_value = account.get("user_id")
-            phone_value = account.get("phone")
-            lock_key = None
-            if user_id_value is not None and phone_value:
+        user_id_value = account.get("user_id")
+        phone_value = account.get("phone")
+        if session_path and user_id_value is not None and phone_value:
+            prepared = await _prepare_client(int(user_id_value), str(phone_value), session_path)
+            if prepared:
+                app, uses_in_memory = prepared
                 lock_key = make_session_key(int(user_id_value), str(phone_value))
-
-            app = Client(
-                name=session_path.replace('.session', ''),
-                api_id=API_ID,
-                api_hash=API_HASH
-            )
-            async with _client_session(
-                app,
-                session_file=session_path,
-                lock_key=lock_key,
-            ):
-                async for dialog in app.get_dialogs():
-                    chat = dialog.chat
-                    if str(chat.type) == "ChatType.CHANNEL" and chat.username:
-                        real_channels.append(f"@{chat.username}")
+                async with _client_session(
+                    app,
+                    session_file=None if uses_in_memory else session_path,
+                    lock_key=lock_key,
+                    on_before_stop=lambda c: _persist_session_string(int(user_id_value), str(phone_value), c),
+                ):
+                    async for dialog in app.get_dialogs():
+                        chat = dialog.chat
+                        if str(chat.type) == "ChatType.CHANNEL" and chat.username:
+                            real_channels.append(f"@{chat.username}")
     except Exception as e:
         print(f"Ошибка при получении подписок для аккаунта {account_id}: {e}")
         # Если не удалось получить реальные подписки, используем из БД
