@@ -2,15 +2,26 @@ import os
 import json
 import asyncio
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import aiosqlite
+import asyncpg
 
 
 _CONN: Optional[aiosqlite.Connection] = None
+_POOL: Optional[asyncpg.pool.Pool] = None
+_BACKEND: Optional[str] = None
 _UNSET = object()
+
+
+def _is_sqlite() -> bool:
+    return _BACKEND == "sqlite"
+
+
+def _is_postgres() -> bool:
+    return _BACKEND == "postgres"
 
 
 class DatabaseNotInitialized(RuntimeError):
@@ -32,7 +43,7 @@ async def _retry_db_operation(func, *args, max_retries: int = 3, delay: int = 1,
 
 
 async def _require_conn() -> aiosqlite.Connection:
-    if _CONN is None:
+    if not _is_sqlite() or _CONN is None:
         raise DatabaseNotInitialized("Database connection is not initialized. Call init_db() first.")
     return _CONN
 
@@ -55,26 +66,149 @@ def _serialize_list(value: Optional[Iterable[str]]) -> Optional[str]:
     return json.dumps(list(value))
 
 
-def _require_pool():  # pragma: no cover - backward compatibility stub
-    raise RuntimeError("Connection pool is not available when using SQLite backend.")
+def _require_pool() -> asyncpg.pool.Pool:
+    if not _is_postgres() or _POOL is None:
+        raise DatabaseNotInitialized("PostgreSQL connection pool is not initialised. Call init_db() first.")
+    return _POOL
+
+
+def _as_tuple(params: Iterable[Any]) -> Tuple[Any, ...]:
+    if isinstance(params, tuple):
+        return params
+    if isinstance(params, list):
+        return tuple(params)
+    return tuple(params)
+
+
+def _convert_placeholders(query: str) -> str:
+    if not _is_postgres():
+        return query
+
+    result: List[str] = []
+    param_index = 1
+    in_single = False
+    in_double = False
+    i = 0
+    length = len(query)
+
+    while i < length:
+        ch = query[i]
+        if ch == "'" and not in_double:
+            result.append(ch)
+            if in_single and i + 1 < length and query[i + 1] == "'":
+                result.append("'")
+                i += 1
+            else:
+                in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+            result.append(ch)
+        elif ch == "?" and not in_single and not in_double:
+            result.append(f"${param_index}")
+            param_index += 1
+        else:
+            result.append(ch)
+        i += 1
+
+    return "".join(result)
+
+
+def _prepare_query(query: str, params: Sequence[Any]) -> Tuple[str, Tuple[Any, ...]]:
+    return _convert_placeholders(query), tuple(params)
+
+
+async def _execute(query: str, params: Sequence[Any] = ()) -> None:
+    params_tuple = _as_tuple(params)
+
+    if _is_sqlite():
+        conn = await _require_conn()
+        await conn.execute(query, params_tuple)
+        return
+
+    pool = _require_pool()
+    prepared_query, prepared_params = _prepare_query(query, params_tuple)
+    async with pool.acquire() as connection:
+        await connection.execute(prepared_query, *prepared_params)
+
+
+async def _execute_rowcount(query: str, params: Sequence[Any] = ()) -> int:
+    params_tuple = _as_tuple(params)
+
+    if _is_sqlite():
+        conn = await _require_conn()
+        cursor = await conn.execute(query, params_tuple)
+        rowcount = cursor.rowcount if cursor.rowcount is not None else 0
+        await cursor.close()
+        return int(rowcount)
+
+    pool = _require_pool()
+    prepared_query, prepared_params = _prepare_query(query, params_tuple)
+    async with pool.acquire() as connection:
+        result = await connection.execute(prepared_query, *prepared_params)
+    try:
+        return int(str(result).split()[-1])
+    except (ValueError, IndexError):  # pragma: no cover - defensive branch
+        return 0
+
+
+async def _fetchone(query: str, params: Sequence[Any] = ()):
+    params_tuple = _as_tuple(params)
+
+    if _is_sqlite():
+        conn = await _require_conn()
+        async with conn.execute(query, params_tuple) as cursor:
+            return await cursor.fetchone()
+
+    pool = _require_pool()
+    prepared_query, prepared_params = _prepare_query(query, params_tuple)
+    async with pool.acquire() as connection:
+        return await connection.fetchrow(prepared_query, *prepared_params)
+
+
+async def _fetchall(query: str, params: Sequence[Any] = ()):
+    params_tuple = _as_tuple(params)
+
+    if _is_sqlite():
+        conn = await _require_conn()
+        async with conn.execute(query, params_tuple) as cursor:
+            return await cursor.fetchall()
+
+    pool = _require_pool()
+    prepared_query, prepared_params = _prepare_query(query, params_tuple)
+    async with pool.acquire() as connection:
+        return await connection.fetch(prepared_query, *prepared_params)
+
+
+async def _commit() -> None:
+    if _is_sqlite():
+        conn = await _require_conn()
+        await conn.commit()
 
 
 async def init_db() -> None:
-    """Initialise sqlite connection and ensure schema exists."""
+    """Initialise database connection and ensure schema exists."""
 
-    global _CONN
+    global _CONN, _POOL, _BACKEND
 
-    if _CONN is not None:
+    if _BACKEND is not None:
         return
 
     dsn = os.getenv("DATABASE_URL")
     if not dsn:
         raise RuntimeError("DATABASE_URL environment variable is not set")
 
+    if dsn.startswith(("postgres://", "postgresql://")):
+        _BACKEND = "postgres"
+        _POOL = await asyncpg.create_pool(dsn)
+        await _init_postgres_schema()
+        return
+
     if dsn.startswith("sqlite:///"):
         db_path = dsn[len("sqlite:///") :]
     else:
         db_path = dsn
+
+    _BACKEND = "sqlite"
 
     if db_path != ":memory:":
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -91,6 +225,7 @@ async def init_db() -> None:
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA busy_timeout = 5000")
 
+async def _init_sqlite_schema(conn: aiosqlite.Connection) -> None:
     await conn.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -215,14 +350,143 @@ async def init_db() -> None:
     await _ensure_column("accounts", "reactions_enabled", "INTEGER NOT NULL DEFAULT 1")
 
     await conn.commit()
-    _CONN = conn
+
+
+async def _init_postgres_schema() -> None:
+    pool = _require_pool()
+
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                is_authenticated BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS accounts (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                phone TEXT NOT NULL,
+                session_path TEXT NOT NULL,
+                chance INTEGER,
+                system_prompt TEXT,
+                sleep_min INTEGER,
+                sleep_max INTEGER,
+                reaction_emojis TEXT,
+                reaction_chance INTEGER,
+                reaction_discussion_chance INTEGER,
+                discussion_reply_prompt TEXT,
+                discussion_reply_chance INTEGER,
+                reaction_sleep_min INTEGER,
+                reaction_sleep_max INTEGER,
+                channels TEXT,
+                warmup_channels TEXT,
+                status TEXT NOT NULL DEFAULT 'stopped',
+                last_started_at TIMESTAMPTZ,
+                last_stopped_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                mode TEXT NOT NULL DEFAULT 'warmup',
+                warmup_end_at TIMESTAMPTZ DEFAULT (CURRENT_TIMESTAMP + INTERVAL '7 days'),
+                warmup_joined_today INTEGER NOT NULL DEFAULT 0,
+                warmup_last_join DATE,
+                warmup_last_join_at TIMESTAMPTZ,
+                warmup_next_join_at TIMESTAMPTZ,
+                reactions_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                UNIQUE (user_id, phone),
+                CHECK (mode IN ('warmup', 'standard'))
+            )
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS warmup_channels (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                channel TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at TIMESTAMPTZ,
+                joined_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (account_id, channel),
+                CHECK (status IN ('pending', 'joined', 'error'))
+            )
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS warmup_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                channels_per_day INTEGER NOT NULL,
+                delay_minutes INTEGER NOT NULL,
+                join_start_hour INTEGER NOT NULL,
+                join_start_minute INTEGER NOT NULL,
+                join_end_hour INTEGER NOT NULL,
+                join_end_minute INTEGER NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_warmup_channels_pending
+            ON warmup_channels (account_id, status, position)
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS comment_logs (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                channel TEXT,
+                message_id BIGINT,
+                status TEXT NOT NULL,
+                error TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        await connection.execute(
+            """
+            ALTER TABLE accounts
+            ADD COLUMN IF NOT EXISTS reaction_emojis TEXT,
+            ADD COLUMN IF NOT EXISTS reaction_chance INTEGER,
+            ADD COLUMN IF NOT EXISTS reaction_discussion_chance INTEGER,
+            ADD COLUMN IF NOT EXISTS discussion_reply_prompt TEXT,
+            ADD COLUMN IF NOT EXISTS discussion_reply_chance INTEGER,
+            ADD COLUMN IF NOT EXISTS reaction_sleep_min INTEGER,
+            ADD COLUMN IF NOT EXISTS reaction_sleep_max INTEGER,
+            ADD COLUMN IF NOT EXISTS reaction_limit_per_message INTEGER,
+            ADD COLUMN IF NOT EXISTS last_reaction_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS reactions_enabled BOOLEAN NOT NULL DEFAULT TRUE
+            """
+        )
 
 
 async def close_db() -> None:
-    global _CONN
+    global _CONN, _POOL, _BACKEND
     if _CONN is not None:
         await _CONN.close()
         _CONN = None
+    if _POOL is not None:
+        await _POOL.close()
+        _POOL = None
+    _BACKEND = None
 
 
 async def ensure_warmup_settings(
@@ -236,8 +500,7 @@ async def ensure_warmup_settings(
 ) -> None:
     """Ensure that a single warmup settings row exists in the database."""
 
-    conn = await _require_conn()
-    await conn.execute(
+    await _execute(
         """
         INSERT INTO warmup_settings (
             id,
@@ -260,14 +523,13 @@ async def ensure_warmup_settings(
             join_end_minute,
         ),
     )
-    await conn.commit()
+    await _commit()
 
 
 async def get_warmup_settings() -> Dict[str, int]:
     """Fetch the warmup settings row."""
 
-    conn = await _require_conn()
-    async with conn.execute(
+    row = await _fetchone(
         """
         SELECT channels_per_day,
                delay_minutes,
@@ -278,8 +540,7 @@ async def get_warmup_settings() -> Dict[str, int]:
         FROM warmup_settings
         WHERE id = 1
         """
-    ) as cursor:
-        row = await cursor.fetchone()
+    )
 
     if not row:
         raise RuntimeError("Warmup settings are not initialised")
@@ -339,14 +600,12 @@ async def update_warmup_settings(
         WHERE id = ?
     """
 
-    conn = await _require_conn()
-    await conn.execute(query, tuple(params))
-    await conn.commit()
+    await _execute(query, tuple(params))
+    await _commit()
 
 
 async def ensure_user(user_id: int) -> None:
-    conn = await _require_conn()
-    await conn.execute(
+    await _execute(
         """
         INSERT INTO users (user_id)
         VALUES (?)
@@ -354,30 +613,24 @@ async def ensure_user(user_id: int) -> None:
         """,
         (user_id,),
     )
-    await conn.commit()
+    await _commit()
 
 
 async def set_user_authenticated(user_id: int, value: bool) -> None:
-    conn = await _require_conn()
-    await conn.execute(
+    await _execute(
         "UPDATE users SET is_authenticated = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
         (1 if value else 0, user_id),
     )
-    await conn.commit()
+    await _commit()
 
 
 async def is_user_authenticated(user_id: int) -> bool:
-    conn = await _require_conn()
-    async with conn.execute(
-        "SELECT is_authenticated FROM users WHERE user_id = ?", (user_id,)
-    ) as cursor:
-        row = await cursor.fetchone()
+    row = await _fetchone("SELECT is_authenticated FROM users WHERE user_id = ?", (user_id,))
     return bool(row["is_authenticated"]) if row else False
 
 
 async def ensure_account(user_id: int, phone: str, session_path: str) -> Dict[str, Any]:
-    conn = await _require_conn()
-    await conn.execute(
+    await _execute(
         """
         INSERT INTO accounts (user_id, phone, session_path)
         VALUES (?, ?, ?)
@@ -387,7 +640,7 @@ async def ensure_account(user_id: int, phone: str, session_path: str) -> Dict[st
         """,
         (user_id, phone, session_path),
     )
-    await conn.commit()
+    await _commit()
     account = await get_account_by_session(user_id, phone)
     if account is None:  # pragma: no cover - defensive branch
         raise RuntimeError("Failed to create or update account")
@@ -395,13 +648,11 @@ async def ensure_account(user_id: int, phone: str, session_path: str) -> Dict[st
 
 
 async def _fetch_accounts(query: str, params: Iterable[Any]) -> List[Dict[str, Any]]:
-    conn = await _require_conn()
-    async with conn.execute(query, tuple(params)) as cursor:
-        rows = await cursor.fetchall()
+    rows = await _fetchall(query, tuple(params))
     return [_convert_account_row(row) for row in rows]
 
 
-def _convert_account_row(row: aiosqlite.Row) -> Dict[str, Any]:
+def _convert_account_row(row: Any) -> Dict[str, Any]:
     data = dict(row)
     data["channels"] = _deserialize_list(data.get("channels"))
     data["warmup_channels"] = _deserialize_list(data.get("warmup_channels"))
@@ -420,28 +671,23 @@ async def get_accounts_for_user(user_id: int) -> List[Dict[str, Any]]:
 
 
 async def get_account_by_session(user_id: int, phone: str) -> Optional[Dict[str, Any]]:
-    conn = await _require_conn()
-    async with conn.execute(
+    row = await _fetchone(
         "SELECT * FROM accounts WHERE user_id = ? AND phone = ?",
         (user_id, phone),
-    ) as cursor:
-        row = await cursor.fetchone()
+    )
     return _convert_account_row(row) if row else None
 
 
 async def get_account_by_id(account_id: int) -> Optional[Dict[str, Any]]:
-    conn = await _require_conn()
-    async with conn.execute(
+    row = await _fetchone(
         "SELECT * FROM accounts WHERE id = ?",
         (account_id,),
-    ) as cursor:
-        row = await cursor.fetchone()
+    )
     return _convert_account_row(row) if row else None
 
 
 async def get_warmup_queue_stats(account_id: int) -> Dict[str, int]:
-    conn = await _require_conn()
-    async with conn.execute(
+    row = await _fetchone(
         """
         SELECT
             SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
@@ -451,8 +697,7 @@ async def get_warmup_queue_stats(account_id: int) -> Dict[str, int]:
         WHERE account_id = ?
         """,
         (account_id,),
-    ) as cursor:
-        row = await cursor.fetchone()
+    )
     if not row:
         return {"pending": 0, "joined": 0, "error": 0}
     return {
@@ -540,7 +785,10 @@ async def update_account_settings(
         if reactions_enabled is None:
             values.append(None)
         else:
-            values.append(1 if reactions_enabled else 0)
+            if _is_postgres():
+                values.append(bool(reactions_enabled))
+            else:
+                values.append(1 if reactions_enabled else 0)
 
     if not updates:
         print("DEBUG: No updates to perform")
@@ -554,9 +802,8 @@ async def update_account_settings(
         WHERE id = ?
     """
 
-    conn = await _require_conn()
-    await conn.execute(query, tuple(values))
-    await conn.commit()
+    await _execute(query, tuple(values))
+    await _commit()
     print(f"DEBUG: SQL update completed successfully for account_id={account_id}")
 
 
@@ -605,14 +852,16 @@ async def bulk_update_reaction_settings(
         if reactions_enabled is None:
             values.append(None)
         else:
-            values.append(1 if reactions_enabled else 0)
+            if _is_postgres():
+                values.append(bool(reactions_enabled))
+            else:
+                values.append(1 if reactions_enabled else 0)
 
     if not updates:
         return
 
     updates.append("updated_at = CURRENT_TIMESTAMP")
 
-    conn = await _require_conn()
     values.append(user_id)
     query = f"""
         UPDATE accounts
@@ -620,14 +869,13 @@ async def bulk_update_reaction_settings(
         WHERE user_id = ?
     """
 
-    await conn.execute(query, tuple(values))
-    await conn.commit()
+    await _execute(query, tuple(values))
+    await _commit()
 
 
 async def update_last_reaction_at(account_id: int, timestamp: Optional[datetime]) -> None:
-    conn = await _require_conn()
     value = timestamp.isoformat() if timestamp is not None else None
-    await conn.execute(
+    await _execute(
         """
         UPDATE accounts
         SET last_reaction_at = ?, updated_at = CURRENT_TIMESTAMP
@@ -635,23 +883,23 @@ async def update_last_reaction_at(account_id: int, timestamp: Optional[datetime]
         """,
         (value, account_id),
     )
-    await conn.commit()
+    await _commit()
 
 
 async def set_account_mode(account_id: int, mode: str, warmup_days: Optional[int] = None) -> None:
-    conn = await _require_conn()
     updates: List[str] = ["mode = ?"]
     params: List[Any] = [mode]
 
     if warmup_days is not None:
-        updates.append("warmup_end_at = DATETIME('now', ?)")
-        params.append(f"+{warmup_days} days")
+        target = datetime.utcnow() + timedelta(days=warmup_days)
+        updates.append("warmup_end_at = ?")
+        params.append(target.isoformat())
 
     if mode == "warmup":
         updates.extend(
             [
                 "warmup_joined_today = 0",
-                "warmup_last_join = NULL",
+                "warmup_last_join = CURRENT_DATE",
                 "warmup_last_join_at = NULL",
                 "warmup_next_join_at = NULL",
             ]
@@ -667,21 +915,19 @@ async def set_account_mode(account_id: int, mode: str, warmup_days: Optional[int
         WHERE id = ?
     """
 
-    await conn.execute(query, tuple(params))
-    await conn.commit()
+    await _execute(query, tuple(params))
+    await _commit()
 
 
 async def sync_warmup_channels(account_id: int, channels: List[str]) -> None:
-    conn = await _require_conn()
-
     seen: set[str] = set()
     unique_channels = [x for x in channels if not (x in seen or seen.add(x))]
 
-    await conn.execute("DELETE FROM warmup_channels WHERE account_id = ?", (account_id,))
+    await _execute("DELETE FROM warmup_channels WHERE account_id = ?", (account_id,))
 
     for idx, channel in enumerate(unique_channels, start=1):
         try:
-            await conn.execute(
+            await _execute(
                 """
                 INSERT INTO warmup_channels (account_id, channel, position)
                 VALUES (?, ?, ?)
@@ -691,8 +937,10 @@ async def sync_warmup_channels(account_id: int, channels: List[str]) -> None:
         except sqlite3.IntegrityError as exc:  # pragma: no cover - defensive branch
             if "unique" not in str(exc).lower():
                 raise
+        except asyncpg.UniqueViolationError:  # pragma: no cover - PostgreSQL duplicate guard
+            continue
 
-    await conn.execute(
+    await _execute(
         """
         UPDATE accounts
         SET warmup_channels = ?, updated_at = CURRENT_TIMESTAMP
@@ -701,14 +949,13 @@ async def sync_warmup_channels(account_id: int, channels: List[str]) -> None:
         (_serialize_list(unique_channels), account_id),
     )
 
-    await conn.commit()
+    await _commit()
 
 
 async def get_warmup_pending(
     account_id: int, *, limit: int = 15, reset_if_empty: bool = False
 ) -> List[Dict[str, Any]]:
-    conn = await _require_conn()
-    async with conn.execute(
+    records = await _fetchall(
         """
         SELECT *
         FROM warmup_channels
@@ -717,8 +964,7 @@ async def get_warmup_pending(
         LIMIT ?
         """,
         (account_id, limit),
-    ) as cursor:
-        records = await cursor.fetchall()
+    )
 
     if (not records) and reset_if_empty:
         account = await get_account_by_id(account_id)
@@ -728,7 +974,7 @@ async def get_warmup_pending(
             queue = [chl for chl in base_channels if chl not in active_channels]
             if queue:
                 await sync_warmup_channels(account_id, queue)
-                async with conn.execute(
+                records = await _fetchall(
                     """
                     SELECT *
                     FROM warmup_channels
@@ -737,15 +983,13 @@ async def get_warmup_pending(
                     LIMIT ?
                     """,
                     (account_id, limit),
-                ) as cursor:
-                    records = await cursor.fetchall()
+                )
 
     return [dict(record) for record in records]
 
 
 async def mark_warmup_channel_joined(account_id: int, channel: str) -> None:
-    conn = await _require_conn()
-    await conn.execute(
+    await _execute(
         """
         UPDATE warmup_channels
         SET status = 'joined',
@@ -755,12 +999,11 @@ async def mark_warmup_channel_joined(account_id: int, channel: str) -> None:
         """,
         (account_id, channel),
     )
-    await conn.commit()
+    await _commit()
 
 
 async def record_warmup_channel_error(account_id: int, channel: str, error: str) -> None:
-    conn = await _require_conn()
-    await conn.execute(
+    await _execute(
         """
         UPDATE warmup_channels
         SET status = 'error',
@@ -772,22 +1015,21 @@ async def record_warmup_channel_error(account_id: int, channel: str, error: str)
         """,
         (error, account_id, channel),
     )
-    await conn.commit()
+    await _commit()
 
 
 async def reset_warmup_daily_state(account_id: int) -> None:
-    conn = await _require_conn()
-    await conn.execute(
+    await _execute(
         """
         UPDATE accounts
         SET warmup_joined_today = 0,
-            warmup_last_join = DATE('now'),
+            warmup_last_join = CURRENT_DATE,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
         (account_id,),
     )
-    await conn.commit()
+    await _commit()
 
 
 async def db_update_warmup_schedule(
@@ -820,45 +1062,40 @@ async def db_update_warmup_schedule(
         WHERE id = ?
     """
 
-    conn = await _require_conn()
-    await conn.execute(query, tuple(params))
-    await conn.commit()
+    await _execute(query, tuple(params))
+    await _commit()
 
 
 async def increment_warmup_joined(account_id: int) -> None:
-    conn = await _require_conn()
-    await conn.execute(
+    await _execute(
         """
         UPDATE accounts
         SET warmup_joined_today = warmup_joined_today + 1,
-            warmup_last_join = DATE('now'),
+            warmup_last_join = CURRENT_DATE,
             warmup_last_join_at = CURRENT_TIMESTAMP,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
         (account_id,),
     )
-    await conn.commit()
+    await _commit()
 
 
 async def get_warmup_stats(account_id: int) -> Optional[Dict[str, Any]]:
-    conn = await _require_conn()
-    async with conn.execute(
+    row = await _fetchone(
         """
         SELECT warmup_joined_today, warmup_last_join, warmup_end_at, mode
         FROM accounts
         WHERE id = ?
         """,
         (account_id,),
-    ) as cursor:
-        row = await cursor.fetchone()
+    )
     return dict(row) if row else None
 
 
 async def mark_account_running(account_id: int) -> None:
     async def _execute_update() -> None:
-        conn = await _require_conn()
-        await conn.execute(
+        await _execute(
             """
             UPDATE accounts
             SET status = 'running',
@@ -868,15 +1105,17 @@ async def mark_account_running(account_id: int) -> None:
             """,
             (account_id,),
         )
-        await conn.commit()
+        await _commit()
 
-    await _retry_db_operation(_execute_update, max_retries=5)
+    if _is_sqlite():
+        await _retry_db_operation(_execute_update, max_retries=5)
+    else:
+        await _execute_update()
 
 
 async def mark_account_stopped(account_id: int) -> None:
     async def _execute_update() -> None:
-        conn = await _require_conn()
-        await conn.execute(
+        await _execute(
             """
             UPDATE accounts
             SET status = 'stopped',
@@ -886,18 +1125,20 @@ async def mark_account_stopped(account_id: int) -> None:
             """,
             (account_id,),
         )
-        await conn.commit()
+        await _commit()
 
-    await _retry_db_operation(_execute_update, max_retries=5)
+    if _is_sqlite():
+        await _retry_db_operation(_execute_update, max_retries=5)
+    else:
+        await _execute_update()
 
 
 async def delete_account(user_id: int, phone: str) -> None:
-    conn = await _require_conn()
-    await conn.execute(
+    await _execute(
         "DELETE FROM accounts WHERE user_id = ? AND phone = ?",
         (user_id, phone),
     )
-    await conn.commit()
+    await _commit()
 
 
 async def get_running_accounts() -> List[Dict[str, Any]]:
@@ -923,30 +1164,30 @@ async def add_comment_log(
     error: Optional[str] = None,
 ) -> None:
     async def _execute_log() -> None:
-        conn = await _require_conn()
-        await conn.execute(
+        await _execute(
             """
             INSERT INTO comment_logs (account_id, channel, message_id, status, error)
             VALUES (?, ?, ?, ?, ?)
             """,
             (account_id, channel, message_id, status, error),
         )
-        await conn.commit()
+        await _commit()
 
-    await _retry_db_operation(_execute_log)
+    if _is_sqlite():
+        await _retry_db_operation(_execute_log)
+    else:
+        await _execute_log()
 
 
 async def count_reactions_for_message(channel: str, message_id: int) -> int:
-    conn = await _require_conn()
-    async with conn.execute(
+    row = await _fetchone(
         """
         SELECT COUNT(*) AS reaction_count
         FROM comment_logs
         WHERE status = 'reaction_success' AND channel = ? AND message_id = ?
         """,
         (channel, message_id),
-    ) as cursor:
-        row = await cursor.fetchone()
+    )
     if not row:
         return 0
     return int(row["reaction_count"] or 0)
@@ -962,8 +1203,7 @@ async def has_successful_comment_log_entry(
     if channel is None or message_id is None:
         return False
 
-    conn = await _require_conn()
-    async with conn.execute(
+    row = await _fetchone(
         """
         SELECT 1
         FROM comment_logs
@@ -974,8 +1214,7 @@ async def has_successful_comment_log_entry(
         LIMIT 1
         """,
         (account_id, channel, message_id),
-    ) as cursor:
-        row = await cursor.fetchone()
+    )
 
     return row is not None
 
@@ -983,32 +1222,27 @@ async def has_successful_comment_log_entry(
 async def cleanup_comment_logs(retention_days: int = 2) -> int:
     """Remove comment log entries older than the specified number of days."""
 
-    conn = await _require_conn()
-    cursor = await conn.execute(
-        "DELETE FROM comment_logs WHERE created_at < datetime('now', ?)",
-        (f"-{retention_days} day",),
-    )
-    await conn.commit()
-    deleted = cursor.rowcount if cursor.rowcount is not None else 0
-    await cursor.close()
-    return max(deleted, 0)
+    if _is_sqlite():
+        query = "DELETE FROM comment_logs WHERE created_at < datetime('now', ?)"
+        params: Tuple[Any, ...] = (f"-{retention_days} day",)
+    else:
+        query = "DELETE FROM comment_logs WHERE created_at < (CURRENT_TIMESTAMP - ($1 * INTERVAL '1 day'))"
+        params = (retention_days,)
+
+    deleted = await _execute_rowcount(query, params)
+    await _commit()
+    return max(int(deleted), 0)
 
 
 async def get_global_statistics() -> Dict[str, Any]:
     """Aggregate high-level metrics for accounts, comments and warmup channels."""
 
-    conn = await _require_conn()
-
     async def _fetch_counts(query: str, params: Iterable[Any] = ()) -> Dict[str, int]:
-        async with conn.execute(query, tuple(params)) as cursor:
-            rows = await cursor.fetchall()
+        rows = await _fetchall(query, tuple(params))
         return {str(row[0]): int(row[1] or 0) for row in rows}
 
-    accounts_total = 0
-    async with conn.execute("SELECT COUNT(*) FROM accounts") as cursor:
-        row = await cursor.fetchone()
-        if row:
-            accounts_total = int(row[0] or 0)
+    total_row = await _fetchone("SELECT COUNT(*) FROM accounts")
+    accounts_total = int(total_row[0] or 0) if total_row else 0
 
     accounts_by_status = await _fetch_counts(
         "SELECT status, COUNT(*) FROM accounts GROUP BY status"
@@ -1020,14 +1254,26 @@ async def get_global_statistics() -> Dict[str, Any]:
         "SELECT mode, COUNT(*) FROM accounts WHERE status = 'running' GROUP BY mode"
     )
 
-    comment_counts = await _fetch_counts(
-        """
-        SELECT status, COUNT(*)
-        FROM comment_logs
-        WHERE created_at >= datetime('now', '-1 day')
-        GROUP BY status
-        """
-    )
+    if _is_sqlite():
+        comment_counts_query = (
+            """
+            SELECT status, COUNT(*)
+            FROM comment_logs
+            WHERE created_at >= datetime('now', '-1 day')
+            GROUP BY status
+            """
+        )
+    else:
+        comment_counts_query = (
+            """
+            SELECT status, COUNT(*)
+            FROM comment_logs
+            WHERE created_at >= (CURRENT_TIMESTAMP - INTERVAL '1 day')
+            GROUP BY status
+            """
+        )
+
+    comment_counts = await _fetch_counts(comment_counts_query)
     comments_total = sum(comment_counts.values())
 
     reaction_counts = {
@@ -1041,11 +1287,10 @@ async def get_global_statistics() -> Dict[str, Any]:
         "SELECT status, COUNT(*) FROM warmup_channels GROUP BY status"
     )
 
-    warmup_attempts = 0
-    async with conn.execute("SELECT COALESCE(SUM(attempts), 0) FROM warmup_channels") as cursor:
-        row = await cursor.fetchone()
-        if row:
-            warmup_attempts = int(row[0] or 0)
+    attempts_row = await _fetchone(
+        "SELECT COALESCE(SUM(attempts), 0) FROM warmup_channels"
+    )
+    warmup_attempts = int(attempts_row[0] or 0) if attempts_row else 0
 
     return {
         "accounts": {

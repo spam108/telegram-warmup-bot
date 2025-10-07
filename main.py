@@ -346,6 +346,7 @@ async def _client_session(
     session_file: Optional[str] = None,
     attempts: int = 8,
     base_delay: float = 0.5,
+    lock_key: Optional[str] = None,
 ):
     await _start_client_with_retries(
         client,
@@ -1443,12 +1444,12 @@ def is_warmup_join_period(now: datetime | None = None) -> bool:
 
 async def check_account(user_id, phone):
     key = make_session_key(user_id, phone)
-    existing_client = active_pyrogram_clients.get(key)
+    lock = active_client_locks.setdefault(key, asyncio.Lock())
 
-    if existing_client:
-        lock = active_client_locks.setdefault(key, asyncio.Lock())
-        should_cleanup_lock = False
-        async with lock:
+    async with lock:
+        existing_client = active_pyrogram_clients.get(key)
+
+        if existing_client:
             session_active = active_sessions.get(key)
             is_connected = getattr(existing_client, "is_connected", False)
 
@@ -1483,20 +1484,21 @@ async def check_account(user_id, phone):
                 is_connected = getattr(existing_client, "is_connected", False)
 
             if not session_active and not is_connected:
-                should_cleanup_lock = True
+                active_pyrogram_clients.pop(key, None)
+                active_client_locks.pop(key, None)
+                existing_client = None
 
-        if should_cleanup_lock:
-            active_pyrogram_clients.pop(key, None)
-            active_client_locks.pop(key, None)
+        session_path = f"sessions/{user_id}/{phone}.session"
+        ensure_session_file_permissions(session_path)
 
-    session_path = f"sessions/{user_id}/{phone}.session"
-    ensure_session_file_permissions(session_path)
+        client = Client(
+            name=f"sessions/{user_id}/{phone}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+        )
 
-    client = Client(
-        name=f"sessions/{user_id}/{phone}",
-        api_id=API_ID,
-        api_hash=API_HASH,
-    )
+        def _refresh_session(_: int, __: BaseException) -> None:
+            ensure_session_file_permissions(session_path)
 
     def _refresh_session(_: int, __: BaseException) -> None:
         ensure_session_file_permissions(session_path)
@@ -1517,13 +1519,52 @@ async def check_account(user_id, phone):
         await asyncio.sleep(1)
         await bot.send_message(user_id, f"Аккаунт удален ошибка: {str(e)}")
 
-        if os.path.exists(session_path):
-            os.remove(session_path)
-        await delete_account(user_id, phone)
-        return False
-    finally:
-        if getattr(client, "is_connected", False):
-            await client.disconnect()
+        try:
+            await _start_client_with_retries(
+                client,
+                session_file=session_path,
+                attempts=6,
+            )
+            started = True
+            await _run_with_sqlite_retries(
+                client.get_me,
+                on_retry=_refresh_session,
+            )
+            return True
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e).lower():
+                await bot.send_message(user_id, f"Аккаунт {phone} сейчас используется, попробуйте позже")
+                return False
+            raise
+        except Exception as e:
+            await asyncio.sleep(1)
+            await bot.send_message(user_id, f"Аккаунт удален ошибка: {str(e)}")
+
+            if os.path.exists(session_path):
+                try:
+                    os.remove(session_path)
+                except OSError:
+                    pass
+            await delete_account(user_id, phone)
+            return False
+        finally:
+            if started:
+                try:
+                    await _stop_client_with_retries(
+                        client,
+                        session_file=session_path,
+                        attempts=4,
+                    )
+                except sqlite3.OperationalError:
+                    logging.exception(
+                        "Не удалось остановить клиент проверки аккаунта %s из-за блокировки БД",
+                        getattr(client, "name", "<unknown>"),
+                    )
+                except Exception:
+                    logging.exception(
+                        "Не удалось остановить клиент проверки аккаунта %s",
+                        getattr(client, "name", "<unknown>"),
+                    )
 
 async def main_message(message):
     user_id = message.from_user.id
@@ -2564,6 +2605,8 @@ async def _prepare_regular_channels_prompt(message: Message, state: FSMContext) 
         api_id=API_ID,
         api_hash=API_HASH)
 
+    key = make_session_key(message.from_user.id, str(session))
+
     if await check_account(message.from_user.id, session):
         async with _client_session(app, session_file=session_file):
             async for dialog in app.get_dialogs():
@@ -3291,6 +3334,8 @@ async def add_channels(message: Message, state: FSMContext) -> None:
         session_file = os.path.join("sessions", str(message.from_user.id), f"{session}.session")
         ensure_session_file_permissions(session_file)
 
+        key = make_session_key(message.from_user.id, str(session))
+
         app = Client(
             name=f"sessions/{message.from_user.id}/{session}",
             api_id=API_ID,
@@ -3381,7 +3426,7 @@ async def send_comments(userid, session, account_id):
             api_id=API_ID,
             api_hash=API_HASH)
         active_pyrogram_clients[key] = app
-        active_client_locks.setdefault(key, asyncio.Lock())
+        lock = active_client_locks.setdefault(key, asyncio.Lock())
 
         account = await get_account_by_id(account_id)
         if not account:
@@ -3474,12 +3519,34 @@ async def send_comments(userid, session, account_id):
                 last_reaction_at=last_reaction_at_dt,
             )
         try:
-            await _start_client_with_retries(app)
+            async with lock:
+                await _start_client_with_retries(
+                    app,
+                    session_file=session_file,
+                )
             key = make_session_key(userid, session)
             while active_sessions.get(key, False):
                 await asyncio.sleep(1)
         finally:
-            await app.stop()
+            try:
+                async with lock:
+                    await _stop_client_with_retries(
+                        app,
+                        session_file=session_file,
+                        attempts=5,
+                    )
+            except sqlite3.OperationalError as db_exc:
+                logging.error(
+                    "Failed to stop client %s due to SQLite lock: %s",
+                    getattr(app, "name", "<unknown>"),
+                    db_exc,
+                )
+            except Exception:
+                logging.exception(
+                    "Failed to stop client %s",
+                    getattr(app, "name", "<unknown>"),
+                )
+
             key = make_session_key(userid, session)
             account_id = active_account_ids.pop(key, None)
             if account_id:
@@ -4464,6 +4531,12 @@ async def get_account_summary(account_id):
         session_path = account.get('session_path', '')
         if session_path and os.path.exists(session_path):
             ensure_session_file_permissions(session_path)
+
+            user_id_value = account.get("user_id")
+            phone_value = account.get("phone")
+            lock_key = None
+            if user_id_value is not None and phone_value:
+                lock_key = make_session_key(int(user_id_value), str(phone_value))
 
             app = Client(
                 name=session_path.replace('.session', ''),
