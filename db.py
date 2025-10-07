@@ -39,6 +39,7 @@ else:  # pragma: no cover - executed only when asyncpg is not installed
 _CONN: Optional[aiosqlite.Connection] = None
 _POOL: Optional[AsyncpgPool] = None
 _BACKEND: Optional[str] = None
+_SQLITE_LOCK: asyncio.Lock = asyncio.Lock()
 _UNSET = object()
 
 
@@ -148,7 +149,8 @@ async def _execute(query: str, params: Sequence[Any] = ()) -> None:
 
     if _is_sqlite():
         conn = await _require_conn()
-        await conn.execute(query, params_tuple)
+        async with _SQLITE_LOCK:
+            await conn.execute(query, params_tuple)
         return
 
     pool = _require_pool()
@@ -162,9 +164,10 @@ async def _execute_rowcount(query: str, params: Sequence[Any] = ()) -> int:
 
     if _is_sqlite():
         conn = await _require_conn()
-        cursor = await conn.execute(query, params_tuple)
-        rowcount = cursor.rowcount if cursor.rowcount is not None else 0
-        await cursor.close()
+        async with _SQLITE_LOCK:
+            cursor = await conn.execute(query, params_tuple)
+            rowcount = cursor.rowcount if cursor.rowcount is not None else 0
+            await cursor.close()
         return int(rowcount)
 
     pool = _require_pool()
@@ -182,8 +185,9 @@ async def _fetchone(query: str, params: Sequence[Any] = ()):
 
     if _is_sqlite():
         conn = await _require_conn()
-        async with conn.execute(query, params_tuple) as cursor:
-            return await cursor.fetchone()
+        async with _SQLITE_LOCK:
+            async with conn.execute(query, params_tuple) as cursor:
+                return await cursor.fetchone()
 
     pool = _require_pool()
     prepared_query, prepared_params = _prepare_query(query, params_tuple)
@@ -196,8 +200,9 @@ async def _fetchall(query: str, params: Sequence[Any] = ()):
 
     if _is_sqlite():
         conn = await _require_conn()
-        async with conn.execute(query, params_tuple) as cursor:
-            return await cursor.fetchall()
+        async with _SQLITE_LOCK:
+            async with conn.execute(query, params_tuple) as cursor:
+                return await cursor.fetchall()
 
     pool = _require_pool()
     prepared_query, prepared_params = _prepare_query(query, params_tuple)
@@ -208,7 +213,8 @@ async def _fetchall(query: str, params: Sequence[Any] = ()):
 async def _commit() -> None:
     if _is_sqlite():
         conn = await _require_conn()
-        await conn.commit()
+        async with _SQLITE_LOCK:
+            await conn.commit()
 
 
 async def init_db() -> None:
