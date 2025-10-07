@@ -12,11 +12,10 @@ def anyio_backend():
 
 
 @pytest.mark.anyio("asyncio")
-async def test_settings_save(tmp_path, monkeypatch):
+async def test_settings_save(postgres_db_url, monkeypatch):
     """Убеждаемся, что настройки прогрева можно сохранить и обновить."""
 
-    db_path = tmp_path / "env-settings.db"
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    assert postgres_db_url
     monkeypatch.setenv("BOT_TOKEN", "8231470375:TESTTOKEN")
     monkeypatch.setenv("API_ID", "20047744")
     monkeypatch.setenv("API_HASH", "09c81e1d266b98a8d82291abaa75bba7")
@@ -26,6 +25,7 @@ async def test_settings_save(tmp_path, monkeypatch):
 
     db = importlib.reload(db)
 
+    await db.close_db()
     await db.init_db()
     await db.ensure_warmup_settings(
         channels_per_day=15,

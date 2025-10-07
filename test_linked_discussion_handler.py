@@ -77,7 +77,7 @@ def test_discussion_reply_detection_skips_private_chat():
     assert not main._is_discussion_reply_message(message)
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_discussion_without_settings_skips_actions(monkeypatch):
     userid = 123
     session = "+100500"
@@ -154,7 +154,7 @@ async def test_discussion_without_settings_skips_actions(monkeypatch):
     assert comment_logs == []
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_comment_not_sent_if_session_stops_during_sleep(monkeypatch):
     userid = 123
     session = "+100500"
@@ -247,7 +247,7 @@ async def test_comment_not_sent_if_session_stops_during_sleep(monkeypatch):
     assert comment_logs == [] or comment_logs[0][1].get("status") == "comment_skipped"
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_comment_not_sent_if_quiet_starts_during_sleep(monkeypatch):
     userid = 123
     session = "+100500"
@@ -347,7 +347,7 @@ async def test_comment_not_sent_if_quiet_starts_during_sleep(monkeypatch):
     assert comment_logs == []
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_discussion_reply_from_user_triggers_comment_and_reaction(monkeypatch):
     userid = 123
     session = "+100500"
@@ -457,7 +457,7 @@ async def test_discussion_reply_from_user_triggers_comment_and_reaction(monkeypa
     assert len(updated_reactions) == 1
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_reply_to_account_comment_without_reply_object(monkeypatch):
     userid = 555
     session = "+200"
@@ -557,7 +557,7 @@ async def test_reply_to_account_comment_without_reply_object(monkeypatch):
     assert len(updated_reactions) == 1
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_reply_to_account_comment_without_reply_object(monkeypatch):
     userid = 555
     session = "+200"
@@ -657,7 +657,7 @@ async def test_reply_to_account_comment_without_reply_object(monkeypatch):
     assert len(updated_reactions) == 1
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_reaction_skipped_when_not_in_allowed_set(monkeypatch):
     userid = 123
     session = "+100500"
@@ -763,7 +763,7 @@ async def test_reaction_skipped_when_not_in_allowed_set(monkeypatch):
     )
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_discussion_and_channel_reaction_chances_are_distinct(monkeypatch):
     userid = 123
     session = "+100500"
@@ -897,7 +897,7 @@ async def test_discussion_and_channel_reaction_chances_are_distinct(monkeypatch)
     assert len(updated_reactions) >= 1
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_reaction_skipped_when_limit_reached(monkeypatch):
     userid = 123
     session = "+100500"
@@ -999,7 +999,7 @@ async def test_reaction_skipped_when_limit_reached(monkeypatch):
     assert all(status != "reaction_success" for status in statuses if status is not None)
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_reaction_retry_eventual_success(monkeypatch):
     userid = 123
     session = "+100500"
@@ -1144,7 +1144,7 @@ async def test_reaction_retry_eventual_success(monkeypatch):
     assert all(not status.startswith("reaction_error") for status in reaction_statuses)
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_reaction_retry_total_failure(monkeypatch):
     userid = 123
     session = "+100500"
@@ -1289,7 +1289,7 @@ async def test_reaction_retry_total_failure(monkeypatch):
     assert len(error_statuses) == 1
     assert all(not status.startswith("reaction_success") for status in reaction_statuses)
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_reaction_skipped_when_cooldown_active(monkeypatch):
     userid = 123
     session = "+100500"
@@ -1403,7 +1403,7 @@ async def test_reaction_skipped_when_cooldown_active(monkeypatch):
     assert not updated_reactions
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_reaction_occurs_after_cooldown(monkeypatch):
     userid = 123
     session = "+100500"
@@ -1512,7 +1512,7 @@ async def test_reaction_occurs_after_cooldown(monkeypatch):
     assert result > previous_reaction
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_reaction_sent_for_reply_to_own_comment(monkeypatch):
     userid = 123
     session = "+100500"
@@ -1610,7 +1610,7 @@ async def test_reaction_sent_for_reply_to_own_comment(monkeypatch):
     assert result >= recent_reaction
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_forced_reply_reaction_ignores_limit(monkeypatch):
     userid = 321
     session = "+300"
@@ -1714,7 +1714,7 @@ async def test_forced_reply_reaction_ignores_limit(monkeypatch):
     assert result >= recent_reaction
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_reaction_for_reply_detected_via_comment_log(monkeypatch):
     userid = 123
     session = "+100500"
@@ -1818,7 +1818,7 @@ async def test_reaction_for_reply_detected_via_comment_log(monkeypatch):
     assert result >= recent_reaction
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_reaction_happens_when_comment_skipped(monkeypatch):
     userid = 123
     session = "+100500"
@@ -1940,7 +1940,7 @@ async def test_reaction_happens_when_comment_skipped(monkeypatch):
     assert updated_reactions[-1][1] == result
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_reaction_retries_until_success(monkeypatch):
     userid = 123
     session = "+100500"
@@ -2070,7 +2070,7 @@ async def test_reaction_retries_until_success(monkeypatch):
     assert len(updated_reactions) == 1
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_reaction_retries_until_failure(monkeypatch):
     userid = 123
     session = "+100500"

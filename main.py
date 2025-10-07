@@ -64,7 +64,6 @@ from db import (
     update_account_settings,
     update_last_reaction_at,
     update_warmup_settings,
-    _require_pool,
 )
 from dotenv import load_dotenv
 

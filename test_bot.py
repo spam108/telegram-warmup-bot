@@ -35,10 +35,9 @@ def anyio_backend():
     return "asyncio"
 
 
-@pytest.mark.anyio
-async def test_get_global_statistics_and_report(tmp_path, monkeypatch):
-    db_path = tmp_path / "stats.db"
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+@pytest.mark.anyio("asyncio")
+async def test_get_global_statistics_and_report(tmp_path, postgres_db_url, monkeypatch):
+    assert postgres_db_url
     monkeypatch.setenv("BOT_TOKEN", "123456:TEST")
     monkeypatch.setenv("API_ID", "123")
     monkeypatch.setenv("API_HASH", "hash")
@@ -46,6 +45,7 @@ async def test_get_global_statistics_and_report(tmp_path, monkeypatch):
     import db as db_module
 
     db_module = importlib.reload(db_module)
+    await db_module.close_db()
     await db_module.init_db()
 
     await db_module.ensure_user(1)
@@ -67,7 +67,7 @@ async def test_get_global_statistics_and_report(tmp_path, monkeypatch):
 
     conn = await db_module._require_conn()
     await conn.execute(
-        "UPDATE comment_logs SET created_at = datetime('now', '-2 day') WHERE message_id = ?",
+        "UPDATE comment_logs SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 day' WHERE message_id = ?",
         (7,),
     )
     await conn.commit()

@@ -4,6 +4,8 @@ import types
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
+import pytest
+
 os.environ.setdefault("API_ID", "1")
 os.environ.setdefault("API_HASH", "test")
 os.environ.setdefault("BOT_TOKEN", "123456:TESTTOKEN")
@@ -216,17 +218,20 @@ def test_warmclear_callback_clears_queue_and_state(monkeypatch):
     assert callback.answered, "Коллбек должен подтверждаться"
 
 
-def test_add_sleeps_syncs_subscriptions(monkeypatch, tmp_path):
-    db_path = tmp_path / "sleeps.db"
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
-    asyncio.run(db.init_db())
+@pytest.mark.anyio("asyncio")
+async def test_add_sleeps_syncs_subscriptions(monkeypatch, tmp_path, postgres_db_url):
+    assert postgres_db_url
+    await db.close_db()
+    await db.init_db()
 
     user_id = 100
     phone = "71234567890"
-    session_path = f"sessions/{user_id}/{phone}.session"
+    session_dir = tmp_path / "sessions" / str(user_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_path = str(session_dir / f"{phone}.session")
 
-    asyncio.run(db.ensure_user(user_id))
-    account = asyncio.run(db.ensure_account(user_id, phone, session_path))
+    await db.ensure_user(user_id)
+    account = await db.ensure_account(user_id, phone, session_path)
 
     state = DummyState({"account": phone, "account_id": account["id"]})
     message = DummyMessage("10-20", user_id=user_id)
@@ -289,13 +294,14 @@ def test_add_sleeps_syncs_subscriptions(monkeypatch, tmp_path):
     monkeypatch.setattr(main.bot, "send_message", fake_send_message)
     monkeypatch.setattr(main, "update_account_settings", tracking_update)
 
-    asyncio.run(main.add_sleeps(message, state))
+    try:
+        await main.add_sleeps(message, state)
 
-    updated_account = asyncio.run(db.get_account_by_id(account["id"]))
-    assert updated_account is not None
-    assert recorded_calls == [], (recorded_calls, format_calls, sent_messages)
-    assert format_calls == [], format_calls
-    assert sent_messages, "Ожидалось, что пользователю будет отправлено сообщение о настройке реакций"
-    assert "шанс реакции" in sent_messages[-1][1].lower()
-
-    asyncio.run(db.close_db())
+        updated_account = await db.get_account_by_id(account["id"])
+        assert updated_account is not None
+        assert recorded_calls == [], (recorded_calls, format_calls, sent_messages)
+        assert format_calls == [], format_calls
+        assert sent_messages, "Ожидалось, что пользователю будет отправлено сообщение о настройке реакций"
+        assert "шанс реакции" in sent_messages[-1][1].lower()
+    finally:
+        await db.close_db()

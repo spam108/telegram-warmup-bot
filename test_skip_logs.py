@@ -27,7 +27,7 @@ def reset_skip_logs():
     main.skip_log_last_flush_at = None
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_flush_skip_logs_sends_aggregated_summary(monkeypatch):
     sent_messages = []
 
@@ -68,7 +68,7 @@ class DummyMessage:
         self.answers.append(text)
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_skip_summary_requires_manual_trigger(monkeypatch):
     sent_messages = []
 

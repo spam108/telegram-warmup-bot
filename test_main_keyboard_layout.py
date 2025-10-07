@@ -21,7 +21,7 @@ def anyio_backend():
     return "asyncio"
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_main_menu_keyboard_layout_no_accounts(monkeypatch):
     user_id = 777
     existing_dirs: set[str] = set()
@@ -102,7 +102,7 @@ async def test_main_menu_keyboard_layout_no_accounts(monkeypatch):
     ]
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_main_menu_keyboard_layout_with_account_shows_reaction_button(monkeypatch):
     user_id = 123
     session_file = os.path.normpath(f"sessions/{user_id}/79990000000.session")
@@ -144,6 +144,9 @@ async def test_main_menu_keyboard_layout_with_account_shows_reaction_button(monk
     async def fake_ensure_account(user_id: int, phone: str, session_path: str):  # noqa: ARG001
         return None
 
+    async def fake_get_session(user_id: int, phone: str):  # noqa: ARG001
+        return None
+
     sent_messages: list[dict[str, object]] = []
 
     async def fake_send_message(chat_id: int, text: str, reply_markup=None, **kwargs):  # noqa: ANN001
@@ -163,6 +166,7 @@ async def test_main_menu_keyboard_layout_with_account_shows_reaction_button(monk
     monkeypatch.setattr(main, "ensure_user", fake_ensure_user)
     monkeypatch.setattr(main, "get_accounts_for_user", fake_get_accounts)
     monkeypatch.setattr(main, "ensure_account", fake_ensure_account)
+    monkeypatch.setattr(main, "get_telegram_session", fake_get_session)
     monkeypatch.setattr(main.bot, "send_message", fake_send_message)
     main.active_sessions.clear()
 

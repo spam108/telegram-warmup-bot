@@ -1,5 +1,6 @@
 import os
-from datetime import datetime, timedelta
+import importlib
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -16,9 +17,10 @@ def anyio_backend():
 
 
 @pytest.fixture(autouse=True)
-async def setup_database(tmp_path):
-    database_path = tmp_path / "test.sqlite3"
-    os.environ["DATABASE_URL"] = f"sqlite:///{database_path}"
+async def setup_database(postgres_db_url):
+    assert postgres_db_url
+    global db
+    db = importlib.reload(db)
     await db.close_db()
     await db.init_db()
     try:
@@ -27,7 +29,7 @@ async def setup_database(tmp_path):
         await db.close_db()
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_cleanup_comment_logs_removes_outdated_entries():
     await db.ensure_user(1)
     account = await db.ensure_account(1, "+100500", "session.session")
@@ -37,7 +39,7 @@ async def test_cleanup_comment_logs_removes_outdated_entries():
     entries = [
         (now - timedelta(days=5), 1),
         (now - timedelta(days=3), 2),
-        (now - timedelta(days=2), 3),
+        (now - timedelta(days=2) + timedelta(seconds=1), 3),
         (now - timedelta(days=1), 4),
     ]
 
@@ -53,7 +55,7 @@ async def test_cleanup_comment_logs_removes_outdated_entries():
                 message_id,
                 "test_status",
                 None,
-                created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                created_at,
             ),
         )
     await conn.commit()
@@ -69,6 +71,13 @@ async def test_cleanup_comment_logs_removes_outdated_entries():
     remaining_message_ids = [row["message_id"] for row in remaining_rows]
     assert remaining_message_ids == [3, 4]
 
-    remaining_dates = [datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S") for row in remaining_rows]
+    remaining_dates = []
+    for row in remaining_rows:
+        value = row["created_at"]
+        if isinstance(value, datetime):
+            normalized = value.astimezone(timezone.utc).replace(tzinfo=None, microsecond=0)
+            remaining_dates.append(normalized)
+        else:
+            remaining_dates.append(datetime.strptime(value, "%Y-%m-%d %H:%M:%S"))
     cutoff = now - timedelta(days=2)
     assert all(cutoff <= date <= now for date in remaining_dates)

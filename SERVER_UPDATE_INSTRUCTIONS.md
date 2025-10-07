@@ -50,7 +50,8 @@ sudo docker-compose logs bot --tail=20
 
 5. Проверьте в базе данных:
 ```bash
-sudo docker-compose exec bot sqlite3 data/CDXBOT0310.db "SELECT id, phone, sleep_min, sleep_max, chance FROM accounts WHERE phone = 'YOUR_PHONE';"
+sudo docker-compose exec postgres psql -U bot_user -d telegram_bot \
+  -c "SELECT id, phone, sleep_min, sleep_max, chance FROM accounts WHERE phone = 'YOUR_PHONE';"
 ```
 
 Настройки должны быть сохранены (не NULL).

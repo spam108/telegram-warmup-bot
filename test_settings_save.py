@@ -50,19 +50,18 @@ def anyio_backend():
 
 
 @pytest.mark.anyio("asyncio")
-async def test_settings_save(tmp_path, monkeypatch):
+async def test_settings_save(tmp_path, postgres_db_url, monkeypatch):
     """Проверяет, что изменения настроек аккаунта сохраняются в базе данных."""
 
-    db_path = tmp_path / "settings.db"
     sessions_dir = tmp_path / "sessions" / "1"
     sessions_dir.mkdir(parents=True)
-
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
 
     # Перезагружаем модуль БД, чтобы применились новые переменные окружения.
     import db
 
     db = importlib.reload(db)
+
+    assert postgres_db_url  # ensure fixture is used
 
     await db.init_db()
     await db.ensure_user(1)

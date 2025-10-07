@@ -42,7 +42,7 @@ log "Обновляем систему..."
 sudo apt update && sudo apt upgrade -y
 
 log "Устанавливаем необходимые пакеты..."
-sudo apt install -y curl wget git python3 python3-pip python3-venv sqlite3
+sudo apt install -y curl wget git python3 python3-pip python3-venv postgresql postgresql-contrib
 
 log "Устанавливаем Docker..."
 if ! command -v docker &> /dev/null; then
@@ -81,7 +81,7 @@ if [ ! -f ".env" ]; then
     echo "- API_ID и API_HASH"
     echo "- OPENAI_API_KEY"
     echo "- PASSWORD"
-    echo "- DATABASE_URL (если хотите изменить путь к файлу SQLite)"
+    echo "- DATABASE_URL (строка подключения к PostgreSQL)"
 else
     log ".env файл уже существует"
 fi
