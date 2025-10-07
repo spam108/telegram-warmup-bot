@@ -348,45 +348,22 @@ async def _client_session(
     base_delay: float = 0.5,
     lock_key: Optional[str] = None,
 ):
-    lock: Optional[asyncio.Lock] = None
-    if lock_key is not None:
-        lock = active_client_locks.setdefault(lock_key, asyncio.Lock())
-
-    if lock is not None:
-        async with lock:
-            await _start_client_with_retries(
-                client,
-                session_file=session_file,
-                attempts=attempts,
-                base_delay=base_delay,
-            )
-    else:
-        await _start_client_with_retries(
-            client,
-            session_file=session_file,
-            attempts=attempts,
-            base_delay=base_delay,
-        )
-
+    await _start_client_with_retries(
+        client,
+        session_file=session_file,
+        attempts=attempts,
+        base_delay=base_delay,
+    )
     try:
         yield client
     finally:
         try:
-            if lock is not None:
-                async with lock:
-                    await _stop_client_with_retries(
-                        client,
-                        session_file=session_file,
-                        attempts=max(3, attempts // 2),
-                        base_delay=base_delay,
-                    )
-            else:
-                await _stop_client_with_retries(
-                    client,
-                    session_file=session_file,
-                    attempts=max(3, attempts // 2),
-                    base_delay=base_delay,
-                )
+            await _stop_client_with_retries(
+                client,
+                session_file=session_file,
+                attempts=max(3, attempts // 2),
+                base_delay=base_delay,
+            )
         except sqlite3.OperationalError:
             logging.exception(
                 "Не удалось корректно остановить клиента %s из-за блокировки БД",
@@ -1523,7 +1500,24 @@ async def check_account(user_id, phone):
         def _refresh_session(_: int, __: BaseException) -> None:
             ensure_session_file_permissions(session_path)
 
-        started = False
+    def _refresh_session(_: int, __: BaseException) -> None:
+        ensure_session_file_permissions(session_path)
+
+    try:
+        await _connect_client_with_retries(client, session_file=session_path)
+        await _run_with_sqlite_retries(
+            client.get_me,
+            on_retry=_refresh_session,
+        )
+        return True
+    except sqlite3.OperationalError as e:
+        if "database is locked" in str(e).lower():
+            await bot.send_message(user_id, f"Аккаунт {phone} сейчас используется, попробуйте позже")
+            return False
+        raise
+    except Exception as e:
+        await asyncio.sleep(1)
+        await bot.send_message(user_id, f"Аккаунт удален ошибка: {str(e)}")
 
         try:
             await _start_client_with_retries(
@@ -2614,11 +2608,7 @@ async def _prepare_regular_channels_prompt(message: Message, state: FSMContext) 
     key = make_session_key(message.from_user.id, str(session))
 
     if await check_account(message.from_user.id, session):
-        async with _client_session(
-            app,
-            session_file=session_file,
-            lock_key=key,
-        ):
+        async with _client_session(app, session_file=session_file):
             async for dialog in app.get_dialogs():
                 chat = dialog.chat
                 if str(chat.type) == "ChatType.CHANNEL" and chat.username is not None:
@@ -2992,11 +2982,7 @@ async def _get_available_quick_reaction_emojis(
     )
 
     try:
-        async with _client_session(
-            client,
-            session_file=session_file,
-            lock_key=key,
-        ):
+        async with _client_session(client, session_file=session_file):
             return await _query(client)
     except Exception:
         logging.exception(
@@ -3355,11 +3341,7 @@ async def add_channels(message: Message, state: FSMContext) -> None:
             api_id=API_ID,
             api_hash=API_HASH)
         if await check_account(message.from_user.id, session):
-            async with _client_session(
-                app,
-                session_file=session_file,
-                lock_key=key,
-            ):
+            async with _client_session(app, session_file=session_file):
                 for chl in channels:
                     await asyncio.sleep(random.uniform(20, 30))
 
@@ -3701,11 +3683,7 @@ async def join_channel(
             api_hash=API_HASH,
         )
 
-        async with _client_session(
-            client,
-            session_file=session_file,
-            lock_key=key,
-        ):
+        async with _client_session(client, session_file=session_file):
             return await _join_with_client(client)
 
     except TransientJoinError:
@@ -4565,11 +4543,7 @@ async def get_account_summary(account_id):
                 api_id=API_ID,
                 api_hash=API_HASH
             )
-            async with _client_session(
-                app,
-                session_file=session_path,
-                lock_key=lock_key,
-            ):
+            async with _client_session(app, session_file=session_path):
                 async for dialog in app.get_dialogs():
                     chat = dialog.chat
                     if str(chat.type) == "ChatType.CHANNEL" and chat.username:
