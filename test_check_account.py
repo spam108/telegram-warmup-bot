@@ -23,7 +23,7 @@ def anyio_backend():
     return "asyncio"
 
 
-@pytest.mark.anyio
+@pytest.mark.anyio("asyncio")
 async def test_check_account_waits_for_existing_client_shutdown(monkeypatch):
     user_id = 123
     phone = "+79990000000"

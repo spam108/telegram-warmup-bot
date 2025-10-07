@@ -10,7 +10,9 @@ import os
 # Добавляем текущую директорию в путь для импорта
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-os.environ.setdefault("DATABASE_URL", "sqlite:///CDXBOT0310.db")
+os.environ.setdefault(
+    "DATABASE_URL", "postgresql+asyncpg://warmup:warmup@localhost:5432/warmup"
+)
 
 from db import (
     close_db,

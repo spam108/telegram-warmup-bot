@@ -42,7 +42,7 @@ API_ID=your_api_id
 API_HASH=your_api_hash
 OPENAI_API_KEY=your_openai_key
 PASSWORD=your_admin_password
-DATABASE_URL=sqlite:///data/CDXBOT0310.db
+DATABASE_URL=postgresql+asyncpg://bot_user:strong_password@localhost:5432/telegram_bot
 LOG_CHANNEL_ID=your_log_channel_id
 ```
 
@@ -143,10 +143,10 @@ docker-compose logs -f
 ### Check database
 ```bash
 # Traditional
-sqlite3 data/CDXBOT0310.db ".tables"
+psql postgresql://bot_user:strong_password@localhost:5432/telegram_bot -c "\dt"
 
 # Docker
-docker-compose exec bot sqlite3 data/CDXBOT0310.db ".tables"
+docker-compose exec postgres psql -U bot_user -d telegram_bot -c '\dt'
 ```
 
 ## 🔒 Security Considerations
@@ -160,13 +160,13 @@ docker-compose exec bot sqlite3 data/CDXBOT0310.db ".tables"
    ```
 
 2. **Environment Variables**: Never commit `.env` file to Git
-3. **Database**: Храните файл SQLite в каталоге с ограниченным доступом и выполняйте регулярные резервные копии
+3. **Database**: Создайте отдельного пользователя PostgreSQL с минимальными правами и делайте регулярные резервные копии (например, `pg_dump`)
 4. **Sessions**: Keep session files secure and backed up
 
 ## 📊 Performance Optimization
 
 ### For high-load scenarios:
-1. Периодически запускайте `VACUUM`/`ANALYZE` для оптимизации базы SQLite
+1. Периодически запускайте `VACUUM`/`ANALYZE` в PostgreSQL или настройте `autovacuum`
 2. Use Redis for caching (optional)
 3. Scale with multiple bot instances
 4. Monitor resource usage

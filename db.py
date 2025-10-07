@@ -1,18 +1,14 @@
 import os
 import json
 import asyncio
-import sqlite3
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-import aiosqlite
 import asyncpg
 
 
-_CONN: Optional[Any] = None
+_CONN: Optional["AsyncPGConnection"] = None
 _POOL: Optional[asyncpg.Pool] = None
-_BACKEND: Optional[str] = None
 _UNSET = object()
 
 
@@ -46,6 +42,13 @@ class RowMapping(Mapping[str, Any]):
         return f"RowMapping({self._data!r})"
 
 
+def _parse_command_tag(status: str) -> int:
+    try:
+        return int(status.rsplit(" ", 1)[-1])
+    except (ValueError, IndexError):  # pragma: no cover - defensive
+        return -1
+
+
 class AsyncPGCursor:
     """Async cursor compatible with ``aiosqlite.Cursor``.
 
@@ -55,7 +58,7 @@ class AsyncPGCursor:
     project.
     """
 
-    __slots__ = ("_pool", "_query", "_params", "_rows", "_iter", "_is_select")
+    __slots__ = ("_pool", "_query", "_params", "_rows", "_iter", "_is_select", "_rowcount")
 
     def __init__(self, pool: asyncpg.Pool, query: str, params: Sequence[Any]):
         self._pool = pool
@@ -64,6 +67,7 @@ class AsyncPGCursor:
         self._rows: List[RowMapping] = []
         self._iter = 0
         self._is_select = _is_select_query(query)
+        self._rowcount = -1
 
     def __await__(self):  # pragma: no cover - exercised indirectly
         return self._run().__await__()
@@ -76,8 +80,10 @@ class AsyncPGCursor:
             if self._is_select:
                 records = await connection.fetch(statement, *parameters)
                 self._rows = [RowMapping(record.keys(), record.values()) for record in records]
+                self._rowcount = len(self._rows)
             else:
-                await connection.execute(statement, *parameters)
+                status = await connection.execute(statement, *parameters)
+                self._rowcount = _parse_command_tag(status)
         return self
 
     async def __aenter__(self) -> "AsyncPGCursor":  # pragma: no cover - exercised indirectly
@@ -98,6 +104,14 @@ class AsyncPGCursor:
 
     async def fetchall(self) -> List[RowMapping]:
         return list(self._rows)
+
+    @property
+    def rowcount(self) -> int:
+        return self._rowcount
+
+    async def close(self) -> None:
+        self._rows.clear()
+        self._iter = 0
 
 
 class AsyncPGConnection:
@@ -149,18 +163,21 @@ class DatabaseNotInitialized(RuntimeError):
 
 
 async def _retry_db_operation(func, *args, max_retries: int = 3, delay: int = 1, **kwargs):
-    """Retry database operation with exponential backoff for locked database errors."""
+    """Retry database operation with exponential backoff for transient PostgreSQL errors."""
+
     await asyncio.sleep(0.1)
+
+    transient_errors = (
+        asyncpg.exceptions.DeadlockDetectedError,
+        asyncpg.exceptions.SerializationError,
+        asyncpg.exceptions.CannotConnectNowError,
+        asyncpg.exceptions.TooManyConnectionsError,
+    )
 
     for attempt in range(max_retries):
         try:
             return await func(*args, **kwargs)
-        except sqlite3.OperationalError as exc:  # pragma: no cover - defensive branch
-            if "locked" in str(exc).lower() and attempt < max_retries - 1:
-                await asyncio.sleep(delay * (2 ** attempt))
-                continue
-            raise
-        except (asyncpg.exceptions.DeadlockDetectedError, asyncpg.exceptions.SerializationError):
+        except transient_errors:
             if attempt < max_retries - 1:
                 await asyncio.sleep(delay * (2 ** attempt))
                 continue
@@ -191,12 +208,6 @@ def _serialize_list(value: Optional[Iterable[str]]) -> Optional[str]:
     return json.dumps(list(value))
 
 
-def _require_pool():
-    if _POOL is None:
-        raise RuntimeError("Connection pool is not initialised. Call init_db() first.")
-    return _POOL
-
-
 def _row_to_dict(row: Mapping[str, Any]) -> Dict[str, Any]:
     data = dict(row)
     for key, value in list(data.items()):
@@ -208,21 +219,21 @@ def _row_to_dict(row: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _sql_date_today() -> str:
-    return "DATE('now')" if _BACKEND != "postgres" else "DATE(CURRENT_TIMESTAMP)"
+    return "DATE(CURRENT_TIMESTAMP)"
 
 
 def _sql_interval_expression() -> str:
-    return "DATETIME('now', ?)" if _BACKEND != "postgres" else "CURRENT_TIMESTAMP + (?::interval)"
+    return "CURRENT_TIMESTAMP + (?::interval)"
 
 
 def _interval_parameter(days: int) -> str:
-    return f"+{days} days" if _BACKEND != "postgres" else f"{days} days"
+    return f"{days} days"
 
 
 async def init_db() -> None:
     """Initialise database connection and ensure schema exists."""
 
-    global _CONN, _POOL, _BACKEND
+    global _CONN, _POOL
 
     if _CONN is not None:
         return
@@ -231,199 +242,24 @@ async def init_db() -> None:
     if not dsn:
         raise RuntimeError("DATABASE_URL environment variable is not set")
 
-    if dsn.startswith(("postgresql://", "postgres://", "postgresql+asyncpg://")):
-        postgres_dsn = _normalise_postgres_dsn(dsn)
-        min_pool = int(os.getenv("POSTGRES_POOL_MIN", "1"))
-        max_pool = int(os.getenv("POSTGRES_POOL_MAX", "10"))
-        timeout = float(os.getenv("POSTGRES_POOL_TIMEOUT", "10"))
-        _POOL = await asyncpg.create_pool(
-            dsn=postgres_dsn,
-            min_size=min_pool,
-            max_size=max_pool,
-            timeout=timeout,
+    if not dsn.startswith(("postgresql://", "postgres://", "postgresql+asyncpg://")):
+        raise RuntimeError(
+            "Unsupported DATABASE_URL. Only PostgreSQL URLs are supported, "
+            "for example postgresql://user:pass@host:5432/dbname."
         )
-        _CONN = AsyncPGConnection(_POOL)
-        _BACKEND = "postgres"
-        await _init_postgres_schema(_POOL)
-        return
 
-    await _init_sqlite(dsn)
-
-
-async def _init_sqlite(dsn: str) -> None:
-    """Initialise SQLite database and schema."""
-
-    global _CONN, _BACKEND, _POOL
-
-    if dsn.startswith("sqlite:///"):
-        db_path = dsn[len("sqlite:///") :]
-    else:
-        db_path = dsn
-
-    if db_path != ":memory:":
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-
-    conn = await aiosqlite.connect(db_path, timeout=30)
-    conn.row_factory = aiosqlite.Row
-    await conn.execute("PRAGMA foreign_keys = ON")
-    await conn.execute("PRAGMA journal_mode=WAL")
-    await conn.execute("PRAGMA busy_timeout = 5000")
-
-    await conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            is_authenticated INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """
+    postgres_dsn = _normalise_postgres_dsn(dsn)
+    min_pool = int(os.getenv("POSTGRES_POOL_MIN", "1"))
+    max_pool = int(os.getenv("POSTGRES_POOL_MAX", "10"))
+    timeout = float(os.getenv("POSTGRES_POOL_TIMEOUT", "10"))
+    _POOL = await asyncpg.create_pool(
+        dsn=postgres_dsn,
+        min_size=min_pool,
+        max_size=max_pool,
+        timeout=timeout,
     )
-
-    await conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-            phone TEXT NOT NULL,
-            session_path TEXT NOT NULL,
-            chance INTEGER,
-            system_prompt TEXT,
-            sleep_min INTEGER,
-            sleep_max INTEGER,
-            reaction_emojis TEXT,
-            reaction_chance INTEGER,
-            reaction_discussion_chance INTEGER,
-            discussion_reply_prompt TEXT,
-            discussion_reply_chance INTEGER,
-            reaction_sleep_min INTEGER,
-            reaction_sleep_max INTEGER,
-            channels TEXT,
-            warmup_channels TEXT,
-            status TEXT NOT NULL DEFAULT 'stopped',
-            last_started_at TEXT,
-            last_stopped_at TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            mode TEXT NOT NULL DEFAULT 'warmup',
-            warmup_end_at TEXT DEFAULT (DATETIME('now', '+7 days')),
-            warmup_joined_today INTEGER NOT NULL DEFAULT 0,
-            warmup_last_join TEXT,
-            warmup_last_join_at TEXT,
-            warmup_next_join_at TEXT,
-            reactions_enabled INTEGER NOT NULL DEFAULT 1,
-            UNIQUE (user_id, phone),
-            CHECK (mode IN ('warmup', 'standard'))
-        )
-        """
-    )
-
-    await conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS warmup_channels (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-            channel TEXT NOT NULL,
-            position INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            error TEXT,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            last_attempt_at TEXT,
-            joined_at TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE (account_id, channel),
-            CHECK (status IN ('pending', 'joined', 'error'))
-        )
-        """
-    )
-
-    await conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS warmup_settings (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            channels_per_day INTEGER NOT NULL,
-            delay_minutes INTEGER NOT NULL,
-            join_start_hour INTEGER NOT NULL,
-            join_start_minute INTEGER NOT NULL,
-            join_end_hour INTEGER NOT NULL,
-            join_end_minute INTEGER NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-
-    await conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_warmup_channels_pending
-        ON warmup_channels (account_id, status, position)
-        """
-    )
-
-    await conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS comment_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-            channel TEXT,
-            message_id INTEGER,
-            status TEXT NOT NULL,
-            error TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-
-    await conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS telegram_sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            phone_number TEXT NOT NULL,
-            session_data BLOB NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(user_id, phone_number)
-        )
-        """
-    )
-
-    await conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS account_settings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            phone_number TEXT NOT NULL,
-            settings TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-
-    async def _ensure_column(table: str, column: str, definition: str) -> None:
-        try:
-            await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-        except sqlite3.OperationalError as exc:  # pragma: no cover - defensive branch
-            if "duplicate column name" not in str(exc).lower():
-                raise
-
-    await _ensure_column("accounts", "reaction_emojis", "TEXT")
-    await _ensure_column("accounts", "reaction_chance", "INTEGER")
-    await _ensure_column("accounts", "reaction_discussion_chance", "INTEGER")
-    await _ensure_column("accounts", "discussion_reply_prompt", "TEXT")
-    await _ensure_column("accounts", "discussion_reply_chance", "INTEGER")
-    await _ensure_column("accounts", "reaction_sleep_min", "INTEGER")
-    await _ensure_column("accounts", "reaction_sleep_max", "INTEGER")
-    await _ensure_column("accounts", "reaction_limit_per_message", "INTEGER")
-    await _ensure_column("accounts", "last_reaction_at", "TEXT")
-    await _ensure_column("accounts", "reactions_enabled", "INTEGER NOT NULL DEFAULT 1")
-
-    await conn.commit()
-
-    _POOL = None
-    _CONN = conn
-    _BACKEND = "sqlite"
+    _CONN = AsyncPGConnection(_POOL)
+    await _init_postgres_schema(_POOL)
 
 
 def _normalise_postgres_dsn(dsn: str) -> str:
@@ -594,10 +430,11 @@ async def _init_postgres_schema(pool: asyncpg.Pool) -> None:
 
 
 async def close_db() -> None:
-    global _CONN
+    global _CONN, _POOL
     if _CONN is not None:
         await _CONN.close()
         _CONN = None
+    _POOL = None
 
 
 async def ensure_warmup_settings(
@@ -1102,9 +939,8 @@ async def sync_warmup_channels(account_id: int, channels: List[str]) -> None:
                 """,
                 (account_id, channel, idx),
             )
-        except sqlite3.IntegrityError as exc:  # pragma: no cover - defensive branch
-            if "unique" not in str(exc).lower():
-                raise
+        except asyncpg.exceptions.UniqueViolationError:  # pragma: no cover - defensive branch
+            continue
 
     await conn.execute(
         """
@@ -1405,8 +1241,8 @@ async def cleanup_comment_logs(retention_days: int = 2) -> int:
 
     conn = await _require_conn()
     cursor = await conn.execute(
-        "DELETE FROM comment_logs WHERE created_at < datetime('now', ?)",
-        (f"-{retention_days} day",),
+        "DELETE FROM comment_logs WHERE created_at < CURRENT_TIMESTAMP - ($1 * INTERVAL '1 day')",
+        (retention_days,),
     )
     await conn.commit()
     deleted = cursor.rowcount if cursor.rowcount is not None else 0
@@ -1444,7 +1280,7 @@ async def get_global_statistics() -> Dict[str, Any]:
         """
         SELECT status, COUNT(*)
         FROM comment_logs
-        WHERE created_at >= datetime('now', '-1 day')
+        WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '1 day'
         GROUP BY status
         """
     )
