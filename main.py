@@ -1041,6 +1041,10 @@ async def _handle_linked_channel_message(
             reaction_comment_context = (
                 ' (без комментария)' if not comment_sent and comment_skipped else ''
             )
+            pause = COMMENT_TO_REACTION_PAUSE_SECONDS
+            if not comment_sent:
+                pause = max(pause / 2, 0.1)
+            await asyncio.sleep(pause)
             updated_last_reaction_at, should_exit = await _maybe_send_reaction(
                 client=client,
                 message=message,
@@ -1299,7 +1303,36 @@ async def ensure_latest_warmup_settings(force: bool = False) -> WarmupSettingsDa
 
 # Ограничение одновременных подключений
 MAX_CONCURRENT_ACCOUNTS = 5
+ACCOUNT_LAUNCH_STAGGER_SECONDS = 3
+ACCOUNT_LAUNCH_JITTER_SECONDS = 2
+COMMENT_TO_REACTION_PAUSE_SECONDS = 1.5
+
 account_semaphore = asyncio.Semaphore(MAX_CONCURRENT_ACCOUNTS)
+
+
+async def _delayed_safe_send_comments(
+    user_id: int,
+    session: str,
+    account_id: int,
+    delay: Optional[float] = None,
+) -> None:
+    pause = delay
+    if pause is None:
+        jitter = random.uniform(0, ACCOUNT_LAUNCH_JITTER_SECONDS)
+        pause = ACCOUNT_LAUNCH_STAGGER_SECONDS + jitter
+
+    await asyncio.sleep(max(pause, 0))
+    await safe_send_comments(user_id, session, account_id)
+
+
+def _schedule_safe_send_comments(
+    user_id: int,
+    session: str,
+    account_id: int,
+    *,
+    delay: Optional[float] = None,
+) -> None:
+    asyncio.create_task(_delayed_safe_send_comments(user_id, session, account_id, delay))
 
 
 def make_session_key(user_id: int, phone: str) -> str:
@@ -4187,7 +4220,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             await send_account_summary_to_logs(account_id, session)
             
             await main_message(message)
-            asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Запускаем комментирование
+            _schedule_safe_send_comments(message.from_user.id, session, account_id)
             return
         else:
             # Нет каналов в прогреве - запускаем в стандартном режиме
@@ -4211,7 +4244,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             await send_account_summary_to_logs(account_id, session)
             
             await main_message(message)
-            asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Запускаем комментирование
+            _schedule_safe_send_comments(message.from_user.id, session, account_id)
             return
 
     channels = [line.strip() for line in message.text.splitlines() if line.strip()]
@@ -4254,7 +4287,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             await send_account_summary_to_logs(account_id, session)
             
             await main_message(message)
-            asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Запускаем комментирование
+            _schedule_safe_send_comments(message.from_user.id, session, account_id)
             return
         else:
             # Нет каналов в прогреве - запускаем в стандартном режиме
@@ -4278,7 +4311,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             await send_account_summary_to_logs(account_id, session)
             
             await main_message(message)
-            asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Запускаем комментирование
+            _schedule_safe_send_comments(message.from_user.id, session, account_id)
             return
 
     try:
@@ -4315,7 +4348,7 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
     await send_account_summary_to_logs(account_id, session)
     
     await main_message(message)
-    asyncio.create_task(safe_send_comments(message.from_user.id, session, account_id))  # Запускаем комментирование
+    _schedule_safe_send_comments(message.from_user.id, session, account_id)
 
 
 async def safe_send_comments(user_id, phone, account_id):
@@ -4725,7 +4758,7 @@ async def main():
 
                     active_sessions[key] = True
                     active_account_ids[key] = account["id"]
-                    asyncio.create_task(safe_send_comments(user_id, phone, account["id"]))
+                    _schedule_safe_send_comments(user_id, phone, account["id"])
                     log_file.write(
                         f"Started account {phone} in {account.get('mode', 'unknown')} mode\n"
                     )
