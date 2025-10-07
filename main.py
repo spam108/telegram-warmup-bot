@@ -5,9 +5,10 @@ import logging
 import shutil
 import sqlite3
 from collections import Counter, defaultdict
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, time, timezone, timedelta
-from typing import Dict, List, Optional, Set, Any, Union, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Any, Union, Tuple
 from types import SimpleNamespace
 import random
 import re
@@ -193,7 +194,7 @@ SKIP_SUMMARY_BUTTON_TEXT = "🕒 Сводка пропусков (лог-кан�
 
 
 def ensure_session_file_permissions(session_file: str) -> None:
-    """Ensure that a session SQLite database file is writable."""
+    """Ensure that a session SQLite database file is writable and configured."""
 
     try:
         directory = os.path.dirname(session_file)
@@ -214,12 +215,140 @@ def ensure_session_file_permissions(session_file: str) -> None:
                 logging.warning(
                     "Не удалось изменить права доступа к файлу сессии: %s", session_file
                 )
+
+            _ensure_session_sqlite_configuration(session_file)
     except Exception:
         logging.exception("Ошибка при настройке прав доступа для файла сессии: %s", session_file)
 
 
 COMMENT_LOG_RETENTION_DAYS = 2
 COMMENT_LOG_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
+
+
+_SQLITE_LOCK_MESSAGES: Tuple[str, ...] = ("database is locked", "db is locked")
+
+
+def _is_sqlite_lock_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in _SQLITE_LOCK_MESSAGES)
+
+
+def _ensure_session_sqlite_configuration(session_file: str) -> None:
+    """Ensure the session database uses WAL and sensible pragmas."""
+
+    try:
+        with sqlite3.connect(session_file, timeout=30) as conn:
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_lock_error(exc):
+                    logging.debug(
+                        "Не удалось установить WAL для %s: %s", session_file, exc
+                    )
+
+            try:
+                conn.execute("PRAGMA synchronous=NORMAL")
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_lock_error(exc):
+                    logging.debug(
+                        "Не удалось установить synchronous=NORMAL для %s: %s", session_file, exc
+                    )
+
+            try:
+                conn.execute("PRAGMA locking_mode=NORMAL")
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_lock_error(exc):
+                    logging.debug(
+                        "Не удалось установить locking_mode=NORMAL для %s: %s", session_file, exc
+                    )
+
+            try:
+                conn.commit()
+            except sqlite3.Error:
+                # Игнорируем ошибки коммита для pragma-команд
+                pass
+    except sqlite3.OperationalError as exc:
+        if not _is_sqlite_lock_error(exc):
+            logging.debug("Не удалось открыть файл сессии %s для настройки: %s", session_file, exc)
+
+
+def _configure_client_storage(client: Client) -> None:
+    """Apply defensive SQLite pragmas to an active Pyrogram client."""
+
+    storage = getattr(client, "storage", None)
+    conn = getattr(storage, "conn", None)
+    if conn is None:
+        return
+
+    def _apply_pragma(statement: str, description: str) -> None:
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_lock_error(exc):
+                logging.debug(
+                    "Не удалось применить %s для клиента %s: %s",
+                    description,
+                    getattr(client, "name", "<unknown>"),
+                    exc,
+                )
+
+    _apply_pragma("PRAGMA busy_timeout=30000", "busy_timeout")
+    _apply_pragma("PRAGMA journal_mode=WAL", "journal_mode=WAL")
+    _apply_pragma("PRAGMA synchronous=NORMAL", "synchronous=NORMAL")
+
+
+async def _run_with_sqlite_retries(
+    action: Callable[[], Awaitable[Any]],
+    *,
+    attempts: int = 5,
+    base_delay: float = 0.5,
+) -> Any:
+    """Execute an async callable and retry when SQLite reports a locked database."""
+
+    delay = base_delay
+    last_exc: Optional[BaseException] = None
+
+    for attempt in range(attempts):
+        try:
+            return await action()
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if any(marker in message for marker in _SQLITE_LOCK_MESSAGES) and attempt + 1 < attempts:
+                last_exc = exc
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            raise
+
+    if last_exc is not None:
+        raise last_exc
+
+
+async def _connect_client_with_retries(client: Client, *, attempts: int = 5, base_delay: float = 0.5) -> None:
+    await _run_with_sqlite_retries(client.connect, attempts=attempts, base_delay=base_delay)
+    _configure_client_storage(client)
+
+
+async def _start_client_with_retries(client: Client, *, attempts: int = 5, base_delay: float = 0.5) -> None:
+    await _run_with_sqlite_retries(client.start, attempts=attempts, base_delay=base_delay)
+    _configure_client_storage(client)
+
+
+@asynccontextmanager
+async def _client_session(
+    client: Client,
+    *,
+    attempts: int = 5,
+    base_delay: float = 0.5,
+):
+    await _start_client_with_retries(client, attempts=attempts, base_delay=base_delay)
+    try:
+        yield client
+    finally:
+        try:
+            await client.stop()
+        except Exception:
+            logging.exception("Не удалось корректно остановить клиента %s", getattr(client, "name", "<unknown>"))
 
 
 CHECK_ACCOUNT_SHUTDOWN_TIMEOUT = 5.0
@@ -1346,8 +1475,8 @@ async def check_account(user_id, phone):
     )
 
     try:
-        await client.connect()
-        await client.get_me()
+        await _connect_client_with_retries(client)
+        await _run_with_sqlite_retries(client.get_me)
         return True
     except sqlite3.OperationalError as e:
         if "database is locked" in str(e).lower():
@@ -2404,7 +2533,7 @@ async def _prepare_regular_channels_prompt(message: Message, state: FSMContext) 
         api_hash=API_HASH)
 
     if await check_account(message.from_user.id, session):
-        async with app:
+        async with _client_session(app):
             async for dialog in app.get_dialogs():
                 chat = dialog.chat
                 if str(chat.type) == "ChatType.CHANNEL" and chat.username is not None:
@@ -2778,7 +2907,7 @@ async def _get_available_quick_reaction_emojis(
     )
 
     try:
-        async with client:
+        async with _client_session(client):
             return await _query(client)
     except Exception:
         logging.exception(
@@ -3135,7 +3264,7 @@ async def add_channels(message: Message, state: FSMContext) -> None:
             api_id=API_ID,
             api_hash=API_HASH)
         if await check_account(message.from_user.id, session):
-            async with app:  
+            async with _client_session(app):
                 for chl in channels:
                     await asyncio.sleep(random.uniform(20, 30))
 
@@ -3313,7 +3442,7 @@ async def send_comments(userid, session, account_id):
                 last_reaction_at=last_reaction_at_dt,
             )
         try:
-            await app.start()
+            await _start_client_with_retries(app)
             key = make_session_key(userid, session)
             while active_sessions.get(key, False):
                 await asyncio.sleep(1)
@@ -3455,7 +3584,7 @@ async def join_channel(
             api_hash=API_HASH,
         )
 
-        async with client:
+        async with _client_session(client):
             return await _join_with_client(client)
 
     except TransientJoinError:
@@ -4309,7 +4438,7 @@ async def get_account_summary(account_id):
                 api_id=API_ID,
                 api_hash=API_HASH
             )
-            async with app:
+            async with _client_session(app):
                 async for dialog in app.get_dialogs():
                     chat = dialog.chat
                     if str(chat.type) == "ChatType.CHANNEL" and chat.username:
