@@ -1,17 +1,43 @@
 import os
 import json
 import asyncio
+import importlib
+import importlib.util
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import aiosqlite
-import asyncpg
+
+if TYPE_CHECKING:  # pragma: no cover - imported for typing only
+    import asyncpg as asyncpg_type
+
+_asyncpg_spec = importlib.util.find_spec("asyncpg")
+
+if _asyncpg_spec is not None:
+    asyncpg = importlib.import_module("asyncpg")
+else:  # pragma: no cover - executed only when asyncpg is not installed
+    asyncpg = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:
+    AsyncpgPool = asyncpg_type.pool.Pool  # pragma: no cover - typing only
+else:
+    AsyncpgPool = Any
+
+
+class _AsyncpgUniqueViolationError(Exception):
+    """Placeholder error used when asyncpg is unavailable."""
+
+
+if _asyncpg_spec is not None:
+    AsyncpgUniqueViolationError = asyncpg.UniqueViolationError  # type: ignore[attr-defined]
+else:  # pragma: no cover - executed only when asyncpg is not installed
+    AsyncpgUniqueViolationError = _AsyncpgUniqueViolationError
 
 
 _CONN: Optional[aiosqlite.Connection] = None
-_POOL: Optional[asyncpg.pool.Pool] = None
+_POOL: Optional[AsyncpgPool] = None
 _BACKEND: Optional[str] = None
 _UNSET = object()
 
@@ -66,7 +92,7 @@ def _serialize_list(value: Optional[Iterable[str]]) -> Optional[str]:
     return json.dumps(list(value))
 
 
-def _require_pool() -> asyncpg.pool.Pool:
+def _require_pool() -> AsyncpgPool:
     if not _is_postgres() or _POOL is None:
         raise DatabaseNotInitialized("PostgreSQL connection pool is not initialised. Call init_db() first.")
     return _POOL
@@ -198,6 +224,10 @@ async def init_db() -> None:
         raise RuntimeError("DATABASE_URL environment variable is not set")
 
     if dsn.startswith(("postgres://", "postgresql://")):
+        if asyncpg is None:  # pragma: no cover - requires asyncpg installed
+            raise RuntimeError(
+                "asyncpg is required for PostgreSQL connections. Install the 'asyncpg' package to use a PostgreSQL DSN."
+            )
         _BACKEND = "postgres"
         _POOL = await asyncpg.create_pool(dsn)
         await _init_postgres_schema()
@@ -224,6 +254,9 @@ async def init_db() -> None:
     await conn.execute("PRAGMA foreign_keys = ON")
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA busy_timeout = 5000")
+
+    await _init_sqlite_schema(conn)
+    _CONN = conn
 
 async def _init_sqlite_schema(conn: aiosqlite.Connection) -> None:
     await conn.execute(
@@ -802,8 +835,15 @@ async def update_account_settings(
         WHERE id = ?
     """
 
-    await _execute(query, tuple(values))
-    await _commit()
+    async def _perform_update() -> None:
+        await _execute(query, tuple(values))
+        await _commit()
+
+    if _is_sqlite():
+        await _retry_db_operation(_perform_update, max_retries=5)
+    else:
+        await _perform_update()
+
     print(f"DEBUG: SQL update completed successfully for account_id={account_id}")
 
 
@@ -869,8 +909,14 @@ async def bulk_update_reaction_settings(
         WHERE user_id = ?
     """
 
-    await _execute(query, tuple(values))
-    await _commit()
+    async def _perform_update() -> None:
+        await _execute(query, tuple(values))
+        await _commit()
+
+    if _is_sqlite():
+        await _retry_db_operation(_perform_update, max_retries=5)
+    else:
+        await _perform_update()
 
 
 async def update_last_reaction_at(account_id: int, timestamp: Optional[datetime]) -> None:
@@ -937,7 +983,7 @@ async def sync_warmup_channels(account_id: int, channels: List[str]) -> None:
         except sqlite3.IntegrityError as exc:  # pragma: no cover - defensive branch
             if "unique" not in str(exc).lower():
                 raise
-        except asyncpg.UniqueViolationError:  # pragma: no cover - PostgreSQL duplicate guard
+        except AsyncpgUniqueViolationError:  # pragma: no cover - PostgreSQL duplicate guard
             continue
 
     await _execute(
