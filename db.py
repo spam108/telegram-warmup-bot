@@ -79,9 +79,17 @@ async def init_db() -> None:
     if db_path != ":memory:":
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    conn = await aiosqlite.connect(db_path)
+    # Give SQLite more room to breathe under concurrent load.  The warmup bot
+    # opens a single connection that is shared across many asyncio tasks.  When
+    # several of those tasks try to write at the same time the default settings
+    # tend to raise ``database is locked`` errors.  Enabling WAL drastically
+    # improves writer concurrency and the busy timeout makes SQLite wait for a
+    # short period instead of failing immediately.
+    conn = await aiosqlite.connect(db_path, timeout=30)
     conn.row_factory = aiosqlite.Row
     await conn.execute("PRAGMA foreign_keys = ON")
+    await conn.execute("PRAGMA journal_mode=WAL")
+    await conn.execute("PRAGMA busy_timeout = 5000")
 
     await conn.execute(
         """
