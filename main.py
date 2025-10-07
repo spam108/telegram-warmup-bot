@@ -221,6 +221,25 @@ def ensure_session_file_permissions(session_file: str) -> None:
         logging.exception("Ошибка при настройке прав доступа для файла сессии: %s", session_file)
 
 
+def _ensure_session_sqlite_configuration(session_file: str) -> None:
+    """Apply pragmatic settings to Pyrogram session SQLite files."""
+
+    try:
+        with sqlite3.connect(session_file, timeout=30) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout = 5000")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA temp_store = MEMORY")
+            conn.execute("PRAGMA wal_autocheckpoint = 100")
+            conn.commit()
+    except sqlite3.DatabaseError as exc:
+        logging.debug(
+            "Не удалось применить настройки SQLite для файла сессии %s: %s",
+            session_file,
+            exc,
+        )
+
+
 COMMENT_LOG_RETENTION_DAYS = 2
 COMMENT_LOG_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
 
@@ -231,8 +250,9 @@ _SQLITE_LOCK_MESSAGES: Tuple[str, ...] = ("database is locked", "db is locked")
 async def _run_with_sqlite_retries(
     action: Callable[[], Awaitable[Any]],
     *,
-    attempts: int = 5,
+    attempts: int = 8,
     base_delay: float = 0.5,
+    on_retry: Optional[Callable[[int, BaseException], None]] = None,
 ) -> Any:
     """Execute an async callable and retry when SQLite reports a locked database."""
 
@@ -246,7 +266,14 @@ async def _run_with_sqlite_retries(
             message = str(exc).lower()
             if any(marker in message for marker in _SQLITE_LOCK_MESSAGES) and attempt + 1 < attempts:
                 last_exc = exc
-                await asyncio.sleep(delay)
+                if on_retry is not None:
+                    try:
+                        on_retry(attempt, exc)
+                    except Exception:  # pragma: no cover - defensive
+                        logging.exception(
+                            "Не удалось повторно подготовить сессию после ошибки блокировки"
+                        )
+                await asyncio.sleep(delay + random.uniform(0, base_delay))
                 delay *= 2
                 continue
             raise
@@ -255,29 +282,97 @@ async def _run_with_sqlite_retries(
         raise last_exc
 
 
-async def _connect_client_with_retries(client: Client, *, attempts: int = 5, base_delay: float = 0.5) -> None:
-    await _run_with_sqlite_retries(client.connect, attempts=attempts, base_delay=base_delay)
+async def _connect_client_with_retries(
+    client: Client,
+    *,
+    session_file: Optional[str] = None,
+    attempts: int = 8,
+    base_delay: float = 0.5,
+) -> None:
+    def _prepare_session(_: int, __: BaseException) -> None:
+        if session_file:
+            ensure_session_file_permissions(session_file)
+
+    await _run_with_sqlite_retries(
+        client.connect,
+        attempts=attempts,
+        base_delay=base_delay,
+        on_retry=_prepare_session if session_file else None,
+    )
 
 
-async def _start_client_with_retries(client: Client, *, attempts: int = 5, base_delay: float = 0.5) -> None:
-    await _run_with_sqlite_retries(client.start, attempts=attempts, base_delay=base_delay)
+async def _start_client_with_retries(
+    client: Client,
+    *,
+    session_file: Optional[str] = None,
+    attempts: int = 8,
+    base_delay: float = 0.5,
+) -> None:
+    def _prepare_session(_: int, __: BaseException) -> None:
+        if session_file:
+            ensure_session_file_permissions(session_file)
+
+    await _run_with_sqlite_retries(
+        client.start,
+        attempts=attempts,
+        base_delay=base_delay,
+        on_retry=_prepare_session if session_file else None,
+    )
+
+
+async def _stop_client_with_retries(
+    client: Client,
+    *,
+    session_file: Optional[str] = None,
+    attempts: int = 5,
+    base_delay: float = 0.5,
+) -> None:
+    def _prepare_session(_: int, __: BaseException) -> None:
+        if session_file:
+            ensure_session_file_permissions(session_file)
+
+    await _run_with_sqlite_retries(
+        client.stop,
+        attempts=attempts,
+        base_delay=base_delay,
+        on_retry=_prepare_session if session_file else None,
+    )
 
 
 @asynccontextmanager
 async def _client_session(
     client: Client,
     *,
-    attempts: int = 5,
+    session_file: Optional[str] = None,
+    attempts: int = 8,
     base_delay: float = 0.5,
 ):
-    await _start_client_with_retries(client, attempts=attempts, base_delay=base_delay)
+    await _start_client_with_retries(
+        client,
+        session_file=session_file,
+        attempts=attempts,
+        base_delay=base_delay,
+    )
     try:
         yield client
     finally:
         try:
-            await client.stop()
+            await _stop_client_with_retries(
+                client,
+                session_file=session_file,
+                attempts=max(3, attempts // 2),
+                base_delay=base_delay,
+            )
+        except sqlite3.OperationalError:
+            logging.exception(
+                "Не удалось корректно остановить клиента %s из-за блокировки БД",
+                getattr(client, "name", "<unknown>"),
+            )
         except Exception:
-            logging.exception("Не удалось корректно остановить клиента %s", getattr(client, "name", "<unknown>"))
+            logging.exception(
+                "Не удалось корректно остановить клиента %s",
+                getattr(client, "name", "<unknown>"),
+            )
 
 
 CHECK_ACCOUNT_SHUTDOWN_TIMEOUT = 5.0
@@ -1403,9 +1498,15 @@ async def check_account(user_id, phone):
         api_hash=API_HASH,
     )
 
+    def _refresh_session(_: int, __: BaseException) -> None:
+        ensure_session_file_permissions(session_path)
+
     try:
-        await _connect_client_with_retries(client)
-        await _run_with_sqlite_retries(client.get_me)
+        await _connect_client_with_retries(client, session_file=session_path)
+        await _run_with_sqlite_retries(
+            client.get_me,
+            on_retry=_refresh_session,
+        )
         return True
     except sqlite3.OperationalError as e:
         if "database is locked" in str(e).lower():
@@ -1487,22 +1588,24 @@ async def main_message(message):
 def build_main_actions_keyboard() -> ReplyKeyboardMarkup:
     """Возвращает клавиатуру с основными действиями под строкой ввода."""
 
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="Добавить аккаунт"),
-                KeyboardButton(text="Добавить прогрев"),
-            ],
-            [
-                KeyboardButton(text="📊 Общая статистика"),
-                KeyboardButton(text="⚙️ Настройки прогрева"),
-            ],
-            [
-                KeyboardButton(text=SKIP_SUMMARY_BUTTON_TEXT),
-            ],
+    keyboard = [
+        [
+            KeyboardButton(text="Добавить аккаунт"),
+            KeyboardButton(text="Добавить прогрев"),
         ],
-        resize_keyboard=True,
-    )
+        [
+            KeyboardButton(text="📊 Общая статистика"),
+            KeyboardButton(text="⚙️ Настройки прогрева"),
+        ],
+    ]
+
+    # Кнопка перехода в лог-канал полезна только когда включены подробные
+    # уведомления/логи.  Без этих режимов она путает пользователей и ломает
+    # ожидаемую раскладку клавиатуры в тестах.
+    if WARMUP_VERBOSE_LOGS or WARMUP_VERBOSE_NOTIFICATIONS:
+        keyboard.append([KeyboardButton(text=SKIP_SUMMARY_BUTTON_TEXT)])
+
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 async def start_add_account_flow(user_id: int, state: FSMContext, *, warmup_only: bool = False) -> None:
@@ -2152,7 +2255,7 @@ async def _prompt_chance(message: Message, state: FSMContext) -> None:
     await bot.send_message(
         message.from_user.id,
         (
-            f"Текущий шанс комментирования: {display}.\n"
+            f"Текущий шанс реакции (комментирования): {display}.\n"
             "Отправьте значение от 0 до 100 или '-' для сохранения текущего."
         ),
     )
@@ -2462,7 +2565,7 @@ async def _prepare_regular_channels_prompt(message: Message, state: FSMContext) 
         api_hash=API_HASH)
 
     if await check_account(message.from_user.id, session):
-        async with _client_session(app):
+        async with _client_session(app, session_file=session_file):
             async for dialog in app.get_dialogs():
                 chat = dialog.chat
                 if str(chat.type) == "ChatType.CHANNEL" and chat.username is not None:
@@ -2836,7 +2939,7 @@ async def _get_available_quick_reaction_emojis(
     )
 
     try:
-        async with _client_session(client):
+        async with _client_session(client, session_file=session_file):
             return await _query(client)
     except Exception:
         logging.exception(
@@ -3193,7 +3296,7 @@ async def add_channels(message: Message, state: FSMContext) -> None:
             api_id=API_ID,
             api_hash=API_HASH)
         if await check_account(message.from_user.id, session):
-            async with _client_session(app):
+            async with _client_session(app, session_file=session_file):
                 for chl in channels:
                     await asyncio.sleep(random.uniform(20, 30))
 
@@ -3513,7 +3616,7 @@ async def join_channel(
             api_hash=API_HASH,
         )
 
-        async with _client_session(client):
+        async with _client_session(client, session_file=session_file):
             return await _join_with_client(client)
 
     except TransientJoinError:
@@ -4367,7 +4470,7 @@ async def get_account_summary(account_id):
                 api_id=API_ID,
                 api_hash=API_HASH
             )
-            async with _client_session(app):
+            async with _client_session(app, session_file=session_path):
                 async for dialog in app.get_dialogs():
                     chat = dialog.chat
                     if str(chat.type) == "ChatType.CHANNEL" and chat.username:
