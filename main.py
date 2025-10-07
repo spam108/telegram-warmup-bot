@@ -1722,23 +1722,23 @@ async def check_account(user_id, phone):
                         "Не удалось сохранить строку сессии после проверки аккаунта %s",
                         phone,
                     )
-
-                try:
-                    await _stop_client_with_retries(
-                        client,
-                        session_file=None if uses_in_memory else session_path,
-                        attempts=4,
-                    )
-                except sqlite3.OperationalError:
-                    logging.exception(
-                        "Не удалось остановить клиент проверки аккаунта %s из-за блокировки БД",
-                        getattr(client, "name", "<unknown>"),
-                    )
-                except Exception:
-                    logging.exception(
-                        "Не удалось остановить клиент проверки аккаунта %s",
-                        getattr(client, "name", "<unknown>"),
-                    )
+                finally:
+                    try:
+                        await _stop_client_with_retries(
+                            client,
+                            session_file=None if uses_in_memory else session_path,
+                            attempts=4,
+                        )
+                    except sqlite3.OperationalError:
+                        logging.exception(
+                            "Не удалось остановить клиент проверки аккаунта %s из-за блокировки БД",
+                            getattr(client, "name", "<unknown>"),
+                        )
+                    except Exception:
+                        logging.exception(
+                            "Не удалось остановить клиент проверки аккаунта %s",
+                            getattr(client, "name", "<unknown>"),
+                        )
 
 async def main_message(message):
     user_id = message.from_user.id
