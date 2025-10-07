@@ -5,9 +5,10 @@ import logging
 import shutil
 import sqlite3
 from collections import Counter, defaultdict
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, time, timezone, timedelta
-from typing import Dict, List, Optional, Set, Any, Union, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Any, Union, Tuple
 from types import SimpleNamespace
 import random
 import re
@@ -220,6 +221,61 @@ def ensure_session_file_permissions(session_file: str) -> None:
 
 COMMENT_LOG_RETENTION_DAYS = 2
 COMMENT_LOG_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
+
+
+_SQLITE_LOCK_MESSAGES: Tuple[str, ...] = ("database is locked", "db is locked")
+
+
+async def _run_with_sqlite_retries(
+    action: Callable[[], Awaitable[Any]],
+    *,
+    attempts: int = 5,
+    base_delay: float = 0.5,
+) -> Any:
+    """Execute an async callable and retry when SQLite reports a locked database."""
+
+    delay = base_delay
+    last_exc: Optional[BaseException] = None
+
+    for attempt in range(attempts):
+        try:
+            return await action()
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if any(marker in message for marker in _SQLITE_LOCK_MESSAGES) and attempt + 1 < attempts:
+                last_exc = exc
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            raise
+
+    if last_exc is not None:
+        raise last_exc
+
+
+async def _connect_client_with_retries(client: Client, *, attempts: int = 5, base_delay: float = 0.5) -> None:
+    await _run_with_sqlite_retries(client.connect, attempts=attempts, base_delay=base_delay)
+
+
+async def _start_client_with_retries(client: Client, *, attempts: int = 5, base_delay: float = 0.5) -> None:
+    await _run_with_sqlite_retries(client.start, attempts=attempts, base_delay=base_delay)
+
+
+@asynccontextmanager
+async def _client_session(
+    client: Client,
+    *,
+    attempts: int = 5,
+    base_delay: float = 0.5,
+):
+    await _start_client_with_retries(client, attempts=attempts, base_delay=base_delay)
+    try:
+        yield client
+    finally:
+        try:
+            await client.stop()
+        except Exception:
+            logging.exception("Не удалось корректно остановить клиента %s", getattr(client, "name", "<unknown>"))
 
 
 CHECK_ACCOUNT_SHUTDOWN_TIMEOUT = 5.0
@@ -1346,8 +1402,8 @@ async def check_account(user_id, phone):
     )
 
     try:
-        await client.connect()
-        await client.get_me()
+        await _connect_client_with_retries(client)
+        await _run_with_sqlite_retries(client.get_me)
         return True
     except sqlite3.OperationalError as e:
         if "database is locked" in str(e).lower():
@@ -2404,7 +2460,7 @@ async def _prepare_regular_channels_prompt(message: Message, state: FSMContext) 
         api_hash=API_HASH)
 
     if await check_account(message.from_user.id, session):
-        async with app:
+        async with _client_session(app):
             async for dialog in app.get_dialogs():
                 chat = dialog.chat
                 if str(chat.type) == "ChatType.CHANNEL" and chat.username is not None:
@@ -2778,7 +2834,7 @@ async def _get_available_quick_reaction_emojis(
     )
 
     try:
-        async with client:
+        async with _client_session(client):
             return await _query(client)
     except Exception:
         logging.exception(
@@ -3135,7 +3191,7 @@ async def add_channels(message: Message, state: FSMContext) -> None:
             api_id=API_ID,
             api_hash=API_HASH)
         if await check_account(message.from_user.id, session):
-            async with app:  
+            async with _client_session(app):
                 for chl in channels:
                     await asyncio.sleep(random.uniform(20, 30))
 
@@ -3313,7 +3369,7 @@ async def send_comments(userid, session, account_id):
                 last_reaction_at=last_reaction_at_dt,
             )
         try:
-            await app.start()
+            await _start_client_with_retries(app)
             key = make_session_key(userid, session)
             while active_sessions.get(key, False):
                 await asyncio.sleep(1)
@@ -3455,7 +3511,7 @@ async def join_channel(
             api_hash=API_HASH,
         )
 
-        async with client:
+        async with _client_session(client):
             return await _join_with_client(client)
 
     except TransientJoinError:
@@ -4309,7 +4365,7 @@ async def get_account_summary(account_id):
                 api_id=API_ID,
                 api_hash=API_HASH
             )
-            async with app:
+            async with _client_session(app):
                 async for dialog in app.get_dialogs():
                     chat = dialog.chat
                     if str(chat.type) == "ChatType.CHANNEL" and chat.username:
