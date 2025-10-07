@@ -1717,6 +1717,13 @@ async def check_account(user_id, phone):
             if started:
                 try:
                     await _persist_session_string(user_id, phone, client)
+                except Exception:
+                    logging.exception(
+                        "Не удалось сохранить строку сессии после проверки аккаунта %s",
+                        phone,
+                    )
+
+                try:
                     await _stop_client_with_retries(
                         client,
                         session_file=None if uses_in_memory else session_path,
