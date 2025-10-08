@@ -231,6 +231,20 @@ async def _init_postgres_schema() -> None:
 
         await connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS account_settings (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                setting_key TEXT NOT NULL,
+                setting_value TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (account_id, setting_key)
+            )
+            """
+        )
+
+        await connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS warmup_channels (
                 id BIGSERIAL PRIMARY KEY,
                 account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -266,13 +280,6 @@ async def _init_postgres_schema() -> None:
 
         await connection.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_warmup_channels_pending
-            ON warmup_channels (account_id, status, position)
-            """
-        )
-
-        await connection.execute(
-            """
             CREATE TABLE IF NOT EXISTS comment_logs (
                 id BIGSERIAL PRIMARY KEY,
                 account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -287,29 +294,36 @@ async def _init_postgres_schema() -> None:
 
         await connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS account_settings (
-                id BIGSERIAL PRIMARY KEY,
-                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                setting_key TEXT NOT NULL,
-                setting_value TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (account_id, setting_key)
-            )
-            """
-        )
-
-        await connection.execute(
-            """
             CREATE TABLE IF NOT EXISTS telegram_sessions (
                 id BIGSERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                user_id BIGINT NOT NULL,
                 phone TEXT NOT NULL,
                 session_data BYTEA,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE (user_id, phone)
             )
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_account_settings_account_id
+            ON account_settings (account_id)
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_warmup_channels_pending
+            ON warmup_channels (account_id, status, position)
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_telegram_sessions_user_phone
+            ON telegram_sessions (user_id, phone)
             """
         )
 
