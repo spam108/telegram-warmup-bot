@@ -32,6 +32,7 @@ else:  # pragma: no cover - executed only when asyncpg is not installed
 
 
 _POOL: Optional[AsyncpgPool] = None
+_BACKEND: str = "postgres"
 _UNSET = object()
 
 
@@ -45,6 +46,14 @@ def _normalise_postgres_dsn(dsn: str) -> str:
 
 class DatabaseNotInitialized(RuntimeError):
     pass
+
+
+def _is_postgres() -> bool:
+    return _BACKEND == "postgres"
+
+
+def _is_sqlite() -> bool:
+    return _BACKEND == "sqlite"
 
 
 def _deserialize_list(value: Optional[str]) -> List[str]:
@@ -109,8 +118,31 @@ def _convert_placeholders(query: str) -> str:
     return "".join(result)
 
 
+def _adapt_bool(value: bool) -> Any:
+    if _is_postgres():
+        return value
+    return 1 if value else 0
+
+
+def _adapt_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return _adapt_bool(value)
+    if isinstance(value, (list, tuple)):
+        value_type = type(value)
+        return value_type(_adapt_value(item) for item in value)
+    return value
+
+
+def _prepare_params(params: Sequence[Any]) -> Tuple[Any, ...]:
+    if not params:
+        return tuple()
+    return tuple(_adapt_value(param) for param in params)
+
+
 def _prepare_query(query: str, params: Sequence[Any]) -> Tuple[str, Tuple[Any, ...]]:
-    return _convert_placeholders(query), tuple(params)
+    prepared_query = _convert_placeholders(query)
+    prepared_params = _prepare_params(params)
+    return prepared_query, prepared_params
 
 
 async def _execute(query: str, params: Sequence[Any] = ()) -> None:
@@ -152,7 +184,7 @@ async def _fetchall(query: str, params: Sequence[Any] = ()):
 async def init_db() -> None:
     """Initialise database connection pool and ensure schema exists."""
 
-    global _POOL
+    global _POOL, _BACKEND
 
     if _POOL is not None:
         return
@@ -172,6 +204,7 @@ async def init_db() -> None:
         )
 
     _POOL = await asyncpg.create_pool(dsn)
+    _BACKEND = "postgres"
     await _init_postgres_schema()
 
 async def _init_postgres_schema() -> None:
