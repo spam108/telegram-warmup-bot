@@ -2,6 +2,7 @@ import os
 import json
 import importlib
 import importlib.util
+import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
@@ -14,6 +15,9 @@ if _asyncpg_spec is not None:
     asyncpg = importlib.import_module("asyncpg")
 else:  # pragma: no cover - executed only when asyncpg is not installed
     asyncpg = None  # type: ignore[assignment]
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     AsyncpgPool = asyncpg_type.pool.Pool  # pragma: no cover - typing only
@@ -118,7 +122,9 @@ def _convert_placeholders(query: str) -> str:
     return "".join(result)
 
 
-def _adapt_bool(value: bool) -> Any:
+def adapt_bool(value: bool) -> Any:
+    """Universal adapter for boolean values across database backends."""
+
     if _is_postgres():
         return value
     return 1 if value else 0
@@ -126,14 +132,16 @@ def _adapt_bool(value: bool) -> Any:
 
 def _adapt_value(value: Any) -> Any:
     if isinstance(value, bool):
-        return _adapt_bool(value)
+        return adapt_bool(value)
     if isinstance(value, (list, tuple)):
         value_type = type(value)
         return value_type(_adapt_value(item) for item in value)
     return value
 
 
-def _prepare_params(params: Sequence[Any]) -> Tuple[Any, ...]:
+def adapt_params(params: Sequence[Any]) -> Tuple[Any, ...]:
+    """Adapt a sequence of parameters for the active database backend."""
+
     if not params:
         return tuple()
     return tuple(_adapt_value(param) for param in params)
@@ -141,7 +149,7 @@ def _prepare_params(params: Sequence[Any]) -> Tuple[Any, ...]:
 
 def _prepare_query(query: str, params: Sequence[Any]) -> Tuple[str, Tuple[Any, ...]]:
     prepared_query = _convert_placeholders(query)
-    prepared_params = _prepare_params(params)
+    prepared_params = adapt_params(params)
     return prepared_query, prepared_params
 
 
@@ -149,6 +157,7 @@ async def _execute(query: str, params: Sequence[Any] = ()) -> None:
     params_tuple = _as_tuple(params)
     pool = _require_pool()
     prepared_query, prepared_params = _prepare_query(query, params_tuple)
+    logger.debug("Executing query: %s with params: %s", prepared_query, prepared_params)
     async with pool.acquire() as connection:
         await connection.execute(prepared_query, *prepared_params)
 
@@ -157,6 +166,7 @@ async def _execute_rowcount(query: str, params: Sequence[Any] = ()) -> int:
     params_tuple = _as_tuple(params)
     pool = _require_pool()
     prepared_query, prepared_params = _prepare_query(query, params_tuple)
+    logger.debug("Executing query for rowcount: %s with params: %s", prepared_query, prepared_params)
     async with pool.acquire() as connection:
         result = await connection.execute(prepared_query, *prepared_params)
     try:
@@ -169,6 +179,7 @@ async def _fetchone(query: str, params: Sequence[Any] = ()):
     params_tuple = _as_tuple(params)
     pool = _require_pool()
     prepared_query, prepared_params = _prepare_query(query, params_tuple)
+    logger.debug("Fetching one: %s with params: %s", prepared_query, prepared_params)
     async with pool.acquire() as connection:
         return await connection.fetchrow(prepared_query, *prepared_params)
 
@@ -177,6 +188,7 @@ async def _fetchall(query: str, params: Sequence[Any] = ()):
     params_tuple = _as_tuple(params)
     pool = _require_pool()
     prepared_query, prepared_params = _prepare_query(query, params_tuple)
+    logger.debug("Fetching all: %s with params: %s", prepared_query, prepared_params)
     async with pool.acquire() as connection:
         return await connection.fetch(prepared_query, *prepared_params)
 
@@ -511,7 +523,7 @@ async def ensure_user(user_id: int) -> None:
 async def set_user_authenticated(user_id: int, value: bool) -> None:
     await _execute(
         "UPDATE users SET is_authenticated = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
-        (value, user_id),
+        (adapt_bool(value), user_id),
     )
 
 
@@ -616,10 +628,13 @@ async def update_account_settings(
     channels: Optional[List[str]] = None,
     reactions_enabled: Any = _UNSET,
 ) -> None:
-    print(
-        "DEBUG: update_account_settings called with "
-        f"account_id={account_id}, chance={chance}, sleep_min={sleep_min}, "
-        f"sleep_max={sleep_max}, system_prompt={system_prompt}"
+    logger.debug(
+        "update_account_settings called with account_id=%s, chance=%s, sleep_min=%s, sleep_max=%s, system_prompt=%s",
+        account_id,
+        chance,
+        sleep_min,
+        sleep_max,
+        system_prompt,
     )
 
     updates: List[str] = []
@@ -672,10 +687,13 @@ async def update_account_settings(
         values.append(_serialize_list(channels))
     if reactions_enabled is not _UNSET:
         updates.append("reactions_enabled = ?")
-        values.append(None if reactions_enabled is None else bool(reactions_enabled))
+        if reactions_enabled is None:
+            values.append(None)
+        else:
+            values.append(adapt_bool(bool(reactions_enabled)))
 
     if not updates:
-        print("DEBUG: No updates to perform")
+        logger.debug("update_account_settings: no updates to apply for account_id=%s", account_id)
         return
 
     values.append(account_id)
@@ -688,7 +706,7 @@ async def update_account_settings(
 
     await _execute(query, tuple(values))
 
-    print(f"DEBUG: SQL update completed successfully for account_id={account_id}")
+    logger.debug("update_account_settings completed for account_id=%s", account_id)
 
 
 async def bulk_update_reaction_settings(
@@ -733,7 +751,10 @@ async def bulk_update_reaction_settings(
         values.append(reaction_limit_per_message)
     if reactions_enabled is not _UNSET:
         updates.append("reactions_enabled = ?")
-        values.append(None if reactions_enabled is None else bool(reactions_enabled))
+        if reactions_enabled is None:
+            values.append(None)
+        else:
+            values.append(adapt_bool(bool(reactions_enabled)))
 
     if not updates:
         return
@@ -960,6 +981,7 @@ async def get_warmup_stats(account_id: int) -> Optional[Dict[str, Any]]:
 
 
 async def mark_account_running(account_id: int) -> None:
+    logger.debug("Marking account %s as running", account_id)
     await _execute(
         """
         UPDATE accounts
@@ -973,6 +995,7 @@ async def mark_account_running(account_id: int) -> None:
 
 
 async def mark_account_stopped(account_id: int) -> None:
+    logger.debug("Marking account %s as stopped", account_id)
     await _execute(
         """
         UPDATE accounts
