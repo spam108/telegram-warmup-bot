@@ -9,14 +9,14 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5433:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     restart: unless-stopped
 
   bot:
     build: .
     container_name: ${PROJECT_NAME:-telegrambot}_bot
     environment:
-      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-bot_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-telegram_bot}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-bot_user}:${POSTGRES_PASSWORD}@${PROJECT_NAME:-telegrambot}_postgres:5432/${POSTGRES_DB:-telegram_bot}
     env_file:
       - .env
     volumes:
