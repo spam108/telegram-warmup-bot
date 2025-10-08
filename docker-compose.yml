@@ -1,22 +1,24 @@
 services:
   postgres:
     image: postgres:15
-    container_name: ${PROJECT_NAME:-telegrambot}_postgres
+    container_name: ${PROJECT_NAME}_postgres
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-telegram_bot}
-      POSTGRES_USER: ${POSTGRES_USER:-bot_user}
+      POSTGRES_DB: ${POSTGRES_DB:-${PROJECT_NAME}_db}
+      POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ${PROJECT_NAME}_postgres_data:/var/lib/postgresql/data
     ports:
-      - "5433:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     restart: unless-stopped
+    networks:
+      - project
 
   bot:
     build: .
-    container_name: ${PROJECT_NAME:-telegrambot}_bot
+    container_name: ${PROJECT_NAME}_bot
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-bot_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-telegram_bot}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${PROJECT_NAME}_postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-${PROJECT_NAME}_db}
     env_file:
       - .env
     volumes:
@@ -28,6 +30,12 @@ services:
     user: "0:0"
     depends_on:
       - postgres
+    networks:
+      - project
 
 volumes:
-  postgres_data:
+  ${PROJECT_NAME}_postgres_data:
+
+networks:
+  project:
+    name: ${PROJECT_NAME}_network
