@@ -16,7 +16,7 @@ services:
     build: .
     container_name: ${PROJECT_NAME:-telegrambot}_bot
     environment:
-      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-bot_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-telegram_bot}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-bot_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-telegram_bot}
     env_file:
       - .env
     volumes:
