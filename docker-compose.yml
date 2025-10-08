@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - ${PROJECT_NAME}_postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     restart: unless-stopped
@@ -34,7 +34,7 @@ services:
       - project
 
 volumes:
-  ${PROJECT_NAME}_postgres_data:
+  postgres_data:
 
 networks:
   project:
