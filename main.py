@@ -339,6 +339,25 @@ async def _stop_client_with_retries(
     )
 
 
+async def _disconnect_client_with_retries(
+    client: Client,
+    *,
+    session_file: Optional[str] = None,
+    attempts: int = 5,
+    base_delay: float = 0.5,
+) -> None:
+    def _prepare_session(_: int, __: BaseException) -> None:
+        if session_file:
+            ensure_session_file_permissions(session_file)
+
+    await _run_with_sqlite_retries(
+        client.disconnect,
+        attempts=attempts,
+        base_delay=base_delay,
+        on_retry=_prepare_session if session_file else None,
+    )
+
+
 @asynccontextmanager
 async def _client_session(
     client: Client,
@@ -1533,32 +1552,12 @@ async def check_account(user_id, phone):
         def _refresh_session(_: int, __: BaseException) -> None:
             ensure_session_file_permissions(session_path)
 
-    def _refresh_session(_: int, __: BaseException) -> None:
-        ensure_session_file_permissions(session_path)
-
-    try:
-        await _connect_client_with_retries(client, session_file=session_path)
-        await _run_with_sqlite_retries(
-            client.get_me,
-            on_retry=_refresh_session,
-        )
-        return True
-    except sqlite3.OperationalError as e:
-        if "database is locked" in str(e).lower():
-            await bot.send_message(user_id, f"Аккаунт {phone} сейчас используется, попробуйте позже")
-            return False
-        raise
-    except Exception as e:
-        await asyncio.sleep(1)
-        await bot.send_message(user_id, f"Аккаунт удален ошибка: {str(e)}")
+        connected = False
+        started = False
 
         try:
-            await _start_client_with_retries(
-                client,
-                session_file=session_path,
-                attempts=6,
-            )
-            started = True
+            await _connect_client_with_retries(client, session_file=session_path)
+            connected = True
             await _run_with_sqlite_retries(
                 client.get_me,
                 on_retry=_refresh_session,
@@ -1573,29 +1572,88 @@ async def check_account(user_id, phone):
             await asyncio.sleep(1)
             await bot.send_message(user_id, f"Аккаунт удален ошибка: {str(e)}")
 
-            if os.path.exists(session_path):
+            if connected and getattr(client, "is_connected", False):
                 try:
-                    os.remove(session_path)
-                except OSError:
-                    pass
-            await delete_account(user_id, phone)
-            return False
-        finally:
-            if started:
-                try:
-                    await _stop_client_with_retries(
+                    await _disconnect_client_with_retries(
                         client,
                         session_file=session_path,
                         attempts=4,
                     )
                 except sqlite3.OperationalError:
                     logging.exception(
-                        "Не удалось остановить клиент проверки аккаунта %s из-за блокировки БД",
+                        "Не удалось отключить клиент проверки аккаунта %s из-за блокировки БД",
                         getattr(client, "name", "<unknown>"),
                     )
                 except Exception:
                     logging.exception(
-                        "Не удалось остановить клиент проверки аккаунта %s",
+                        "Не удалось отключить клиент проверки аккаунта %s",
+                        getattr(client, "name", "<unknown>"),
+                    )
+                connected = False
+
+            try:
+                await _start_client_with_retries(
+                    client,
+                    session_file=session_path,
+                    attempts=6,
+                )
+                started = True
+                await _run_with_sqlite_retries(
+                    client.get_me,
+                    on_retry=_refresh_session,
+                )
+                return True
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e).lower():
+                    await bot.send_message(user_id, f"Аккаунт {phone} сейчас используется, попробуйте позже")
+                    return False
+                raise
+            except Exception as e:
+                await asyncio.sleep(1)
+                await bot.send_message(user_id, f"Аккаунт удален ошибка: {str(e)}")
+
+                if os.path.exists(session_path):
+                    try:
+                        os.remove(session_path)
+                    except OSError:
+                        pass
+                await delete_account(user_id, phone)
+                return False
+            finally:
+                if started:
+                    try:
+                        await _stop_client_with_retries(
+                            client,
+                            session_file=session_path,
+                            attempts=4,
+                        )
+                    except sqlite3.OperationalError:
+                        logging.exception(
+                            "Не удалось остановить клиент проверки аккаунта %s из-за блокировки БД",
+                            getattr(client, "name", "<unknown>"),
+                        )
+                    except Exception:
+                        logging.exception(
+                            "Не удалось остановить клиент проверки аккаунта %s",
+                            getattr(client, "name", "<unknown>"),
+                        )
+                    started = False
+        finally:
+            if connected and getattr(client, "is_connected", False):
+                try:
+                    await _disconnect_client_with_retries(
+                        client,
+                        session_file=session_path,
+                        attempts=4,
+                    )
+                except sqlite3.OperationalError:
+                    logging.exception(
+                        "Не удалось отключить клиент проверки аккаунта %s из-за блокировки БД",
+                        getattr(client, "name", "<unknown>"),
+                    )
+                except Exception:
+                    logging.exception(
+                        "Не удалось отключить клиент проверки аккаунта %s",
                         getattr(client, "name", "<unknown>"),
                     )
 
