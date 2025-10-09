@@ -3,7 +3,7 @@ import json
 import importlib
 import importlib.util
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
@@ -339,6 +339,36 @@ async def _init_postgres_schema() -> None:
 
         await connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS posts (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                channel TEXT NOT NULL,
+                post_id BIGINT NOT NULL,
+                message TEXT,
+                has_media BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(account_id, channel, post_id)
+            )
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reaction_logs (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                channel TEXT NOT NULL,
+                message_id BIGINT NOT NULL,
+                emoji TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        await connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS telegram_sessions (
                 id BIGSERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
@@ -369,6 +399,27 @@ async def _init_postgres_schema() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_telegram_sessions_user_phone
             ON telegram_sessions (user_id, phone)
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_posts_account_id
+            ON posts (account_id)
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_reaction_logs_account_id
+            ON reaction_logs (account_id)
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_reaction_logs_channel_message
+            ON reaction_logs (channel, message_id)
             """
         )
 
@@ -772,7 +823,9 @@ async def bulk_update_reaction_settings(
 
 
 async def update_last_reaction_at(account_id: int, timestamp: Optional[datetime]) -> None:
-    value = timestamp.isoformat() if timestamp is not None else None
+    value = timestamp
+    if value is not None and value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
     await _execute(
         """
         UPDATE accounts
@@ -1046,8 +1099,72 @@ async def add_comment_log(
     )
 
 
+async def record_post(
+    account_id: int,
+    *,
+    channel: str,
+    post_id: int,
+    message: Optional[str],
+    has_media: bool,
+) -> None:
+    await _execute(
+        """
+        INSERT INTO posts (account_id, channel, post_id, message, has_media)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (account_id, channel, post_id) DO UPDATE SET
+            message = EXCLUDED.message,
+            has_media = EXCLUDED.has_media,
+            created_at = CURRENT_TIMESTAMP
+        """,
+        (
+            account_id,
+            channel,
+            post_id,
+            message,
+            adapt_bool(has_media),
+        ),
+    )
+
+
+async def add_reaction_log(
+    account_id: int,
+    *,
+    channel: str,
+    message_id: int,
+    emoji: Optional[str],
+    status: str,
+    error_message: Optional[str] = None,
+) -> None:
+    emoji_value = emoji if emoji else "N/A"
+    await _execute(
+        """
+        INSERT INTO reaction_logs (account_id, channel, message_id, emoji, status, error_message)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            account_id,
+            channel,
+            message_id,
+            emoji_value,
+            status,
+            error_message,
+        ),
+    )
+
+
 async def count_reactions_for_message(channel: str, message_id: int) -> int:
     row = await _fetchone(
+        """
+        SELECT COUNT(*) AS reaction_count
+        FROM reaction_logs
+        WHERE status = 'success' AND channel = ? AND message_id = ?
+        """,
+        (channel, message_id),
+    )
+    if row and row["reaction_count"] is not None:
+        return int(row["reaction_count"])
+
+    fallback_row = await _fetchone(
         """
         SELECT COUNT(*) AS reaction_count
         FROM comment_logs
@@ -1055,9 +1172,9 @@ async def count_reactions_for_message(channel: str, message_id: int) -> int:
         """,
         (channel, message_id),
     )
-    if not row:
+    if not fallback_row:
         return 0
-    return int(row["reaction_count"] or 0)
+    return int(fallback_row["reaction_count"] or 0)
 
 
 async def has_successful_comment_log_entry(
