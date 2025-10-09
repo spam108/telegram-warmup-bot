@@ -135,7 +135,6 @@ VALUES (1, TRUE)
 ON CONFLICT (user_id) DO NOTHING;
 
 INSERT INTO accounts (
-    id,
     user_id,
     phone,
     session_path,
@@ -154,7 +153,6 @@ INSERT INTO accounts (
     chance
 ) VALUES (
     1,
-    1,
     '+10000000000',
     'sessions/1.session',
     'running',
@@ -171,7 +169,7 @@ INSERT INTO accounts (
     90,
     50
 )
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT (user_id, phone) DO NOTHING;
 
 INSERT INTO warmup_settings (
     id,
