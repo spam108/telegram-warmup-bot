@@ -2440,7 +2440,7 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
 
                 await callback_query.answer()
                 await _prompt_system_prompt(callback_query, state)
-                await state.set_state(startaccount.systempromt)
+                await state.set_state(startaccount.system_prompt)
             except Exception as exc:
                 logging.exception("Failed to start account %s for user %s: %s", session, user_id, exc)
                 await bot.send_message(user_id, f"Ошибка: {str(exc)}")
