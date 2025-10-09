@@ -152,6 +152,48 @@ docker-compose logs -f         # Просмотр логов
 - Скрипт `fix_mode.py` можно запускать вручную для принудительного выхода аккаунтов из прогрева.
 - Для очистки устаревших записей комментариев используется автоматическая задача (по умолчанию каждые 6 часов).
 
+### Настройка реакций
+
+- Таблицы `posts` и `reaction_logs` создаются автоматически при первом подключении к базе данных. Они используются для отслеживания обработанных постов и состояний реакций (успех, пропуск, ошибка).
+- Перед выдачей реакций убедитесь, что аккаунт находится в статусе `running` и включает реакции:
+  ```sql
+  UPDATE accounts
+  SET status = 'running', reactions_enabled = TRUE
+  WHERE id = 1;
+  ```
+- Основные параметры хранятся в таблице `accounts` и могут настраиваться напрямую:
+  ```sql
+  UPDATE accounts SET
+      reaction_chance = 70,
+      reaction_discussion_chance = 80,
+      discussion_reply_chance = 50,
+      discussion_reply_prompt = 'Ты молодец',
+      reaction_sleep_min = 30,
+      reaction_sleep_max = 90,
+      reaction_emojis = '["❤️", "👍"]',
+      reaction_limit_per_message = 8,
+      reactions_enabled = TRUE
+  WHERE id = 1;
+  ```
+- Настройки из интерфейса бота автоматически синхронизируются с колонками `accounts`. При необходимости можно использовать метод `bulk_update_reaction_settings` для массового применения.
+
+### Мониторинг реакций
+
+- Все попытки реакций логируются в таблицу `reaction_logs`. Поле `status` принимает значения `success`, `skipped` или `failed`, а `error_message` содержит пояснения.
+- Для оперативного контроля можно использовать SQL-запросы:
+  ```sql
+  SELECT status, COUNT(*)
+  FROM reaction_logs
+  WHERE account_id = 1
+  GROUP BY status;
+  ```
+- Аналитика по реакциям также попадает в `comment_logs`, поэтому существующие отчёты остаются совместимыми.
+- Живые логи удобно просматривать через Docker или journalctl:
+  ```bash
+  docker logs bot_container | grep -i "reaction"
+  docker logs bot_container | grep -i "error"
+  ```
+
 ## Тестирование
 
 Перед развёртыванием рекомендуется выполнить тесты:

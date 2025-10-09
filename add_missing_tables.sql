@@ -18,6 +18,34 @@ CREATE TABLE IF NOT EXISTS comment_logs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Posts table
+CREATE TABLE IF NOT EXISTS posts (
+    id BIGSERIAL PRIMARY KEY,
+    account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL,
+    post_id BIGINT NOT NULL,
+    message TEXT,
+    has_media BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(account_id, channel, post_id)
+);
+
+-- Reaction logs table
+CREATE TABLE IF NOT EXISTS reaction_logs (
+    id BIGSERIAL PRIMARY KEY,
+    account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL,
+    message_id BIGINT NOT NULL,
+    emoji TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_posts_account_id ON posts(account_id);
+CREATE INDEX IF NOT EXISTS idx_reaction_logs_account_id ON reaction_logs(account_id);
+CREATE INDEX IF NOT EXISTS idx_reaction_logs_channel_message ON reaction_logs(channel, message_id);
+
 -- Warmup settings table
 CREATE TABLE IF NOT EXISTS warmup_settings (
     id BIGSERIAL PRIMARY KEY,
