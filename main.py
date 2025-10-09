@@ -218,14 +218,132 @@ async def safe_session_operation(
     coro_func: Callable[[Client], Awaitable[Any]],
     *,
     lock_key: Optional[str] = None,
+    connect_timeout: Optional[float] = None,
+    operation_timeout: Optional[float] = None,
+    disconnect_timeout: Optional[float] = None,
+    operation_name: Optional[str] = None,
 ):
     """Execute ``coro_func`` with exclusive access to a Pyrogram session."""
 
     key = lock_key or session_path
+    op_name = operation_name or session_path
+
+    loop = asyncio.get_running_loop()
+    wait_started_at = loop.time()
+    logging.debug("safe_session_operation[%s]: waiting for lock", op_name)
+
     async with get_session_lock(key):
+        lock_acquired_at = loop.time()
+        logging.debug(
+            "safe_session_operation[%s]: lock acquired in %.2fs",
+            op_name,
+            lock_acquired_at - wait_started_at,
+        )
+
         ensure_session_file_permissions(f"{session_path}.session")
-        async with Client(session_path, API_ID, API_HASH) as app:
-            return await coro_func(app)
+        permissions_ready_at = loop.time()
+        logging.debug(
+            "safe_session_operation[%s]: session file prepared in %.2fs",
+            op_name,
+            permissions_ready_at - lock_acquired_at,
+        )
+
+        logging.debug(
+            "safe_session_operation[%s]: instantiating Client(api_id=%s, session_path=%s)",
+            op_name,
+            API_ID,
+            session_path,
+        )
+
+        app = Client(session_path, API_ID, API_HASH)
+        client_created_at = loop.time()
+        logging.debug(
+            "safe_session_operation[%s]: client object created in %.2fs",
+            op_name,
+            client_created_at - permissions_ready_at,
+        )
+
+        entered_context = False
+        connect_started_at = loop.time()
+
+        try:
+            try:
+                if connect_timeout is not None:
+                    await asyncio.wait_for(app.__aenter__(), timeout=connect_timeout)
+                else:
+                    await app.__aenter__()
+            except asyncio.TimeoutError:
+                logging.error(
+                    "safe_session_operation[%s]: timeout while connecting after %.2fs",
+                    op_name,
+                    loop.time() - connect_started_at,
+                )
+                raise
+
+            entered_context = True
+            connected_at = loop.time()
+            logging.debug(
+                "safe_session_operation[%s]: client connected in %.2fs",
+                op_name,
+                connected_at - connect_started_at,
+            )
+
+            operation_started_at = connected_at
+            try:
+                if operation_timeout is not None:
+                    result = await asyncio.wait_for(
+                        coro_func(app),
+                        timeout=operation_timeout,
+                    )
+                else:
+                    result = await coro_func(app)
+            except asyncio.TimeoutError:
+                logging.error(
+                    "safe_session_operation[%s]: timeout while running operation after %.2fs",
+                    op_name,
+                    loop.time() - operation_started_at,
+                )
+                raise
+
+            finished_at = loop.time()
+            logging.debug(
+                "safe_session_operation[%s]: coroutine completed in %.2fs",
+                op_name,
+                finished_at - operation_started_at,
+            )
+
+            return result
+        finally:
+            if entered_context:
+                disconnect_started_at = loop.time()
+                try:
+                    if disconnect_timeout is not None:
+                        await asyncio.wait_for(
+                            app.__aexit__(None, None, None),
+                            timeout=disconnect_timeout,
+                        )
+                    else:
+                        await app.__aexit__(None, None, None)
+                except asyncio.TimeoutError:
+                    logging.error(
+                        "safe_session_operation[%s]: timeout while closing client after %.2fs",
+                        op_name,
+                        loop.time() - disconnect_started_at,
+                    )
+                    raise
+                except Exception:
+                    logging.exception(
+                        "safe_session_operation[%s]: unexpected error while closing client",
+                        op_name,
+                    )
+                    raise
+                else:
+                    disconnected_at = loop.time()
+                    logging.debug(
+                        "safe_session_operation[%s]: client closed in %.2fs",
+                        op_name,
+                        disconnected_at - disconnect_started_at,
+                    )
 
 
 async def with_retry(
@@ -234,6 +352,7 @@ async def with_retry(
     *,
     lock_key: Optional[str] = None,
     max_retries: int = 3,
+    **session_kwargs: Any,
 ):
     """Run a session-bound coroutine with retry logic for SQLite locks."""
 
@@ -243,6 +362,7 @@ async def with_retry(
                 session_path,
                 coro_func,
                 lock_key=lock_key,
+                **session_kwargs,
             )
         except OperationalError as exc:
             if "database is locked" in str(exc) and attempt < max_retries - 1:
@@ -433,6 +553,10 @@ async def _disconnect_client_with_retries(
 CHECK_ACCOUNT_SHUTDOWN_TIMEOUT = 5.0
 CHECK_ACCOUNT_SHUTDOWN_INTERVAL = 0.2
 CHECK_ACCOUNT_RETRY_TIMEOUT = 30.0
+CHECK_ACCOUNT_CONNECT_TIMEOUT = 15.0
+CHECK_ACCOUNT_OPERATION_TIMEOUT = 10.0
+CHECK_ACCOUNT_DISCONNECT_TIMEOUT = 10.0
+CHECK_ACCOUNT_GET_ME_TIMEOUT = 10.0
 _CORRUPTED_SESSION_ERRORS = (
     "database disk image is malformed",
     "file is not a database",
@@ -1541,8 +1665,16 @@ async def check_account(user_id, phone):
 
     logging.debug("check_account: start for user_id=%s phone=%s", user_id, phone)
 
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+
     async with lock:
-        logging.debug("check_account: acquired lock for key=%s", key)
+        lock_acquired_at = loop.time()
+        logging.debug(
+            "check_account: acquired lock for key=%s in %.2fs",
+            key,
+            lock_acquired_at - started_at,
+        )
         existing_client = active_pyrogram_clients.get(key)
 
         if existing_client:
@@ -1587,7 +1719,35 @@ async def check_account(user_id, phone):
         session_base = f"sessions/{user_id}/{phone}"
 
         async def _ensure_identity(app: Client) -> bool:
-            await app.get_me()
+            identity_loop = asyncio.get_running_loop()
+            identity_started_at = identity_loop.time()
+            logging.debug(
+                "check_account: get_me started for user_id=%s phone=%s",
+                user_id,
+                phone,
+            )
+
+            try:
+                await asyncio.wait_for(
+                    app.get_me(),
+                    timeout=CHECK_ACCOUNT_GET_ME_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logging.error(
+                    "check_account: get_me timeout for user_id=%s phone=%s after %.2fs",
+                    user_id,
+                    phone,
+                    identity_loop.time() - identity_started_at,
+                )
+                raise
+
+            identity_completed_at = identity_loop.time()
+            logging.debug(
+                "check_account: get_me completed for user_id=%s phone=%s in %.2fs",
+                user_id,
+                phone,
+                identity_completed_at - identity_started_at,
+            )
             return True
 
         async def _cleanup_session_state(reason: str) -> None:
@@ -1623,25 +1783,46 @@ async def check_account(user_id, phone):
                 user_id,
                 phone,
             )
+            client_started_at = loop.time()
+            logging.debug(
+                "check_account: invoking with_retry for user_id=%s phone=%s",
+                user_id,
+                phone,
+            )
             result = await asyncio.wait_for(
                 with_retry(
                     session_base,
                     _ensure_identity,
                     lock_key=key,
+                    connect_timeout=CHECK_ACCOUNT_CONNECT_TIMEOUT,
+                    operation_timeout=CHECK_ACCOUNT_OPERATION_TIMEOUT,
+                    disconnect_timeout=CHECK_ACCOUNT_DISCONNECT_TIMEOUT,
+                    operation_name=f"check_account[{key}]",
                 ),
                 timeout=CHECK_ACCOUNT_RETRY_TIMEOUT,
             )
+            client_completed_at = loop.time()
             logging.debug(
-                "check_account: completed successfully for user_id=%s phone=%s",
+                "check_account: with_retry completed for user_id=%s phone=%s in %.2fs",
                 user_id,
                 phone,
+                client_completed_at - client_started_at,
+            )
+            total_elapsed = loop.time() - started_at
+            logging.debug(
+                "check_account: completed successfully for user_id=%s phone=%s in %.2fs",
+                user_id,
+                phone,
+                total_elapsed,
             )
             return result
         except asyncio.TimeoutError:
+            total_elapsed = loop.time() - started_at
             logging.error(
-                "Timeout while creating client for user_id=%s phone=%s",
+                "Timeout while creating client for user_id=%s phone=%s (%.2fs)",
                 user_id,
                 phone,
+                total_elapsed,
             )
             await bot.send_message(
                 user_id,
