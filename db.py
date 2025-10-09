@@ -583,21 +583,21 @@ async def is_user_authenticated(user_id: int) -> bool:
     return bool(row["is_authenticated"]) if row else False
 
 
-async def ensure_account(user_id: int, phone: str, session_path: str) -> Dict[str, Any]:
-    await _execute(
+async def ensure_account(user_id: int, phone: str, session_path: str) -> Optional[int]:
+    """Create or update an account and return its database identifier."""
+
+    row = await _fetchone(
         """
-        INSERT INTO accounts (user_id, phone, session_path)
-        VALUES (?, ?, ?)
+        INSERT INTO accounts (user_id, phone, session_path, status, mode)
+        VALUES (?, ?, ?, 'stopped', 'warmup')
         ON CONFLICT(user_id, phone) DO UPDATE SET
             session_path = excluded.session_path,
             updated_at = CURRENT_TIMESTAMP
+        RETURNING id
         """,
         (user_id, phone, session_path),
     )
-    account = await get_account_by_session(user_id, phone)
-    if account is None:  # pragma: no cover - defensive branch
-        raise RuntimeError("Failed to create or update account")
-    return account
+    return int(row["id"]) if row is not None else None
 
 
 async def _fetch_accounts(query: str, params: Iterable[Any]) -> List[Dict[str, Any]]:
@@ -824,26 +824,32 @@ async def bulk_update_reaction_settings(
 
 async def update_last_reaction_at(
     account_id: int,
-    timestamp: Optional[datetime],
+    reaction_time: Optional[Any],
 ) -> None:
     """Persist the timestamp of the last reaction for an account.
 
-    The database expects a timezone-aware ``datetime`` value.  The function accepts
-    a :class:`datetime.datetime` object (or ``None`` to clear the column) and makes
-    sure the value is normalised to UTC before storing it.  Strings must be handled
-    by the caller – passing anything but ``datetime`` will raise a ``TypeError`` –
-    which protects the schema from accidentally storing serialised values.
+    The function accepts timezone-aware :class:`datetime.datetime` objects,
+    naive datetimes (which are normalised to UTC) or ISO formatted strings.  The
+    relaxed parsing helps when external integrations provide serialized values
+    while keeping the column consistent in UTC.
     """
 
-    if timestamp is None:
+    if reaction_time is None:
         value: Optional[datetime] = None
-    elif not isinstance(timestamp, datetime):
-        raise TypeError("timestamp must be a datetime instance or None")
     else:
-        if timestamp.tzinfo is None:
-            value = timestamp.replace(tzinfo=timezone.utc)
+        dt_value: datetime
+        if isinstance(reaction_time, str):
+            normalised = reaction_time.replace("Z", "+00:00")
+            dt_value = datetime.fromisoformat(normalised)
+        elif isinstance(reaction_time, datetime):
+            dt_value = reaction_time
         else:
-            value = timestamp.astimezone(timezone.utc)
+            raise TypeError("reaction_time must be datetime, str or None")
+
+        if dt_value.tzinfo is None:
+            value = dt_value.replace(tzinfo=timezone.utc)
+        else:
+            value = dt_value.astimezone(timezone.utc)
 
     await _execute(
         """

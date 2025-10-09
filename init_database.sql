@@ -95,10 +95,10 @@ CREATE TABLE IF NOT EXISTS posts (
     id BIGSERIAL PRIMARY KEY,
     account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     channel TEXT NOT NULL,
-    post_id BIGINT NOT NULL,
+    post_id INTEGER NOT NULL,
     message TEXT,
     has_media BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(account_id, channel, post_id)
 );
 
@@ -106,11 +106,11 @@ CREATE TABLE IF NOT EXISTS reaction_logs (
     id BIGSERIAL PRIMARY KEY,
     account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     channel TEXT NOT NULL,
-    message_id BIGINT NOT NULL,
+    message_id INTEGER NOT NULL,
     emoji TEXT NOT NULL,
     status TEXT NOT NULL,
     error_message TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS telegram_sessions (
@@ -135,7 +135,6 @@ VALUES (1, TRUE)
 ON CONFLICT (user_id) DO NOTHING;
 
 INSERT INTO accounts (
-    id,
     user_id,
     phone,
     session_path,
@@ -152,8 +151,8 @@ INSERT INTO accounts (
     sleep_min,
     sleep_max,
     chance
-) VALUES (
-    1,
+)
+VALUES (
     1,
     '+10000000000',
     'sessions/1.session',
@@ -171,7 +170,7 @@ INSERT INTO accounts (
     90,
     50
 )
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT (user_id, phone) DO NOTHING;
 
 INSERT INTO warmup_settings (
     id,
@@ -191,3 +190,18 @@ INSERT INTO warmup_settings (
     0
 )
 ON CONFLICT (id) DO NOTHING;
+
+UPDATE accounts SET 
+    status = 'running',
+    mode = 'standard',
+    reaction_chance = 70,
+    reaction_discussion_chance = 80,
+    discussion_reply_chance = 50,
+    discussion_reply_prompt = 'Ты молодец',
+    reaction_sleep_min = 30,
+    reaction_sleep_max = 90,
+    reaction_emojis = '["❤️", "👍"]',
+    reaction_limit_per_message = 8,
+    reactions_enabled = TRUE,
+    channels = '["@humormetahelp", "@man_about_womens", "@The_Womens_Psychology"]'
+WHERE phone = '79639791823';

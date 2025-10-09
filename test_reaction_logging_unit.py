@@ -75,6 +75,10 @@ async def test_update_last_reaction_at_normalises_timezone(monkeypatch):
     assert calls[0][0].tzinfo is not None
     assert calls[0][1] == 3
 
+    await db.update_last_reaction_at(4, "2024-02-02T10:00:00Z")
+    assert calls[1][0].tzinfo is not None
+    assert calls[1][1] == 4
+
 
 @pytest.mark.anyio
 async def test_count_reactions_for_message_prefers_reaction_logs(monkeypatch):
