@@ -316,15 +316,32 @@ async def safe_session_operation(
         finally:
             if entered_context:
                 disconnect_started_at = loop.time()
+                close_task = asyncio.create_task(app.__aexit__(None, None, None))
                 try:
                     if disconnect_timeout is not None:
                         await asyncio.wait_for(
-                            app.__aexit__(None, None, None),
+                            asyncio.shield(close_task),
                             timeout=disconnect_timeout,
                         )
                     else:
-                        await app.__aexit__(None, None, None)
+                        await asyncio.shield(close_task)
+                except asyncio.CancelledError:
+                    logging.warning(
+                        "safe_session_operation[%s]: cancellation received while closing client",
+                        op_name,
+                    )
+                    try:
+                        await close_task
+                    except Exception:
+                        logging.exception(
+                            "safe_session_operation[%s]: error while waiting for client close during cancellation",
+                            op_name,
+                        )
+                    raise
                 except asyncio.TimeoutError:
+                    close_task.cancel()
+                    with suppress(Exception):
+                        await close_task
                     logging.error(
                         "safe_session_operation[%s]: timeout while closing client after %.2fs",
                         op_name,
