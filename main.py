@@ -1541,6 +1541,39 @@ async def check_account(user_id, phone):
 
     logging.debug("check_account: start for user_id=%s phone=%s", user_id, phone)
 
+    session_base = f"sessions/{user_id}/{phone}"
+
+    async def _ensure_identity(app: Client) -> bool:
+        await app.get_me()
+        return True
+
+    async def _cleanup_session_state(reason: str) -> None:
+        session_file = f"{session_base}.session"
+        if os.path.exists(session_file):
+            try:
+                os.remove(session_file)
+                logging.warning(
+                    "Removed session file %s due to %s",
+                    session_file,
+                    reason,
+                )
+            except OSError:
+                logging.exception(
+                    "Failed to remove session file %s after %s",
+                    session_file,
+                    reason,
+                )
+
+        account_row = await get_account_by_session(user_id, phone)
+        if account_row:
+            logging.info(
+                "Deleting account %s for user %s due to %s",
+                phone,
+                user_id,
+                reason,
+            )
+            await delete_account(account_row["id"], account_row["phone"])
+
     async with lock:
         logging.debug("check_account: acquired lock for key=%s", key)
         existing_client = active_pyrogram_clients.get(key)
@@ -1584,100 +1617,67 @@ async def check_account(user_id, phone):
                 _release_session_lock(key)
                 existing_client = None
 
-        session_base = f"sessions/{user_id}/{phone}"
-
-        async def _ensure_identity(app: Client) -> bool:
-            await app.get_me()
-            return True
-
-        async def _cleanup_session_state(reason: str) -> None:
-            session_file = f"{session_base}.session"
-            if os.path.exists(session_file):
-                try:
-                    os.remove(session_file)
-                    logging.warning(
-                        "Removed session file %s due to %s",
-                        session_file,
-                        reason,
-                    )
-                except OSError:
-                    logging.exception(
-                        "Failed to remove session file %s after %s",
-                        session_file,
-                        reason,
-                    )
-
-            account_row = await get_account_by_session(user_id, phone)
-            if account_row:
-                logging.info(
-                    "Deleting account %s for user %s due to %s",
-                    phone,
-                    user_id,
-                    reason,
-                )
-                await delete_account(account_row["id"], account_row["phone"])
-
-        try:
-            logging.debug(
-                "check_account: creating client for user_id=%s phone=%s",
-                user_id,
-                phone,
-            )
-            result = await asyncio.wait_for(
-                with_retry(
-                    session_base,
-                    _ensure_identity,
-                    lock_key=key,
-                ),
-                timeout=CHECK_ACCOUNT_RETRY_TIMEOUT,
-            )
-            logging.debug(
-                "check_account: completed successfully for user_id=%s phone=%s",
-                user_id,
-                phone,
-            )
-            return result
-        except asyncio.TimeoutError:
-            logging.error(
-                "Timeout while creating client for user_id=%s phone=%s",
-                user_id,
-                phone,
-            )
+    try:
+        logging.debug(
+            "check_account: creating client for user_id=%s phone=%s",
+            user_id,
+            phone,
+        )
+        result = await asyncio.wait_for(
+            with_retry(
+                session_base,
+                _ensure_identity,
+                lock_key=key,
+            ),
+            timeout=CHECK_ACCOUNT_RETRY_TIMEOUT,
+        )
+        logging.debug(
+            "check_account: completed successfully for user_id=%s phone=%s",
+            user_id,
+            phone,
+        )
+        return result
+    except asyncio.TimeoutError:
+        logging.error(
+            "Timeout while creating client for user_id=%s phone=%s",
+            user_id,
+            phone,
+        )
+        await bot.send_message(
+            user_id,
+            f"Не удалось запустить аккаунт {phone}: превышено время ожидания",
+        )
+        return False
+    except OperationalError as exc:
+        if "database is locked" in str(exc).lower():
             await bot.send_message(
-                user_id,
-                f"Не удалось запустить аккаунт {phone}: превышено время ожидания",
+                user_id, f"Аккаунт {phone} сейчас используется, попробуйте позже"
             )
             return False
-        except OperationalError as exc:
-            if "database is locked" in str(exc).lower():
+        raise
+    except Exception as exc:
+        logging.exception(
+            "Unexpected error in check_account for user_id=%s phone=%s: %s",
+            user_id,
+            phone,
+            exc,
+        )
+
+        if isinstance(exc, sqlite3.DatabaseError):
+            message = str(exc).lower()
+            if any(marker in message for marker in _CORRUPTED_SESSION_ERRORS):
                 await bot.send_message(
-                    user_id, f"Аккаунт {phone} сейчас используется, попробуйте позже"
+                    user_id,
+                    f"Файл сессии аккаунта {phone} поврежден. Пожалуйста, авторизуйте его заново.",
                 )
+                await _cleanup_session_state("corrupted session file")
                 return False
-            raise
-        except Exception as exc:
-            logging.exception(
-                "Unexpected error in check_account for user_id=%s phone=%s: %s",
-                user_id,
-                phone,
-                exc,
-            )
 
-            if isinstance(exc, sqlite3.DatabaseError):
-                message = str(exc).lower()
-                if any(marker in message for marker in _CORRUPTED_SESSION_ERRORS):
-                    await bot.send_message(
-                        user_id,
-                        f"Файл сессии аккаунта {phone} поврежден. Пожалуйста, авторизуйте его заново.",
-                    )
-                    await _cleanup_session_state("corrupted session file")
-                    return False
+        await asyncio.sleep(1)
+        await bot.send_message(user_id, f"Аккаунт удален ошибка: {str(exc)}")
 
-            await asyncio.sleep(1)
-            await bot.send_message(user_id, f"Аккаунт удален ошибка: {str(exc)}")
-
-            await _cleanup_session_state("unexpected check_account error")
-            return False
+        await _cleanup_session_state("unexpected check_account error")
+        return False
 
 async def main_message(message):
     user_id = message.from_user.id
