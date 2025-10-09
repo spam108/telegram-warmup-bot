@@ -849,6 +849,12 @@ async def _maybe_send_reaction(
     force: bool = False,
     ignore_cooldown: bool = False,
 ) -> Tuple[Optional[datetime], bool]:
+    """Attempt to send a quick reaction following configured rules.
+
+    The helper evaluates the reaction chance, picks a suitable emoji and sends it
+    via :func:`send_reaction_safe`. All results are written to ``reaction_logs``
+    so that administrators can trace what happened with the message.
+    """
     chat_obj = getattr(message, "chat", None)
     chat_id_for_reactions = getattr(chat_obj, "id", None)
     channel_for_reactions = str(chat_id_for_reactions or "")
@@ -3732,14 +3738,14 @@ async def _get_available_quick_reaction_emojis(
     existing_client = active_pyrogram_clients.get(key)
 
     async def _query(client_obj: Client) -> Optional[Set[str]]:
+        if not hasattr(client_obj, "get_available_reactions"):
+            return None
+
+        if chat_id is None:
+            return None
+
         try:
-            if chat_id is not None:
-                try:
-                    available = await client_obj.get_available_reactions(chat_id)
-                except TypeError:
-                    available = await client_obj.get_available_reactions()
-            else:
-                available = await client_obj.get_available_reactions()
+            available = await client_obj.get_available_reactions(chat_id)
         except Exception:
             logging.exception(
                 "Failed to request available reactions for session %s", session
