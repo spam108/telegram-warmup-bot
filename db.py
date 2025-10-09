@@ -1100,6 +1100,13 @@ async def get_running_accounts() -> List[Dict[str, Any]]:
     )
 
 
+async def get_running_standard_accounts() -> List[Dict[str, Any]]:
+    return await _fetch_accounts(
+        "SELECT * FROM accounts WHERE status = 'running' AND mode = 'standard'",
+        (),
+    )
+
+
 async def get_accounts_in_warmup() -> List[Dict[str, Any]]:
     return await _fetch_accounts(
         "SELECT * FROM accounts WHERE mode = 'warmup' AND status = 'running'",
