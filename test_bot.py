@@ -49,21 +49,25 @@ async def test_get_global_statistics_and_report(tmp_path, monkeypatch):
     await db_module.init_db()
 
     await db_module.ensure_user(1)
-    account1 = await db_module.ensure_account(1, "+100", "sessions/1/+100.session")
-    account2 = await db_module.ensure_account(1, "+101", "sessions/1/+101.session")
-    account3 = await db_module.ensure_account(1, "+102", "sessions/1/+102.session")
+    account1_id = await db_module.ensure_account(1, "+100", "sessions/1/+100.session")
+    account2_id = await db_module.ensure_account(1, "+101", "sessions/1/+101.session")
+    account3_id = await db_module.ensure_account(1, "+102", "sessions/1/+102.session")
 
-    await db_module.mark_account_running(account1["id"])
-    await db_module.mark_account_running(account2["id"])
-    await db_module.set_account_mode(account2["id"], "standard", warmup_days=None)
+    assert account1_id is not None
+    assert account2_id is not None
+    assert account3_id is not None
 
-    await db_module.add_comment_log(account1["id"], channel="chat", message_id=1, status="success")
-    await db_module.add_comment_log(account1["id"], channel="chat", message_id=2, status="error", error="boom")
-    await db_module.add_comment_log(account2["id"], channel="chat", message_id=3, status="skipped", error="rnd")
-    await db_module.add_comment_log(account2["id"], channel="chat", message_id=4, status="no_comments", error="forbidden")
-    await db_module.add_comment_log(account2["id"], channel="chat", message_id=5, status="reaction_success")
-    await db_module.add_comment_log(account2["id"], channel="chat", message_id=6, status="reaction_error")
-    await db_module.add_comment_log(account3["id"], channel="chat", message_id=7, status="reaction_skipped")
+    await db_module.mark_account_running(account1_id)
+    await db_module.mark_account_running(account2_id)
+    await db_module.set_account_mode(account2_id, "standard", warmup_days=None)
+
+    await db_module.add_comment_log(account1_id, channel="chat", message_id=1, status="success")
+    await db_module.add_comment_log(account1_id, channel="chat", message_id=2, status="error", error="boom")
+    await db_module.add_comment_log(account2_id, channel="chat", message_id=3, status="skipped", error="rnd")
+    await db_module.add_comment_log(account2_id, channel="chat", message_id=4, status="no_comments", error="forbidden")
+    await db_module.add_comment_log(account2_id, channel="chat", message_id=5, status="reaction_success")
+    await db_module.add_comment_log(account2_id, channel="chat", message_id=6, status="reaction_error")
+    await db_module.add_comment_log(account3_id, channel="chat", message_id=7, status="reaction_skipped")
 
     conn = await db_module._require_conn()
     await conn.execute(
@@ -72,9 +76,9 @@ async def test_get_global_statistics_and_report(tmp_path, monkeypatch):
     )
     await conn.commit()
 
-    await db_module.sync_warmup_channels(account1["id"], ["@one", "@two"])
-    await db_module.mark_warmup_channel_joined(account1["id"], "@one")
-    await db_module.record_warmup_channel_error(account1["id"], "@two", "denied")
+    await db_module.sync_warmup_channels(account1_id, ["@one", "@two"])
+    await db_module.mark_warmup_channel_joined(account1_id, "@one")
+    await db_module.record_warmup_channel_error(account1_id, "@two", "denied")
 
     stats = await db_module.get_global_statistics()
 

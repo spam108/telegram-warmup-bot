@@ -30,7 +30,8 @@ async def setup_database(tmp_path):
 @pytest.mark.anyio
 async def test_cleanup_comment_logs_removes_outdated_entries():
     await db.ensure_user(1)
-    account = await db.ensure_account(1, "+100500", "session.session")
+    account_id = await db.ensure_account(1, "+100500", "session.session")
+    assert account_id is not None
 
     conn = await db._require_conn()
     now = datetime.utcnow().replace(microsecond=0)
@@ -48,7 +49,7 @@ async def test_cleanup_comment_logs_removes_outdated_entries():
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                account["id"],
+                account_id,
                 "test_channel",
                 message_id,
                 "test_status",

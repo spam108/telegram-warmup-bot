@@ -1363,30 +1363,20 @@ def _message_has_media(message: Any) -> bool:
 
 
 async def send_reaction_safe(client: Client, chat_id: int, message_id: int, emoji: str) -> bool:
-    """Send a quick reaction and return ``True`` on success.
-
-    Known ``REACTION_INVALID`` errors are converted into a ``False`` result so the
-    caller can try an alternative emoji without aborting the processing loop.  The
-    function keeps the logs informative while allowing unexpected errors to bubble
-    up for higher-level handling.
-    """
+    """Безопасно отправляет реакцию с обработкой ошибок."""
 
     try:
         await client.send_reaction(chat_id, message_id, emoji)
-        logger.debug(
-            "Reaction request succeeded for chat=%s message=%s emoji=%s",
-            chat_id,
-            message_id,
-            emoji,
-        )
+        logger.info("✅ Реакция %s отправлена на сообщение %s", emoji, message_id)
         return True
     except ReactionInvalid as exc:
-        logger.warning("Эмодзи %s не поддерживается в чате %s: %s", emoji, chat_id, exc)
+        logger.warning("❌ Эмодзи %s не поддерживается в чате %s: %s", emoji, chat_id, exc)
         return False
     except Exception as exc:
         if "REACTION_INVALID" in str(exc).upper():
-            logger.warning("Эмодзи %s не поддерживается в чате %s: %s", emoji, chat_id, exc)
+            logger.warning("❌ Эмодзи %s не поддерживается в чате %s: %s", emoji, chat_id, exc)
             return False
+        logger.error("❌ Ошибка отправки реакции: %s", exc)
         raise
 
 

@@ -66,10 +66,11 @@ async def test_settings_save(tmp_path, monkeypatch):
 
     await db.init_db()
     await db.ensure_user(1)
-    account = await db.ensure_account(1, "79990000000", str(sessions_dir / "79990000000.session"))
+    account_id = await db.ensure_account(1, "79990000000", str(sessions_dir / "79990000000.session"))
+    assert account_id is not None
 
     await db.update_account_settings(
-        account_id=account["id"],
+        account_id=account_id,
         chance=30,
         system_prompt="Тестовый промпт для проверки",
         sleep_min=15,
@@ -81,7 +82,7 @@ async def test_settings_save(tmp_path, monkeypatch):
         reaction_emojis=["🔥", "👍"],
     )
 
-    stored = await db.get_account_by_id(account["id"])
+    stored = await db.get_account_by_id(account_id)
     assert stored["chance"] == 30
     assert stored["system_prompt"] == "Тестовый промпт для проверки"
     assert stored["sleep_min"] == 15

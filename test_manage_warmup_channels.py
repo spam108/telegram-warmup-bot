@@ -226,9 +226,10 @@ def test_add_sleeps_syncs_subscriptions(monkeypatch, tmp_path):
     session_path = f"sessions/{user_id}/{phone}.session"
 
     asyncio.run(db.ensure_user(user_id))
-    account = asyncio.run(db.ensure_account(user_id, phone, session_path))
+    account_id = asyncio.run(db.ensure_account(user_id, phone, session_path))
+    assert account_id is not None
 
-    state = DummyState({"account": phone, "account_id": account["id"]})
+    state = DummyState({"account": phone, "account_id": account_id})
     message = DummyMessage("10-20", user_id=user_id)
 
     async def fake_check_account(user: int, session: str) -> bool:
@@ -291,7 +292,7 @@ def test_add_sleeps_syncs_subscriptions(monkeypatch, tmp_path):
 
     asyncio.run(main.add_sleeps(message, state))
 
-    updated_account = asyncio.run(db.get_account_by_id(account["id"]))
+    updated_account = asyncio.run(db.get_account_by_id(account_id))
     assert updated_account is not None
     assert recorded_calls == [], (recorded_calls, format_calls, sent_messages)
     assert format_calls == [], format_calls

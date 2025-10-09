@@ -63,16 +63,24 @@ async def test_settings_save():
             if session_dir and not os.path.exists(session_dir):
                 os.makedirs(session_dir, exist_ok=True)
 
-            account = await ensure_account(
+            account_id = await ensure_account(
                 DEFAULT_USER_ID,
                 DEFAULT_PHONE,
                 DEFAULT_SESSION_PATH,
             )
-            print(
-                "Создан аккаунт:\n"
-                f"  - ID: {account['id']}, Phone: {account['phone']}, User: {account['user_id']}"
-            )
-            all_accounts = [account]
+            if account_id is not None:
+                account = await get_account_by_id(account_id)
+            else:
+                account = None
+            if account:
+                print(
+                    "Создан аккаунт:\n"
+                    f"  - ID: {account['id']}, Phone: {account['phone']}, User: {account['user_id']}"
+                )
+                all_accounts = [account]
+            else:
+                print("Не удалось создать аккаунт")
+                return False
 
         # Используем первый найденный аккаунт
         test_account_id = all_accounts[0]["id"]
