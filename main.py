@@ -5,6 +5,7 @@ import logging
 import shutil
 import sqlite3
 from collections import Counter, defaultdict
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, time, timezone, timedelta
 from typing import Awaitable, Callable, Dict, List, Optional, Set, Any, Union, Tuple
@@ -146,7 +147,7 @@ class addsession(StatesGroup):
 class startaccount(StatesGroup):
     channels = State()
     account = State()
-    systempromt = State()
+    system_prompt = State()
     sleeps = State()
     chance = State()
     regular_channels = State()
@@ -923,7 +924,7 @@ async def _handle_linked_channel_message(
     chance: int,
     xsleep: int,
     ysleep: int,
-    system_promt: str,
+    system_prompt: str,
     reaction_emojis: List[str],
     reaction_chance: int,
     reaction_discussion_chance: Optional[int],
@@ -981,7 +982,7 @@ async def _handle_linked_channel_message(
         selected_reaction_chance = reaction_discussion_chance or 0
     else:
         comment_chance = chance
-        comment_prompt = system_promt
+        comment_prompt = system_prompt
         selected_reaction_chance = reaction_chance
 
     post_text = _extract_post_text(message)
@@ -2396,7 +2397,7 @@ async def _prompt_system_prompt(message: Message, state: FSMContext) -> None:
     data, _, account = await _load_account_data(state)
     stored = account.get("system_prompt") if account else None
     if stored is None:
-        stored = data.get("systempromt")
+        stored = data.get("system_prompt")
 
     display = stored if stored else "не задан"
     await bot.send_message(
@@ -3322,15 +3323,15 @@ async def add_chance(message: Message, state: FSMContext) -> None:
         
 
 
-@dp.message(startaccount.systempromt)
-async def add_systempromt(message: Message, state: FSMContext) -> None:
+@dp.message(startaccount.system_prompt)
+async def add_systemprompt(message: Message, state: FSMContext) -> None:
     data, _, account = await _load_account_data(state)
 
     stored_system_prompt = None
     if account:
         stored_system_prompt = account.get("system_prompt")
     if stored_system_prompt is None:
-        stored_system_prompt = data.get("systempromt")
+        stored_system_prompt = data.get("system_prompt")
 
     incoming = (message.text or "").strip()
     if not incoming:
@@ -3353,7 +3354,7 @@ async def add_systempromt(message: Message, state: FSMContext) -> None:
     else:
         system_prompt_value = incoming
 
-    await state.update_data({"systempromt": system_prompt_value})
+    await state.update_data({"system_prompt": system_prompt_value})
 
     await _prompt_sleeps(message, state)
     await state.set_state(startaccount.sleeps)
@@ -3411,9 +3412,9 @@ async def add_channels(message: Message, state: FSMContext) -> None:
     state_data = await state.get_data()
     session = state_data.get("account")
     sleeps = state_data.get("sleeps")
-    system_promt = state_data.get("systempromt")
+    system_prompt = state_data.get("system_prompt")
     chance = state_data.get("chance")
-    print(f"DEBUG: State data - sleeps: {sleeps}, system_promt: {system_promt}, chance: {chance}")
+    print(f"DEBUG: State data - sleeps: {sleeps}, system_prompt: {system_prompt}, chance: {chance}")
 
     account_id = state_data.get("account_id")
     warmup_channels = []
@@ -3491,20 +3492,20 @@ async def add_channels(message: Message, state: FSMContext) -> None:
     print(
         "DEBUG: About to save settings - "
         f"account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, "
-        f"system_promt={system_promt}"
+        f"system_prompt={system_prompt}"
     )
     await bot.send_message(
         log_channel,
         "DEBUG: About to save settings - "
         f"account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, "
-        f"system_promt={system_promt}"
+        f"system_prompt={system_prompt}"
     )
 
     update_kwargs: Dict[str, Any] = {
         "sleep_min": sleep_min,
         "sleep_max": sleep_max,
         "chance": chance,
-        "system_prompt": system_promt,
+        "system_prompt": system_prompt,
     }
 
     await update_account_settings(account_id, **update_kwargs)
@@ -3530,7 +3531,7 @@ async def send_comments(userid, session, account_id):
         
         # Режим прогрева не блокирует комментирование - это стандартный режим + warmup задача
 
-        system_promt = account.get("system_prompt") or ""
+        system_prompt = account.get("system_prompt") or ""
         sleep_min = account.get("sleep_min") or 10
         sleep_max = account.get("sleep_max") or 20
         chance = account.get("chance") or 100
@@ -3604,7 +3605,7 @@ async def send_comments(userid, session, account_id):
                     chance=chance,
                     xsleep=xsleep,
                     ysleep=ysleep,
-                    system_promt=system_promt,
+                    system_prompt=system_prompt,
                     reaction_emojis=reaction_emojis,
                     reaction_chance=reaction_chance,
                     reaction_discussion_chance=reaction_discussion_chance,
@@ -4087,7 +4088,7 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
     data, account_id, account = await _load_account_data(state)
     session = data.get("account") if data else None
     chance = data.get("chance") if data else None
-    system_prompt_value = data.get("systempromt") if data else None
+    system_prompt_value = data.get("system_prompt") if data else None
     sleeps = data.get("sleeps") if data else None
 
     existing_channels_raw: List[str] = []
