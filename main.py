@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import random
 import re
 from pyrogram import Client, filters
-from pyrogram.errors import ChatWriteForbidden, ReactionInvalid, UserAlreadyParticipant
+from pyrogram.errors import ChatWriteForbidden, UserAlreadyParticipant
 from sqlite3 import OperationalError
 from threading import Lock
 from aiogram import Bot, Dispatcher, types
@@ -33,7 +33,6 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from comment_engine import generate_comment
 from db import (
     add_comment_log,
-    add_reaction_log,
     bulk_update_reaction_settings,
     count_reactions_for_message,
     db_update_warmup_schedule,
@@ -184,6 +183,7 @@ class warmupmanage(StatesGroup):
 active_sessions: Dict[str, bool] = {}  # Глобальный словарь для хранения активных сессий
 active_account_ids: Dict[str, int] = {}
 quiet_sessions_notified: Set[str] = set()
+_chat_available_reactions_cache: Dict[int, Set[str]] = {}
 class _NoOpAsyncContextManager:
     """A lightweight async context manager that does nothing."""
 
@@ -513,7 +513,6 @@ async def with_retry(
                 continue
             raise
 
-_chat_available_reactions_cache: Dict[int, Set[str]] = {}
 
 skip_log_counters: Dict[str, Counter] = defaultdict(Counter)
 skip_log_last_reasons: Dict[str, Dict[str, str]] = defaultdict(dict)
@@ -529,7 +528,7 @@ SKIP_SUMMARY_BUTTON_TEXT = "🕒 Сводка пропусков (лог-кан�
 
 
 def ensure_session_file_permissions(session_file: str) -> None:
-    """Ensure that a session SQLite database file is writable and configured."""
+    """Ensure session file is writable with SQLite optimizations"""
 
     try:
         directory = os.path.dirname(session_file)
@@ -551,28 +550,17 @@ def ensure_session_file_permissions(session_file: str) -> None:
                     "Не удалось изменить права доступа к файлу сессии: %s", session_file
                 )
 
-            _ensure_session_sqlite_configuration(session_file)
+            try:
+                conn = sqlite3.connect(session_file, timeout=30.0)
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=30000")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA cache_size=10000")
+                conn.close()
+            except Exception:
+                pass
     except Exception:
         logging.exception("Ошибка при настройке прав доступа для файла сессии: %s", session_file)
-
-
-def _ensure_session_sqlite_configuration(session_file: str) -> None:
-    """Apply pragmatic settings to Pyrogram session SQLite files."""
-
-    try:
-        with sqlite3.connect(session_file, timeout=30) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout = 5000")
-            conn.execute("PRAGMA synchronous = NORMAL")
-            conn.execute("PRAGMA temp_store = MEMORY")
-            conn.execute("PRAGMA wal_autocheckpoint = 100")
-            conn.commit()
-    except sqlite3.DatabaseError as exc:
-        logging.debug(
-            "Не удалось применить настройки SQLite для файла сессии %s: %s",
-            session_file,
-            exc,
-        )
 
 
 COMMENT_LOG_RETENTION_DAYS = 2
@@ -850,497 +838,110 @@ async def _maybe_send_reaction(
     force: bool = False,
     ignore_cooldown: bool = False,
 ) -> Tuple[Optional[datetime], bool]:
-    """Attempt to send a quick reaction following configured rules.
+    """Simplified reaction sending for Pyrogram 2.0.106+"""
 
-    The helper evaluates the reaction chance, picks a suitable emoji and sends it
-    via :func:`send_reaction_safe`. All results are written to ``reaction_logs``
-    so that administrators can trace what happened with the message.
-    """
-    chat_obj = getattr(message, "chat", None)
-    chat_id_for_reactions = getattr(chat_obj, "id", None)
-    channel_for_reactions = str(chat_id_for_reactions or "")
-    if not channel_for_reactions:
-        channel_for_reactions = "unknown"
-    message_id_raw = getattr(message, "id", None)
-    try:
-        message_id_int = int(message_id_raw)
-    except (TypeError, ValueError):
-        message_id_int = None
-    message_id = message_id_int
-
-    async def log_reaction_event(
-        status: str,
-        *,
-        emoji: Optional[str] = None,
-        error: Optional[str] = None,
-    ) -> None:
-        message_identifier = message_id_int if message_id_int is not None else "unknown"
-
-        if status == "success":
-            logger.info(
-                "Reaction success for account=%s message=%s",
-                account_id,
-                message_identifier,
-            )
-        elif status == "failed":
-            logger.error(
-                "Reaction failed for account=%s message=%s: %s",
-                account_id,
-                message_identifier,
-                error,
-            )
-        elif status == "skipped":
-            logger.info(
-                "Reaction skipped for account=%s message=%s: %s",
-                account_id,
-                message_identifier,
-                error or "no reason provided",
-            )
-
-        if message_id_int is None:
-            return
-
-        await add_reaction_log(
-            account_id,
-            channel=channel_for_reactions,
-            message_id=message_id_int,
-            emoji=emoji,
-            status=status,
-            error_message=error,
-        )
-
-    cleaned_reaction_emojis: List[str] = []
-    for emoji in reaction_emojis:
-        if isinstance(emoji, str):
-            cleaned = emoji.strip()
-            if cleaned:
-                cleaned_reaction_emojis.append(cleaned)
-            else:
-                logger.debug(
-                    "Ignoring empty reaction emoji for account=%s message=%s",
-                    account_id,
-                    message_id,
-                )
-        else:
-            logger.debug(
-                "Ignoring non-string reaction emoji %r for account=%s message=%s",
-                emoji,
-                account_id,
-                message_id,
-            )
-
-    if len(cleaned_reaction_emojis) != len(reaction_emojis):
-        logger.info(
-            "Normalised reaction emoji list for account=%s message=%s: %d -> %d items",
-            account_id,
-            message_id,
-            len(reaction_emojis),
-            len(cleaned_reaction_emojis),
-        )
-
-    reaction_emojis = cleaned_reaction_emojis
-
-    if not reactions_enabled:
-        logger.debug(
-            "Reactions disabled for account=%s message=%s; skipping",
-            account_id,
-            message_id,
-        )
-        await log_reaction_event("skipped", error="reactions disabled")
+    if not reactions_enabled or not reaction_emojis:
         return current_last_reaction_at, False
 
-    if not reaction_emojis:
-        logger.warning(
-            "No reaction emojis configured for account=%s message=%s; skipping",
-            account_id,
-            message_id,
-        )
-        await log_reaction_event("skipped", error="no reaction emojis configured")
+    effective_chance = 100 if force else selected_reaction_chance
+    if effective_chance <= 0:
         return current_last_reaction_at, False
 
-    try:
-        effective_chance = int(selected_reaction_chance or 0)
-    except (TypeError, ValueError):
-        logger.warning(
-            "Invalid reaction chance value %r for account=%s; defaulting to 0",
-            selected_reaction_chance,
-            account_id,
-        )
-        effective_chance = 0
-
-    if force:
-        effective_chance = 100
-
-    if effective_chance < 0:
-        logger.warning(
-            "Negative reaction chance %s%% for account=%s; clamping to 0",
-            effective_chance,
-            account_id,
-        )
-        effective_chance = 0
-    elif effective_chance > 100:
-        logger.warning(
-            "Reaction chance %s%% for account=%s exceeds 100; clamping",
-            effective_chance,
-            account_id,
-        )
-        effective_chance = 100
-
-    if effective_chance == 0:
-        logger.info(
-            "Effective reaction chance is 0%% for account=%s message=%s; skipping",
-            account_id,
-            message_id,
-        )
-        await log_reaction_event("skipped", error="reaction chance is zero")
-        return current_last_reaction_at, False
-
-    logger.info(
-        "Evaluating reaction chance for account=%s message=%s chat=%s: %s%% (force=%s)",
-        account_id,
-        message_id,
-        channel_for_reactions or "unknown",
-        effective_chance,
-        force,
-    )
-
-    limit = reaction_limit_per_message
-
-    if limit is not None:
-        if limit <= 0:
-            reason = f'reaction limit {limit} reached'
-            enqueue_skip_log(
-                session,
-                "reaction",
-                f"{reason}{reaction_comment_context}",
-            )
-            await asyncio.sleep(0.2)
-            await add_comment_log(
-                account_id,
-                channel=channel_for_reactions,
-                message_id=message_id,
-                status=f'reaction_skipped{status_suffix}',
-                error=reason,
-            )
-            await log_reaction_event("skipped", error=reason)
-            return current_last_reaction_at, True
-        if channel_for_reactions and message_id is not None:
-            reaction_count = await count_reactions_for_message(channel_for_reactions, message_id)
-            if reaction_count >= limit:
-                reason = f'reaction limit {reaction_count}/{limit}'
-                enqueue_skip_log(
-                    session,
-                    "reaction",
-                    f"{reason}{reaction_comment_context}",
-                )
-                await asyncio.sleep(0.2)
-                await add_comment_log(
-                    account_id,
-                    channel=channel_for_reactions,
-                    message_id=message_id,
-                    status=f'reaction_skipped{status_suffix}',
-                    error=reason,
-                )
-                await log_reaction_event("skipped", error=reason)
-                return current_last_reaction_at, True
-
-    reaction_roll = 0
     if not force:
         reaction_roll = random.randint(1, 100)
-        logger.info(
-            "Reaction roll for account=%s message=%s: %d (needs <= %d)",
-            account_id,
-            message_id,
-            reaction_roll,
-            effective_chance,
-        )
-        if reaction_roll <= effective_chance:
-            logger.info(
-                "Reaction approved for account=%s message=%s: %d <= %d",
-                account_id,
-                message_id,
-                reaction_roll,
-                effective_chance,
-            )
-        else:
-            reason = f'reaction random {reaction_roll} > chance {effective_chance}'
-            logger.info(
-                "Reaction skipped for account=%s message=%s: %s",
-                account_id,
-                message_id,
-                reason,
-            )
-            enqueue_skip_log(
-                session,
-                "reaction",
-                f"{reason}{reaction_comment_context}",
-            )
-            await asyncio.sleep(0.2)
+        if reaction_roll > effective_chance:
             await add_comment_log(
                 account_id,
-                channel=channel_for_reactions,
-                message_id=message_id,
+                channel=str(getattr(getattr(message, 'chat', None), 'id', '')),
+                message_id=getattr(message, 'id', None),
                 status=f'reaction_skipped{status_suffix}',
-                error=reason,
+                error=f'random {reaction_roll} > chance {effective_chance}',
             )
-            await log_reaction_event("skipped", error=reason)
             return current_last_reaction_at, False
-    else:
-        logger.info(
-            "Reaction approved for account=%s message=%s (forced mode)",
-            account_id,
-            message_id,
-        )
-        logger.info(
-            "Reaction forced for account=%s message=%s; bypassing chance roll",
-            account_id,
-            message_id,
-        )
 
-    chat_obj = getattr(message, "chat", None)
-    chat_id_for_reactions = getattr(chat_obj, "id", None)
-    working_reaction_emojis = list(reaction_emojis)
-    allowed_reaction_emojis = await _get_chat_available_quick_reactions(
-        client,
-        chat_id_for_reactions,
-    )
-    if allowed_reaction_emojis is not None:
-        before_filter = len(working_reaction_emojis)
-        working_reaction_emojis = [
-            emoji for emoji in working_reaction_emojis if emoji in allowed_reaction_emojis
-        ]
-        if before_filter != len(working_reaction_emojis):
-            logger.info(
-                "Filtered reaction emojis for account=%s message=%s: %d -> %d allowed",
-                account_id,
-                message_id,
-                before_filter,
-                len(working_reaction_emojis),
-            )
-
-    if not working_reaction_emojis:
-        available_text: Optional[str] = None
-        if allowed_reaction_emojis is not None:
-            available_text = (
-                " ".join(sorted(allowed_reaction_emojis))
-                if allowed_reaction_emojis
-                else "none"
-            )
-        reason = "no allowed quick reactions"
-        if available_text is not None:
-            reason = f"{reason} (available: {available_text})"
-
-        logger.warning(
-            "Cannot send reaction for account=%s message=%s: %s",
-            account_id,
-            message_id,
-            reason,
-        )
-
-        enqueue_skip_log(
-            session,
-            "reaction",
-            f"{reason}{reaction_comment_context}",
-        )
-        await asyncio.sleep(0.2)
+    if reaction_limit_per_message is not None and reaction_limit_per_message <= 0:
         await add_comment_log(
             account_id,
-            channel=channel_for_reactions,
-            message_id=message_id,
+            channel=str(getattr(getattr(message, 'chat', None), 'id', '')),
+            message_id=getattr(message, 'id', None),
             status=f'reaction_skipped{status_suffix}',
-            error=reason,
+            error=f'reaction limit {reaction_limit_per_message} reached',
         )
-        await log_reaction_event("skipped", error=reason)
         return current_last_reaction_at, True
 
-    max_reaction_attempts = 3
-    reaction_sent = False
-    last_reaction_error: Optional[BaseException] = None
-    last_reaction_error_text: Optional[str] = None
-    attempts_performed = 0
+    working_emojis = list(reaction_emojis)
+    max_attempts = 3
 
-    for reaction_attempt in range(1, max_reaction_attempts + 1):
-        if not working_reaction_emojis:
+    for attempt in range(1, max_attempts + 1):
+        if not working_emojis:
             break
 
-        reaction_emoji = random.choice(working_reaction_emojis)
-        working_reaction_emojis.remove(reaction_emoji)
-        attempts_performed = reaction_attempt
-        await asyncio.sleep(random.uniform(reaction_sleep_min, reaction_sleep_max))
+        emoji = random.choice(working_emojis)
+        working_emojis.remove(emoji)
+
+        if attempt > 1:
+            await asyncio.sleep(random.uniform(reaction_sleep_min, reaction_sleep_max))
 
         try:
+            await client.send_reaction(message.chat.id, message.id, emoji)
+
             now = datetime.now(timezone.utc)
-            previous = current_last_reaction_at
-            if previous is not None and previous.tzinfo is None:
-                previous = previous.replace(tzinfo=timezone.utc)
-            cooldown_seconds = REACTION_MIN_INTERVAL_SECONDS
-            if (
-                previous is not None
-                and cooldown_seconds
-                and not ignore_cooldown
-            ):
-                if now - previous < timedelta(seconds=cooldown_seconds):
-                    reason = (
-                        'reaction cooldown '
-                        f"{int((now - previous).total_seconds())}/{cooldown_seconds}s"
-                    )
-                    enqueue_skip_log(
-                        session,
-                        "reaction",
-                        f"{reason}{reaction_comment_context}",
-                    )
-                    await asyncio.sleep(0.2)
-                    await add_comment_log(
-                        account_id,
-                        channel=channel_for_reactions,
-                        message_id=message_id,
-                        status=f'reaction_skipped{status_suffix}',
-                        error=reason,
-                    )
-                    await log_reaction_event("skipped", error=reason)
-                    return current_last_reaction_at, True
-
-            message_identifier = message_id
-            if message_identifier is None:
-                message_identifier = message_id_raw
-            try:
-                message_identifier_int = int(message_identifier)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                message_identifier_int = getattr(message, "id", 0)
-
-            sent = await send_reaction_safe(
-                client,
-                message.chat.id,
-                int(message_identifier_int),
-                reaction_emoji,
+            await add_comment_log(
+                account_id,
+                channel=str(message.chat.id),
+                message_id=message.id,
+                status=f'reaction_success{status_suffix}',
             )
-            if not sent:
-                refreshed_allowed = await _get_chat_available_quick_reactions(
-                    client,
-                    chat_id_for_reactions,
-                    force_refresh=True,
-                )
-                if refreshed_allowed is not None:
-                    allowed_reaction_emojis = refreshed_allowed
-                invalid_emojis: Set[str] = {reaction_emoji}
-                if refreshed_allowed is not None:
-                    invalid_emojis.update(
-                        {
-                            emoji
-                            for emoji in working_reaction_emojis
-                            if emoji not in refreshed_allowed
-                        }
-                    )
-                    working_reaction_emojis = [
-                        emoji
-                        for emoji in working_reaction_emojis
-                        if emoji in refreshed_allowed
-                    ]
-                else:
-                    invalid_emojis.update(working_reaction_emojis)
-                    working_reaction_emojis = []
-
-                invalid_text = " ".join(sorted(invalid_emojis)) if invalid_emojis else reaction_emoji
-                reason = (
-                    f"reaction invalid for emoji {reaction_emoji}: "
-                    f"unsupported emojis {invalid_text}"
-                )
-                last_reaction_error_text = reason
-                logger.warning(
-                    "Reaction invalid for chat %s with emojis %s: %s",
-                    chat_id_for_reactions,
-                    invalid_text,
-                    reason,
-                )
-                if working_reaction_emojis:
-                    continue
-
-                enqueue_skip_log(
-                    session,
-                    "reaction",
-                    f"{reason}{reaction_comment_context}",
-                )
-                await asyncio.sleep(0.2)
-                await add_comment_log(
-                    account_id,
-                    channel=channel_for_reactions,
-                    message_id=message_id,
-                    status=f'reaction_skipped{status_suffix}',
-                    error=reason,
-                )
-                await log_reaction_event("skipped", emoji=reaction_emoji, error=reason)
-                return current_last_reaction_at, True
 
             reaction_link = post_base_link or _build_post_link(message, message)
-            if (
-                reaction_link
-                and _is_discussion_reply_message(message)
-                and getattr(message, "id", None) is not None
-            ):
+            if reaction_link and _is_discussion_reply_message(message):
                 reaction_link = f"{reaction_link}?comment={message.id}"
 
             await bot.send_message(
                 log_channel,
-                (
-                    f'Аккаунт {session} поставил реакцию {reaction_emoji}'
-                    f'{reaction_comment_context}\n{reaction_link}'
-                ),
+                f'Аккаунт {session} поставил реакцию {emoji}'
+                f'{reaction_comment_context}\n{reaction_link}',
             )
-            await update_last_reaction_at(account_id, now)
-            current_last_reaction_at = now
-            await asyncio.sleep(0.2)
+
+            return now, True
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(keyword in error_str for keyword in ['invalid', 'reaction', 'not_supported']):
+                continue
             await add_comment_log(
                 account_id,
-                channel=channel_for_reactions,
-                message_id=message_id,
-                status=f'reaction_success{status_suffix}',
+                channel=str(message.chat.id),
+                message_id=message.id,
+                status=f'reaction_error{status_suffix}',
+                error=str(e),
             )
-            await log_reaction_event("success", emoji=reaction_emoji)
-            reaction_sent = True
             break
-        except Exception as reaction_error:
-            last_reaction_error = reaction_error
-            last_reaction_error_text = str(reaction_error)
-            logger.warning(
-                "Attempt %s/%s failed to send reaction for %s: %s",
-                reaction_attempt,
-                max_reaction_attempts,
-                session,
-                reaction_error,
-                exc_info=True,
-            )
-            if reaction_attempt < max_reaction_attempts and working_reaction_emojis:
-                await asyncio.sleep(3)
-
-    if not reaction_sent and last_reaction_error is not None:
-        error_text = last_reaction_error_text or str(last_reaction_error)
-        attempts_text = attempts_performed or max_reaction_attempts
-        logger.error(
-            "Reaction failed for account=%s message=%s after %s attempts: %s",
-            account_id,
-            message_id,
-            attempts_text,
-            error_text,
-        )
-
-        await bot.send_message(
-            log_channel,
-            (
-                f'Аккаунт {session} ошибка при установке реакции '
-                f"после {attempts_text} попыток: {error_text}"
-            ),
-        )
-        await asyncio.sleep(0.2)
-        await add_comment_log(
-            account_id,
-            channel=channel_for_reactions,
-            message_id=message_id,
-            status=f'reaction_error{status_suffix}',
-            error=error_text,
-        )
-        await log_reaction_event("failed", error=error_text)
 
     return current_last_reaction_at, False
+
+
+async def send_reaction_safe(
+    client: Client,
+    chat_id: int,
+    message_id: int,
+    emoji: str,
+    max_attempts: int = 3,
+) -> bool:
+    """Send reaction with basic retry logic"""
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await client.send_reaction(chat_id, message_id, emoji)
+            return True
+        except Exception as e:
+            if attempt < max_attempts:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            logging.warning("Failed to send reaction after %s attempts: %s", max_attempts, e)
+            return False
+
+    return False
 
 
 def _extract_post_text(message: Any) -> Optional[str]:
@@ -1357,34 +958,9 @@ def _message_has_media(message: Any) -> bool:
         "document",
         "audio",
         "voice",
-        "video_note",
         "sticker",
     )
-
-    for attr in media_attributes:
-        if getattr(message, attr, None) is not None:
-            return True
-
-    media = getattr(message, "media", None)
-    return bool(media)
-
-
-async def send_reaction_safe(client: Client, chat_id: int, message_id: int, emoji: str) -> bool:
-    """Безопасно отправляет реакцию с обработкой ошибок."""
-
-    try:
-        await client.send_reaction(chat_id, message_id, emoji)
-        logger.info("✅ Реакция %s отправлена на сообщение %s", emoji, message_id)
-        return True
-    except ReactionInvalid as exc:
-        logger.warning("❌ Эмодзи %s не поддерживается в чате %s: %s", emoji, chat_id, exc)
-        return False
-    except Exception as exc:
-        if "REACTION_INVALID" in str(exc).upper():
-            logger.warning("❌ Эмодзи %s не поддерживается в чате %s: %s", emoji, chat_id, exc)
-            return False
-        logger.error("❌ Ошибка отправки реакции: %s", exc)
-        raise
+    return any(getattr(message, attr, None) is not None for attr in media_attributes)
 
 
 def _build_post_link(sent_message: Any, original_message: Any) -> str:
@@ -3982,130 +3558,6 @@ async def add_reaction_sleeps(message: Message, state: FSMContext) -> None:
     await state.set_state(reactionsettings.emojis)
 
 
-def _extract_available_reaction_emojis(available: Any) -> Set[str]:
-    result: Set[str] = set()
-    if not available:
-        return result
-
-    for item in available:
-        if item is None:
-            continue
-
-        emoji_value = getattr(item, "emoji", None)
-        if emoji_value:
-            result.add(emoji_value)
-            continue
-
-        nested = getattr(item, "reaction", None)
-        emoji_value = getattr(nested, "emoji", None)
-        if emoji_value:
-            result.add(emoji_value)
-
-    return result
-
-
-async def _get_chat_available_quick_reactions(
-    client: Client,
-    chat_id: Optional[int],
-    *,
-    force_refresh: bool = False,
-) -> Optional[Set[str]]:
-    if chat_id is None:
-        return None
-
-    if force_refresh:
-        _chat_available_reactions_cache.pop(chat_id, None)
-    else:
-        cached = _chat_available_reactions_cache.get(chat_id)
-        if cached is not None:
-            return cached
-
-    if not hasattr(client, "get_available_reactions"):
-        return None
-
-    try:
-        try:
-            available = await client.get_available_reactions(chat_id)
-        except TypeError:
-            available = await client.get_available_reactions()
-    except Exception:
-        logging.exception(
-            "Failed to fetch available reactions for chat %s", chat_id
-        )
-        return None
-
-    allowed = _extract_available_reaction_emojis(available)
-    _chat_available_reactions_cache[chat_id] = allowed
-    return allowed
-
-
-async def _get_available_quick_reaction_emojis(
-    user_id: int,
-    session: Optional[str],
-    chat_id: Optional[int] = None,
-) -> Optional[Set[str]]:
-    if not session:
-        return None
-
-    key = make_session_key(user_id, session)
-    existing_client = active_pyrogram_clients.get(key)
-
-    async def _query(client_obj: Client) -> Optional[Set[str]]:
-        if not hasattr(client_obj, "get_available_reactions"):
-            return None
-
-        if chat_id is None:
-            return None
-
-        try:
-            available = await client_obj.get_available_reactions(chat_id)
-        except Exception:
-            logging.exception(
-                "Failed to request available reactions for session %s", session
-            )
-            return None
-
-        return _extract_available_reaction_emojis(available)
-
-    if existing_client and getattr(existing_client, "is_connected", False):
-        return await _query(existing_client)
-
-    session_dir = os.path.join("sessions", str(user_id))
-    session_name = os.path.join(session_dir, session)
-    session_file = f"{session_name}.session"
-
-    if not os.path.exists(session_file):
-        alt_session_file = f"{session_file}.session"
-        if os.path.exists(alt_session_file):
-            try:
-                shutil.copy2(alt_session_file, session_file)
-            except Exception:
-                logging.exception(
-                    "Не удалось подготовить файл сессии для получения доступных реакций: %s",
-                    alt_session_file,
-                )
-                return None
-        else:
-            logging.warning(
-                "Session file %s not found while fetching available reactions", session_file
-            )
-            return None
-
-    ensure_session_file_permissions(session_file)
-
-    try:
-        return await with_retry(
-            session_name,
-            _query,
-            lock_key=key,
-        )
-    except Exception:
-        logging.exception(
-            "Failed to fetch available reactions for session %s", session
-        )
-        return None
-
-
 @dp.message(reactionsettings.emojis)
 async def add_reaction_emojis(message: Message, state: FSMContext) -> None:
     data, _, account = await _load_account_data(state)
@@ -4138,44 +3590,7 @@ async def add_reaction_emojis(message: Message, state: FSMContext) -> None:
             await _prompt_reaction_emojis(message, state)
             return
 
-        session_name = data.get("account")
-        chat_id = data.get("reaction_channel_id")
-        available_emojis = await _get_available_quick_reaction_emojis(
-            message.from_user.id,
-            str(session_name) if isinstance(session_name, str) else None,
-            int(chat_id) if isinstance(chat_id, int) else None,
-        )
-
-        if available_emojis is not None:
-            filtered = [emoji for emoji in unique_emojis if emoji in available_emojis]
-            invalid = [emoji for emoji in unique_emojis if emoji not in available_emojis]
-
-            available_text = " ".join(sorted(available_emojis)) if available_emojis else "нет доступных реакций"
-
-            if not filtered:
-                await bot.send_message(
-                    message.from_user.id,
-                    (
-                        "Ни один из указанных эмодзи недоступен для быстрых реакций.\n"
-                        f"Доступные реакции: {available_text}."
-                    ),
-                )
-                await _prompt_reaction_emojis(message, state)
-                return
-
-            if invalid:
-                invalid_text = " ".join(invalid)
-                await bot.send_message(
-                    message.from_user.id,
-                    (
-                        "Следующие эмодзи недоступны и будут пропущены: "
-                        f"{invalid_text}.\nДоступные реакции: {available_text}."
-                    ),
-                )
-
-            emoji_list = filtered
-        else:
-            emoji_list = unique_emojis
+        emoji_list = unique_emojis
 
     await state.update_data({"reaction_emojis": emoji_list, "apply_reactions_to_all": False})
 
