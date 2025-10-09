@@ -4,11 +4,12 @@ import asyncio
 import logging
 import shutil
 import sqlite3
+import atexit
 from collections import Counter, defaultdict
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, time, timezone, timedelta
-from typing import Awaitable, Callable, Dict, List, Optional, Set, Any, Union, Tuple, AsyncIterator
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Any, Union, Tuple, AsyncIterator, IO
 from types import SimpleNamespace
 import random
 import re
@@ -64,6 +65,9 @@ from db import (
     update_warmup_settings,
     _require_pool,
 )
+
+
+logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
 
 
@@ -209,6 +213,12 @@ session_locks: Dict[str, AsyncSessionLock] = {}
 active_pyrogram_clients: Dict[str, Client] = {}
 active_client_locks: Dict[str, asyncio.Lock] = {}
 
+PROCESS_LOCK_PATH = os.environ.get(
+    "BOT_PROCESS_LOCK_FILE", os.path.join(os.getcwd(), "bot_process.lock")
+)
+_PROCESS_LOCK_HANDLE: Optional[IO[str]] = None
+_PROCESS_LOCK_SIZE = 32
+
 
 def get_session_lock(session_path: str) -> AsyncSessionLock:
     """Return a shared async-compatible lock for the given session path."""
@@ -225,6 +235,105 @@ def _release_session_lock(key: str) -> None:
 
     session_locks.pop(key, None)
 
+
+def _acquire_process_lock(lock_path: Optional[str] = None) -> None:
+    """Ensure only a single bot process is running at a time."""
+
+    global _PROCESS_LOCK_HANDLE
+
+    if _PROCESS_LOCK_HANDLE is not None:
+        return
+
+    target_path = os.path.abspath(lock_path or PROCESS_LOCK_PATH)
+    directory = os.path.dirname(target_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    logger.debug("Attempting to acquire process lock at %s", target_path)
+
+    lock_file = open(target_path, "a+")
+
+    def _raise_already_running(exc: BaseException) -> None:
+        lock_file.seek(0)
+        existing_owner = lock_file.read().strip() or "unknown"
+        lock_file.close()
+        logger.error(
+            "Failed to acquire process lock at %s; existing owner pid=%s",
+            target_path,
+            existing_owner,
+        )
+        raise RuntimeError(
+            f"Another instance of the bot is already running (PID {existing_owner})."
+        ) from exc
+
+    try:
+        if os.name == "posix":
+            import fcntl
+
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:  # pragma: no cover - depends on runtime
+                _raise_already_running(exc)
+        elif os.name == "nt":  # pragma: no cover - windows-specific logic
+            import msvcrt
+
+            lock_file.seek(0)
+            try:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, _PROCESS_LOCK_SIZE)
+            except OSError as exc:
+                _raise_already_running(exc)
+        else:  # pragma: no cover - unsupported platforms
+            lock_file.close()
+            raise RuntimeError(
+                f"Process locking is not supported on platform: {os.name}"
+            )
+    except Exception:
+        raise
+
+    pid_text = str(os.getpid())
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(pid_text)
+    lock_file.flush()
+
+    _PROCESS_LOCK_HANDLE = lock_file
+    logger.info("Process lock acquired at %s by PID %s", target_path, pid_text)
+    atexit.register(_release_process_lock)
+
+
+def _release_process_lock() -> None:
+    """Release the process lock and clean up the lock file."""
+
+    global _PROCESS_LOCK_HANDLE
+
+    if _PROCESS_LOCK_HANDLE is None:
+        return
+
+    lock_file = _PROCESS_LOCK_HANDLE
+    lock_path = lock_file.name
+
+    try:
+        if os.name == "posix":
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        elif os.name == "nt":  # pragma: no cover - windows-specific logic
+            import msvcrt
+
+            lock_file.seek(0)
+            try:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, _PROCESS_LOCK_SIZE)
+            except OSError:
+                logger.debug(
+                    "Ignoring error while unlocking process file %s on Windows",
+                    lock_path,
+                )
+    finally:
+        lock_file.close()
+        with suppress(FileNotFoundError):
+            os.unlink(lock_path)
+        _PROCESS_LOCK_HANDLE = None
+        logger.info("Process lock released at %s", lock_path)
 
 async def safe_session_operation(
     session_path: str,
@@ -738,18 +847,103 @@ async def _maybe_send_reaction(
     force: bool = False,
     ignore_cooldown: bool = False,
 ) -> Tuple[Optional[datetime], bool]:
-    if not reactions_enabled or not reaction_emojis:
+    chat_obj = getattr(message, "chat", None)
+    chat_id_for_reactions = getattr(chat_obj, "id", None)
+    channel_for_reactions = str(chat_id_for_reactions or "")
+    message_id = getattr(message, "id", None)
+
+    cleaned_reaction_emojis: List[str] = []
+    for emoji in reaction_emojis:
+        if isinstance(emoji, str):
+            cleaned = emoji.strip()
+            if cleaned:
+                cleaned_reaction_emojis.append(cleaned)
+            else:
+                logger.debug(
+                    "Ignoring empty reaction emoji for account=%s message=%s",
+                    account_id,
+                    message_id,
+                )
+        else:
+            logger.debug(
+                "Ignoring non-string reaction emoji %r for account=%s message=%s",
+                emoji,
+                account_id,
+                message_id,
+            )
+
+    if len(cleaned_reaction_emojis) != len(reaction_emojis):
+        logger.info(
+            "Normalised reaction emoji list for account=%s message=%s: %d -> %d items",
+            account_id,
+            message_id,
+            len(reaction_emojis),
+            len(cleaned_reaction_emojis),
+        )
+
+    reaction_emojis = cleaned_reaction_emojis
+
+    if not reactions_enabled:
+        logger.debug(
+            "Reactions disabled for account=%s message=%s; skipping",
+            account_id,
+            message_id,
+        )
         return current_last_reaction_at, False
 
-    effective_chance = selected_reaction_chance or 0
+    if not reaction_emojis:
+        logger.warning(
+            "No reaction emojis configured for account=%s message=%s; skipping",
+            account_id,
+            message_id,
+        )
+        return current_last_reaction_at, False
+
+    try:
+        effective_chance = int(selected_reaction_chance or 0)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid reaction chance value %r for account=%s; defaulting to 0",
+            selected_reaction_chance,
+            account_id,
+        )
+        effective_chance = 0
+
     if force:
         effective_chance = 100
 
-    if effective_chance <= 0:
+    if effective_chance < 0:
+        logger.warning(
+            "Negative reaction chance %s%% for account=%s; clamping to 0",
+            effective_chance,
+            account_id,
+        )
+        effective_chance = 0
+    elif effective_chance > 100:
+        logger.warning(
+            "Reaction chance %s%% for account=%s exceeds 100; clamping",
+            effective_chance,
+            account_id,
+        )
+        effective_chance = 100
+
+    if effective_chance == 0:
+        logger.info(
+            "Effective reaction chance is 0%% for account=%s message=%s; skipping",
+            account_id,
+            message_id,
+        )
         return current_last_reaction_at, False
 
-    channel_for_reactions = str(getattr(getattr(message, "chat", None), "id", ""))
-    message_id = getattr(message, "id", None)
+    logger.info(
+        "Evaluating reaction chance for account=%s message=%s chat=%s: %s%% (force=%s)",
+        account_id,
+        message_id,
+        channel_for_reactions or "unknown",
+        effective_chance,
+        force,
+    )
+
     limit = reaction_limit_per_message
 
     if limit is not None:
@@ -791,8 +985,29 @@ async def _maybe_send_reaction(
     reaction_roll = 0
     if not force:
         reaction_roll = random.randint(1, 100)
-        if reaction_roll > effective_chance:
+        logger.info(
+            "Reaction roll for account=%s message=%s: %d (needs <= %d)",
+            account_id,
+            message_id,
+            reaction_roll,
+            effective_chance,
+        )
+        if reaction_roll <= effective_chance:
+            logger.info(
+                "Reaction approved for account=%s message=%s: %d <= %d",
+                account_id,
+                message_id,
+                reaction_roll,
+                effective_chance,
+            )
+        else:
             reason = f'reaction random {reaction_roll} > chance {effective_chance}'
+            logger.info(
+                "Reaction skipped for account=%s message=%s: %s",
+                account_id,
+                message_id,
+                reason,
+            )
             enqueue_skip_log(
                 session,
                 "reaction",
@@ -801,12 +1016,18 @@ async def _maybe_send_reaction(
             await asyncio.sleep(0.2)
             await add_comment_log(
                 account_id,
-                channel=str(getattr(getattr(message, "chat", None), "id", "")),
-                message_id=message.id,
+                channel=channel_for_reactions,
+                message_id=message_id,
                 status=f'reaction_skipped{status_suffix}',
                 error=reason,
             )
             return current_last_reaction_at, False
+    else:
+        logger.info(
+            "Reaction forced for account=%s message=%s; bypassing chance roll",
+            account_id,
+            message_id,
+        )
 
     chat_obj = getattr(message, "chat", None)
     chat_id_for_reactions = getattr(chat_obj, "id", None)
@@ -816,9 +1037,18 @@ async def _maybe_send_reaction(
         chat_id_for_reactions,
     )
     if allowed_reaction_emojis is not None:
+        before_filter = len(working_reaction_emojis)
         working_reaction_emojis = [
             emoji for emoji in working_reaction_emojis if emoji in allowed_reaction_emojis
         ]
+        if before_filter != len(working_reaction_emojis):
+            logger.info(
+                "Filtered reaction emojis for account=%s message=%s: %d -> %d allowed",
+                account_id,
+                message_id,
+                before_filter,
+                len(working_reaction_emojis),
+            )
 
     if not working_reaction_emojis:
         available_text: Optional[str] = None
@@ -831,6 +1061,13 @@ async def _maybe_send_reaction(
         reason = "no allowed quick reactions"
         if available_text is not None:
             reason = f"{reason} (available: {available_text})"
+
+        logger.warning(
+            "Cannot send reaction for account=%s message=%s: %s",
+            account_id,
+            message_id,
+            reason,
+        )
 
         enqueue_skip_log(
             session,
@@ -5105,6 +5342,7 @@ async def send_account_summary_to_logs(account_id, session_name):
 
 async def main():
     try:
+        _acquire_process_lock()
         with open("bot_log.txt", "w") as log_file:
             log_file.write("Starting bot initialization...\n")
             log_file.flush()
