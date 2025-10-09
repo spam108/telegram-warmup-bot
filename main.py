@@ -1545,7 +1545,14 @@ async def process_channel_reactions(
         )
         return last_reaction_at
 
-    if not history:
+    messages = getattr(history, "messages", None)
+    if not messages:
+        try:
+            messages = list(history)
+        except TypeError:
+            messages = []
+
+    if not messages:
         logging.debug(
             "No recent messages in channel %s for account %s",
             channel_name,
@@ -1553,7 +1560,7 @@ async def process_channel_reactions(
         )
         return last_reaction_at
 
-    message = history[0]
+    message = messages[0]
     post_base_link = _build_post_link(message, message)
 
     try:
