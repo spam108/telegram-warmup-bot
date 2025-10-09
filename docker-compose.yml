@@ -1,24 +1,32 @@
+version: "3.9"
+
 services:
   postgres:
     image: postgres:15
-    container_name: ${PROJECT_NAME}_postgres
+    container_name: telegram_bot_postgres
+    hostname: postgres
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-${PROJECT_NAME}_db}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      - POSTGRES_DB=telegram_bot
+      - POSTGRES_USER=bot_user
+      - POSTGRES_PASSWORD=postgresbot1010
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./init_database.sql:/docker-entrypoint-initdb.d/00_init_database.sql:ro
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "5432:5432"
     restart: unless-stopped
-    networks:
-      - project
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bot_user -d telegram_bot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   bot:
     build: .
-    container_name: ${PROJECT_NAME}_bot
+    container_name: telegram_bot
+    hostname: bot
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${PROJECT_NAME}_postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-${PROJECT_NAME}_db}
+      - DATABASE_URL=postgresql://bot_user:postgresbot1010@postgres:5432/telegram_bot
     env_file:
       - .env
     volumes:
@@ -29,13 +37,8 @@ services:
     restart: unless-stopped
     user: "0:0"
     depends_on:
-      - postgres
-    networks:
-      - project
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:
-
-networks:
-  project:
-    name: ${PROJECT_NAME}_network

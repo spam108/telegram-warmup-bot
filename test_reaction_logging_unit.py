@@ -124,9 +124,8 @@ async def test_send_reaction_safe_handles_invalid():
 
     dummy = DummyClient()
 
-    sent, error = await send_reaction_safe(dummy, 1, 2, "🔥")
+    sent = await send_reaction_safe(dummy, 1, 2, "🔥")
     assert not sent
-    assert "REACTION_INVALID" in (error or "")
     assert events.sent
 
 
@@ -140,7 +139,6 @@ async def test_send_reaction_safe_success():
 
     dummy = DummyClient()
 
-    sent, error = await send_reaction_safe(dummy, 1, 2, "👍")
+    sent = await send_reaction_safe(dummy, 1, 2, "👍")
     assert sent
-    assert error is None
     assert events.sent
