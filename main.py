@@ -47,6 +47,7 @@ from db import (
     get_account_by_session,
     get_accounts_for_user,
     get_global_statistics,
+    get_running_standard_accounts,
     get_running_accounts,
     get_warmup_pending,
     get_warmup_settings,
@@ -1482,6 +1483,318 @@ async def comment_log_cleanup_worker() -> None:
             raise
         except Exception:
             logging.exception("Ошибка очистки журнала комментариев")
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+async def process_channel_reactions(
+    client: Client,
+    account: Dict[str, Any],
+    channel: Any,
+    last_reaction_at: Optional[datetime],
+    *,
+    reaction_emojis: List[str],
+    reaction_sleep_min: int,
+    reaction_sleep_max: int,
+    reaction_limit_per_message: Optional[int],
+    reactions_enabled: bool,
+    reaction_chance: int,
+) -> Optional[datetime]:
+    if not reactions_enabled:
+        return last_reaction_at
+
+    account_id = account.get("id")
+    phone = account.get("phone")
+    session_label = str(phone or account_id)
+
+    if isinstance(channel, str):
+        channel_name = channel.strip()
+    else:
+        channel_name = channel
+
+    try:
+        chat = await client.get_chat(channel_name)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logging.error(
+            "Error loading channel %s for account %s: %s",
+            channel_name,
+            account_id,
+            exc,
+        )
+        return last_reaction_at
+
+    try:
+        history = await client.get_chat_history(chat.id, limit=1)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logging.error(
+            "Error loading history for channel %s (account %s): %s",
+            channel_name,
+            account_id,
+            exc,
+        )
+        return last_reaction_at
+
+    if not history:
+        logging.debug(
+            "No recent messages in channel %s for account %s",
+            channel_name,
+            account_id,
+        )
+        return last_reaction_at
+
+    message = history[0]
+    post_base_link = _build_post_link(message, message)
+
+    try:
+        updated_last_reaction_at, _ = await _maybe_send_reaction(
+            client=client,
+            message=message,
+            session=session_label,
+            account_id=account_id,
+            reaction_emojis=reaction_emojis,
+            reaction_sleep_min=reaction_sleep_min,
+            reaction_sleep_max=reaction_sleep_max,
+            reaction_limit_per_message=reaction_limit_per_message,
+            reactions_enabled=reactions_enabled,
+            selected_reaction_chance=reaction_chance,
+            reaction_comment_context=" (background scan)",
+            status_suffix="_background",
+            post_base_link=post_base_link,
+            current_last_reaction_at=last_reaction_at,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logging.error(
+            "Reaction processing error for account %s channel %s: %s",
+            account_id,
+            channel_name,
+            exc,
+        )
+        return last_reaction_at
+
+    return updated_last_reaction_at
+
+
+async def process_account_reactions(account: Dict[str, Any]) -> None:
+    account_id = account.get("id")
+    if account_id is None:
+        return
+
+    user_id_raw = account.get("user_id")
+    phone_raw = account.get("phone")
+
+    try:
+        user_id = int(user_id_raw)
+    except (TypeError, ValueError):
+        logging.debug("Skipping reactions for account %s: invalid user id", account_id)
+        return
+
+    if not phone_raw:
+        logging.debug("Skipping reactions for account %s: phone is missing", account_id)
+        return
+
+    phone = str(phone_raw)
+    key = make_session_key(user_id, phone)
+
+    if active_sessions.get(key):
+        logging.debug(
+            "Skipping background reactions for account %s: session already active",
+            account_id,
+        )
+        return
+
+    reactions_enabled_raw = account.get("reactions_enabled")
+    reactions_enabled = True if reactions_enabled_raw is None else bool(reactions_enabled_raw)
+
+    if not reactions_enabled:
+        logging.debug("Reactions disabled for account %s", account_id)
+        return
+
+    reaction_emojis_raw = account.get("reaction_emojis") or []
+    reaction_emojis = [
+        emoji.strip()
+        for emoji in reaction_emojis_raw
+        if isinstance(emoji, str) and emoji.strip()
+    ]
+
+    if not reaction_emojis:
+        logging.debug("No reaction emojis configured for account %s", account_id)
+        return
+
+    channels = account.get("channels") or []
+    if not channels:
+        logging.debug("No channels configured for account %s", account_id)
+        return
+
+    session_path = account.get("session_path")
+    if not session_path:
+        logging.debug("Session path missing for account %s", account_id)
+        return
+
+    if not os.path.exists(session_path):
+        logging.warning(
+            "Session file %s missing for account %s; skipping reaction processing",
+            session_path,
+            account_id,
+        )
+        return
+
+    ensure_session_file_permissions(session_path)
+
+    if session_path.endswith(".session"):
+        session_name = session_path[:-len(".session")]
+    else:
+        session_name = session_path
+
+    reaction_sleep_min = _coerce_int(account.get("reaction_sleep_min"), 0)
+    reaction_sleep_max = _coerce_int(account.get("reaction_sleep_max"), 0)
+
+    if reaction_sleep_min <= 0 or reaction_sleep_max <= 0:
+        sleep_min_fallback = _coerce_int(account.get("sleep_min"), 10)
+        sleep_max_fallback = _coerce_int(account.get("sleep_max"), sleep_min_fallback)
+        if reaction_sleep_min <= 0:
+            reaction_sleep_min = sleep_min_fallback
+        if reaction_sleep_max <= 0:
+            reaction_sleep_max = sleep_max_fallback
+
+    if reaction_sleep_min > reaction_sleep_max:
+        reaction_sleep_min, reaction_sleep_max = reaction_sleep_max, reaction_sleep_min
+
+    reaction_limit_per_message = account.get("reaction_limit_per_message")
+    if reaction_limit_per_message is None:
+        reaction_limit_per_message = DEFAULT_REACTION_LIMIT_PER_MESSAGE
+
+    reaction_chance = _coerce_int(account.get("reaction_chance"), 0)
+
+    last_reaction_at = _parse_warmup_datetime(account.get("last_reaction_at"))
+
+    async def _runner(client: Client) -> None:
+        nonlocal last_reaction_at
+        for channel in channels:
+            updated = await process_channel_reactions(
+                client,
+                account,
+                channel,
+                last_reaction_at,
+                reaction_emojis=reaction_emojis,
+                reaction_sleep_min=reaction_sleep_min,
+                reaction_sleep_max=reaction_sleep_max,
+                reaction_limit_per_message=reaction_limit_per_message,
+                reactions_enabled=reactions_enabled,
+                reaction_chance=reaction_chance,
+            )
+            if updated and updated != last_reaction_at:
+                last_reaction_at = updated
+                await update_last_reaction_at(account_id, updated)
+
+    try:
+        await with_retry(session_name, _runner, lock_key=key)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logging.error("Error processing account %s reactions: %s", account_id, exc)
+
+
+async def process_account_comments(account: Dict[str, Any]) -> None:
+    account_id = account.get("id")
+    if account_id is None:
+        return
+
+    user_id_raw = account.get("user_id")
+    phone_raw = account.get("phone")
+
+    try:
+        user_id = int(user_id_raw)
+    except (TypeError, ValueError):
+        logging.debug("Skipping comments for account %s: invalid user id", account_id)
+        return
+
+    if not phone_raw:
+        logging.debug("Skipping comments for account %s: phone is missing", account_id)
+        return
+
+    phone = str(phone_raw)
+    key = make_session_key(user_id, phone)
+
+    if active_sessions.get(key):
+        return
+
+    session_path = account.get("session_path")
+    if not session_path:
+        logging.debug("Session path missing for account %s", account_id)
+        return
+
+    if not os.path.exists(session_path):
+        logging.warning(
+            "Session file %s missing for account %s; stopping account",
+            session_path,
+            account_id,
+        )
+        try:
+            await mark_account_stopped(account_id)
+        except Exception as exc:
+            logging.error(
+                "Failed to mark account %s stopped after missing session: %s",
+                account_id,
+                exc,
+            )
+        return
+
+    ensure_session_file_permissions(session_path)
+
+    active_sessions[key] = True
+    active_account_ids[key] = account_id
+    quiet_sessions_notified.discard(key)
+
+    logging.info(
+        "Scheduling comment worker for account %s (%s)",
+        account_id,
+        phone,
+    )
+
+    _schedule_safe_send_comments(user_id, phone, account_id)
+
+
+async def process_standard_accounts() -> None:
+    logging.info("✅ Processing standard accounts...")
+    while True:
+        try:
+            accounts = await get_running_standard_accounts()
+            logging.debug(
+                "Standard accounts worker fetched %d accounts",
+                len(accounts),
+            )
+            for account in accounts:
+                account_id = account.get("id")
+                try:
+                    await process_account_reactions(account)
+                    await process_account_comments(account)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as account_error:
+                    logging.error(
+                        "Error processing account %s in standard worker: %s",
+                        account_id,
+                        account_error,
+                    )
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise
+        except Exception as loop_error:
+            logging.error("Standard accounts loop error: %s", loop_error)
+            await asyncio.sleep(30)
 
 
 async def _handle_linked_channel_message(
@@ -5507,6 +5820,7 @@ async def main():
                 join_end_minute=DEFAULT_WARMUP_SETTINGS.join_end_minute,
             )
             await ensure_latest_warmup_settings(force=True)
+            logging.info("✅ Database initialized successfully")
             log_file.write("Database initialized successfully\n")
             log_file.flush()
 
@@ -5553,7 +5867,12 @@ async def main():
                     log_file.write(f"Stopped account {phone} - no session file\n")
                     log_file.flush()
 
+            logging.info("✅ Starting background tasks...")
+            log_file.write("Starting background tasks...\n")
+            log_file.flush()
+
             asyncio.create_task(process_warmup_accounts())
+            asyncio.create_task(process_standard_accounts())
             asyncio.create_task(comment_log_cleanup_worker())
             log_file.write("Starting bot polling...\n")
             log_file.flush()
