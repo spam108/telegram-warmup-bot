@@ -1161,8 +1161,10 @@ async def count_reactions_for_message(channel: str, message_id: int) -> int:
         """,
         (channel, message_id),
     )
-    if row and row["reaction_count"] is not None:
-        return int(row["reaction_count"])
+    if row:
+        reaction_count = int(row["reaction_count"] or 0)
+        if reaction_count > 0:
+            return reaction_count
 
     fallback_row = await _fetchone(
         """
