@@ -2117,7 +2117,7 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
 
                 await callback_query.answer()
                 await _prompt_system_prompt(callback_query, state)
-                await state.set_state(startaccount.system_prompt)
+                await state.set_state(startaccount.systempromt)
             except Exception as exc:
                 logging.exception("Failed to start account %s for user %s: %s", session, user_id, exc)
                 await bot.send_message(user_id, f"Ошибка: {str(exc)}")
@@ -2151,11 +2151,13 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
             session_file_alt = f"sessions/{user_id}/{session}.session.session"
 
             deleted_files = []
-            for candidate in (session_file, session_file_alt):
-                if os.path.exists(candidate):
-                    with suppress(OSError):
-                        os.remove(candidate)
-                        deleted_files.append(os.path.basename(candidate))
+            if os.path.exists(session_file):
+                os.remove(session_file)
+                deleted_files.append(f"{session}.session")
+
+            if os.path.exists(session_file_alt):
+                os.remove(session_file_alt)
+                deleted_files.append(f"{session}.session.session")
 
             deleted_files_str = ", ".join(deleted_files) if deleted_files else "нет файлов"
             await bot.send_message(
