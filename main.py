@@ -2054,9 +2054,14 @@ async def process_password(message: types.Message, state: FSMContext):
 
 @dp.callback_query()
 async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
-    call = callback_query.data
+    call = callback_query.data or ""
+    user_id = callback_query.from_user.id
+
+    await init_db()
+    logging.info("Callback received from %s: %s", user_id, call)
 
     if call == "reaction_apply_all":
+        logging.info("Applying reaction settings to all accounts for user %s", user_id)
         await state.update_data({"apply_reactions_to_all": True})
         await callback_query.answer("Применяем настройки ко всем аккаунтам")
         await _save_reaction_settings(
@@ -2064,57 +2069,70 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
             state,
             finalize=True,
             notify=False,
-            user_id=callback_query.from_user.id,
+            user_id=user_id,
         )
         return
 
-    await callback_query.message.delete()
+    with suppress(Exception):
+        await callback_query.message.delete()
 
-    if call == 'add_account':
-        await start_add_account_flow(callback_query.from_user.id, state, warmup_only=False)
-
-    elif call == 'add_warmup':
-        await start_add_account_flow(callback_query.from_user.id, state, warmup_only=True)
-
-
-    elif call == 'warmup_settings':
+    if call == "add_account":
+        logging.info("Starting account addition flow for user %s", user_id)
         await callback_query.answer()
-        await open_warmup_settings_dialog(callback_query.from_user.id, state)
+        await start_add_account_flow(user_id, state, warmup_only=False)
         return
 
-    elif call == 'global_stats':
+    if call == "add_warmup":
+        logging.info("Starting warmup account addition flow for user %s", user_id)
         await callback_query.answer()
-        await send_global_stats_report(callback_query.from_user.id)
+        await start_add_account_flow(user_id, state, warmup_only=True)
+        return
+
+    if call == "warmup_settings":
+        logging.info("Opening warmup settings for user %s", user_id)
+        await callback_query.answer()
+        await open_warmup_settings_dialog(user_id, state)
+        return
+
+    if call == "global_stats":
+        logging.info("Sending global stats to user %s", user_id)
+        await callback_query.answer()
+        await send_global_stats_report(user_id)
         await main_message(callback_query)
         return
 
+    if call.startswith("info_"):
+        session = call.split("_", 1)[1]
+        logging.info("Showing info for session %s (user %s)", session, user_id)
+        await callback_query.answer()
 
-    elif 'info_' in call:
-        session = str(call).split('_', 1)[1]
-
-        account_row = await get_account_by_session(callback_query.from_user.id, session)
+        account_row = await get_account_by_session(user_id, session)
         if not account_row:
-            await bot.send_message(callback_query.from_user.id, "Аккаунт не найден в базе данных")
+            logging.warning("Account %s for user %s not found during info callback", session, user_id)
+            await bot.send_message(user_id, "Аккаунт не найден в базе данных")
             await main_message(callback_query)
             return
 
         account_id = account_row.get("id")
         if not account_id:
-            await bot.send_message(callback_query.from_user.id, f"Не удалось определить идентификатор аккаунта {session}")
+            logging.error("Account ID missing for session %s (user %s)", session, user_id)
+            await bot.send_message(user_id, f"Не удалось определить идентификатор аккаунта {session}")
             await main_message(callback_query)
             return
 
-        await send_account_summary_to_user(callback_query.from_user.id, account_id, session)
+        await send_account_summary_to_user(user_id, account_id, session)
         await main_message(callback_query)
         return
 
-
-    elif call.startswith('warmclear_'):
+    if call.startswith("warmclear_"):
+        session = call.split("_", 1)[1]
+        logging.info("Clearing warmup queue for session %s (user %s)", session, user_id)
         await callback_query.answer()
-        session = str(call).split('_', 1)[1]
-        account_row = await get_account_by_session(callback_query.from_user.id, session)
+
+        account_row = await get_account_by_session(user_id, session)
         if not account_row:
-            await bot.send_message(callback_query.from_user.id, "Аккаунт не найден в базе данных")
+            logging.warning("Account %s for user %s not found during warmclear", session, user_id)
+            await bot.send_message(user_id, "Аккаунт не найден в базе данных")
             await state.clear()
             await main_message(callback_query)
             return
@@ -2128,19 +2146,23 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
                 f"Очередь прогрева для {session} очищена. Аккаунт переведён в стандартный режим."
             )
         except Exception as exc:
+            logging.exception("Failed to clear warmup queue for session %s (user %s)", session, user_id)
             confirmation_text = f"Не удалось очистить очередь прогрева: {exc}"
 
-        await bot.send_message(callback_query.from_user.id, confirmation_text)
+        await bot.send_message(user_id, confirmation_text)
         await state.clear()
         await main_message(callback_query)
         return
 
-    elif call.startswith('warmup_'):
+    if call.startswith("warmup_"):
+        session = call.split("_", 1)[1]
+        logging.info("Opening warmup management for session %s (user %s)", session, user_id)
         await callback_query.answer()
-        session = str(call).split('_', 1)[1]
-        account_row = await get_account_by_session(callback_query.from_user.id, session)
+
+        account_row = await get_account_by_session(user_id, session)
         if not account_row:
-            await bot.send_message(callback_query.from_user.id, "Аккаунт не найден в базе данных")
+            logging.warning("Account %s for user %s not found during warmup management", session, user_id)
+            await bot.send_message(user_id, "Аккаунт не найден в базе данных")
             await state.clear()
             await main_message(callback_query)
             return
@@ -2170,19 +2192,20 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
         )
 
         await bot.send_message(
-            callback_query.from_user.id,
+            user_id,
             "\n".join(line for line in prompt_lines if line),
             reply_markup=keyboard,
         )
         return
 
+    if call.startswith("reaction_"):
+        session = call.split("_", 1)[1]
+        logging.info("Opening reaction settings for session %s (user %s)", session, user_id)
 
-    elif call.startswith('reaction_'):
-        session = str(call).split('_', 1)[1]
-
-        account_row = await get_account_by_session(callback_query.from_user.id, session)
+        account_row = await get_account_by_session(user_id, session)
         if not account_row:
-            await bot.send_message(callback_query.from_user.id, "Аккаунт не найден в базе данных")
+            logging.warning("Account %s for user %s not found during reaction settings", session, user_id)
+            await bot.send_message(user_id, "Аккаунт не найден в базе данных")
             await main_message(callback_query)
             return
 
@@ -2198,23 +2221,24 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
         await callback_query.answer()
         await _prompt_reaction_limit(callback_query, state)
         await state.set_state(reactionsettings.limit)
+        return
 
-    elif 'start_' in call:
+    if call.startswith("start_"):
+        session = call.split("_", 1)[1]
+        logging.info("Starting account flow for session %s (user %s)", session, user_id)
 
-        session = str(call).split('_')[1]
-
-        key = make_session_key(callback_query.from_user.id, session)
+        key = make_session_key(user_id, session)
         if active_sessions.get(key):
-            await bot.send_message(callback_query.from_user.id, f"Аккаунт {session} уже запущен")
+            logging.info("Account %s already running for user %s", session, user_id)
+            await bot.send_message(user_id, f"Аккаунт {session} уже запущен")
             return
 
-
-        if await check_account(callback_query.from_user.id, session):
-
+        if await check_account(user_id, session):
             try:
-                account_row = await get_account_by_session(callback_query.from_user.id, session)
+                account_row = await get_account_by_session(user_id, session)
                 if not account_row:
-                    await bot.send_message(callback_query.from_user.id, "Аккаунт не найден в базе данных")
+                    logging.warning("Account %s for user %s not found during start", session, user_id)
+                    await bot.send_message(user_id, "Аккаунт не найден в базе данных")
                     await main_message(callback_query)
                     return
 
@@ -2225,78 +2249,96 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
                 await callback_query.answer()
                 await _prompt_system_prompt(callback_query, state)
                 await state.set_state(startaccount.systempromt)
-            except Exception as e:
-                await bot.send_message(callback_query.from_user.id, f"Ошибка: {str(e)}")
+            except Exception as exc:
+                logging.exception("Failed to start account %s for user %s", session, user_id)
+                await bot.send_message(user_id, f"Ошибка: {str(exc)}")
                 await main_message(callback_query)
         else:
             await main_message(callback_query)
+        return
+
+    if call.startswith("del_"):
+        session = call.split("_", 1)[1]
+        logging.info("Deleting account session %s for user %s", session, user_id)
+        await callback_query.answer()
+
+        key = make_session_key(user_id, session)
+        if active_sessions.get(key):
+            logging.info("Cannot delete running account %s for user %s", session, user_id)
+            await bot.send_message(user_id, f"Аккаунт {session} в работе")
             return
 
-    elif 'del_' in call:
-        session = str(call).split('_')[1]
-
-        
-        key = make_session_key(callback_query.from_user.id, session)
-        if active_sessions.get(key):
-            await bot.send_message(callback_query.from_user.id, f"Аккаунт {session} в работе")
+        account_row = await get_account_by_session(user_id, session)
+        if not account_row:
+            logging.warning("Account %s for user %s not found during delete", session, user_id)
+            await bot.send_message(user_id, "Аккаунт не найден в базе данных")
+            await main_message(callback_query)
             return
 
         try:
-            await delete_account(callback_query.from_user.id, session)
-            
-            # Удаляем оба типа файлов сессий
-            session_file = f'sessions/{callback_query.from_user.id}/{session}.session'
-            session_file_alt = f'sessions/{callback_query.from_user.id}/{session}.session.session'
-            
-            deleted_files = []
+            await delete_account(user_id, account_row["phone"])
+
+            session_file = f"sessions/{user_id}/{session}.session"
+            session_file_alt = f"sessions/{user_id}/{session}.session.session"
+
+            deleted_files: List[str] = []
             if os.path.exists(session_file):
                 os.remove(session_file)
                 deleted_files.append(f"{session}.session")
-                
+
             if os.path.exists(session_file_alt):
                 os.remove(session_file_alt)
                 deleted_files.append(f"{session}.session.session")
-            
-            await bot.send_message(log_channel, f"Аккаунт {session} удален. Удалены файлы: {', '.join(deleted_files)}")
+
+            deleted_list = ", ".join(deleted_files) if deleted_files else "файлы не найдены"
+            await bot.send_message(
+                log_channel,
+                f"Аккаунт {session} удален. Удалены файлы: {deleted_list}",
+            )
             await main_message(callback_query)
-        except Exception as e:
-            await bot.send_message(callback_query.from_user.id, f"Ошибка: {str(e)}")
+        except Exception as exc:
+            logging.exception("Failed to delete account %s for user %s", session, user_id)
+            await bot.send_message(user_id, f"Ошибка: {str(exc)}")
             await main_message(callback_query)
+        return
 
+    if call.startswith("stop_"):
+        session = call.split("_", 1)[1]
+        logging.info("Stopping account session %s for user %s", session, user_id)
+        await callback_query.answer()
 
-    elif 'stop_' in call:
-
-        session = str(call).split('_')[1]
-        key = make_session_key(callback_query.from_user.id, session)
-        
-        # Проверяем, запущен ли аккаунт (в active_sessions или в БД)
-        account_row = await get_account_by_session(callback_query.from_user.id, session)
+        key = make_session_key(user_id, session)
+        account_row = await get_account_by_session(user_id, session)
         if not account_row:
-            await bot.send_message(callback_query.from_user.id, "Аккаунт не найден в базе данных")
+            logging.warning("Account %s for user %s not found during stop", session, user_id)
+            await bot.send_message(user_id, "Аккаунт не найден в базе данных")
             await main_message(callback_query)
             return
 
         is_running = active_sessions.get(key) or account_row.get("status") == "running"
         if not is_running:
-            await bot.send_message(callback_query.from_user.id, f"Аккаунт {session} не запущен")
+            logging.info("Account %s already stopped for user %s", session, user_id)
+            await bot.send_message(user_id, f"Аккаунт {session} не запущен")
             await main_message(callback_query)
             return
 
         try:
-            # Останавливаем аккаунт
             active_sessions.pop(key, None)
-            account_id = active_account_ids.pop(key, None)
+            active_account_ids.pop(key, None)
 
-            # Останавливаем аккаунт в БД
             await mark_account_stopped(account_row["id"])
 
-            await bot.send_message(callback_query.from_user.id, f'Аккаунт {session} остановлен')
-            await bot.send_message(log_channel, f'Аккаунт {session} остановлен')
+            await bot.send_message(user_id, f"Аккаунт {session} остановлен")
+            await bot.send_message(log_channel, f"Аккаунт {session} остановлен")
             await main_message(callback_query)
+        except Exception as exc:
+            logging.exception("Failed to stop account %s for user %s", session, user_id)
+            await bot.send_message(user_id, f"Ошибка: {str(exc)}")
+            await main_message(callback_query)
+        return
 
-        except Exception as e:
-            await bot.send_message(callback_query.from_user.id, f"Ошибка: {str(e)}")
-            await main_message(callback_query)
+    logging.warning("Unhandled callback received from %s: %s", user_id, call)
+    await callback_query.answer()
 
 
 @dp.message(warmupsettings.limit)
