@@ -822,10 +822,29 @@ async def bulk_update_reaction_settings(
     await _execute(query, tuple(values))
 
 
-async def update_last_reaction_at(account_id: int, timestamp: Optional[datetime]) -> None:
-    value = timestamp
-    if value is not None and value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+async def update_last_reaction_at(
+    account_id: int,
+    timestamp: Optional[datetime],
+) -> None:
+    """Persist the timestamp of the last reaction for an account.
+
+    The database expects a timezone-aware ``datetime`` value.  The function accepts
+    a :class:`datetime.datetime` object (or ``None`` to clear the column) and makes
+    sure the value is normalised to UTC before storing it.  Strings must be handled
+    by the caller – passing anything but ``datetime`` will raise a ``TypeError`` –
+    which protects the schema from accidentally storing serialised values.
+    """
+
+    if timestamp is None:
+        value: Optional[datetime] = None
+    elif not isinstance(timestamp, datetime):
+        raise TypeError("timestamp must be a datetime instance or None")
+    else:
+        if timestamp.tzinfo is None:
+            value = timestamp.replace(tzinfo=timezone.utc)
+        else:
+            value = timestamp.astimezone(timezone.utc)
+
     await _execute(
         """
         UPDATE accounts

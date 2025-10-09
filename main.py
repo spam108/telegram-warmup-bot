@@ -867,8 +867,32 @@ async def _maybe_send_reaction(
         emoji: Optional[str] = None,
         error: Optional[str] = None,
     ) -> None:
+        message_identifier = message_id_int if message_id_int is not None else "unknown"
+
+        if status == "success":
+            logger.info(
+                "Reaction success for account=%s message=%s",
+                account_id,
+                message_identifier,
+            )
+        elif status == "failed":
+            logger.error(
+                "Reaction failed for account=%s message=%s: %s",
+                account_id,
+                message_identifier,
+                error,
+            )
+        elif status == "skipped":
+            logger.info(
+                "Reaction skipped for account=%s message=%s: %s",
+                account_id,
+                message_identifier,
+                error or "no reason provided",
+            )
+
         if message_id_int is None:
             return
+
         await add_reaction_log(
             account_id,
             channel=channel_for_reactions,
@@ -915,6 +939,7 @@ async def _maybe_send_reaction(
             account_id,
             message_id,
         )
+        await log_reaction_event("skipped", error="reactions disabled")
         return current_last_reaction_at, False
 
     if not reaction_emojis:
@@ -923,6 +948,7 @@ async def _maybe_send_reaction(
             account_id,
             message_id,
         )
+        await log_reaction_event("skipped", error="no reaction emojis configured")
         return current_last_reaction_at, False
 
     try:
@@ -959,6 +985,7 @@ async def _maybe_send_reaction(
             account_id,
             message_id,
         )
+        await log_reaction_event("skipped", error="reaction chance is zero")
         return current_last_reaction_at, False
 
     logger.info(
@@ -1052,6 +1079,11 @@ async def _maybe_send_reaction(
             await log_reaction_event("skipped", error=reason)
             return current_last_reaction_at, False
     else:
+        logger.info(
+            "Reaction approved for account=%s message=%s (forced mode)",
+            account_id,
+            message_id,
+        )
         logger.info(
             "Reaction forced for account=%s message=%s; bypassing chance roll",
             account_id,
@@ -1169,7 +1201,7 @@ async def _maybe_send_reaction(
             except (TypeError, ValueError):
                 message_identifier_int = getattr(message, "id", 0)
 
-            sent, error_text = await send_reaction_safe(
+            sent = await send_reaction_safe(
                 client,
                 message.chat.id,
                 int(message_identifier_int),
@@ -1206,12 +1238,12 @@ async def _maybe_send_reaction(
                     f"reaction invalid for emoji {reaction_emoji}: "
                     f"unsupported emojis {invalid_text}"
                 )
-                last_reaction_error_text = error_text or reason
-                logging.warning(
+                last_reaction_error_text = reason
+                logger.warning(
                     "Reaction invalid for chat %s with emojis %s: %s",
                     chat_id_for_reactions,
                     invalid_text,
-                    error_text,
+                    reason,
                 )
                 if working_reaction_emojis:
                     continue
@@ -1262,7 +1294,7 @@ async def _maybe_send_reaction(
         except Exception as reaction_error:
             last_reaction_error = reaction_error
             last_reaction_error_text = str(reaction_error)
-            logging.warning(
+            logger.warning(
                 "Attempt %s/%s failed to send reaction for %s: %s",
                 reaction_attempt,
                 max_reaction_attempts,
@@ -1276,6 +1308,14 @@ async def _maybe_send_reaction(
     if not reaction_sent and last_reaction_error is not None:
         error_text = last_reaction_error_text or str(last_reaction_error)
         attempts_text = attempts_performed or max_reaction_attempts
+        logger.error(
+            "Reaction failed for account=%s message=%s after %s attempts: %s",
+            account_id,
+            message_id,
+            attempts_text,
+            error_text,
+        )
+
         await bot.send_message(
             log_channel,
             (
@@ -1322,17 +1362,31 @@ def _message_has_media(message: Any) -> bool:
     return bool(media)
 
 
-async def send_reaction_safe(client: Client, chat_id: int, message_id: int, emoji: str) -> Tuple[bool, Optional[str]]:
+async def send_reaction_safe(client: Client, chat_id: int, message_id: int, emoji: str) -> bool:
+    """Send a quick reaction and return ``True`` on success.
+
+    Known ``REACTION_INVALID`` errors are converted into a ``False`` result so the
+    caller can try an alternative emoji without aborting the processing loop.  The
+    function keeps the logs informative while allowing unexpected errors to bubble
+    up for higher-level handling.
+    """
+
     try:
         await client.send_reaction(chat_id, message_id, emoji)
-        return True, None
+        logger.debug(
+            "Reaction request succeeded for chat=%s message=%s emoji=%s",
+            chat_id,
+            message_id,
+            emoji,
+        )
+        return True
     except ReactionInvalid as exc:
-        logging.warning("Эмодзи %s не поддерживается в чате %s: %s", emoji, chat_id, exc)
-        return False, str(exc)
+        logger.warning("Эмодзи %s не поддерживается в чате %s: %s", emoji, chat_id, exc)
+        return False
     except Exception as exc:
         if "REACTION_INVALID" in str(exc).upper():
-            logging.warning("Эмодзи %s не поддерживается в чате %s: %s", emoji, chat_id, exc)
-            return False, str(exc)
+            logger.warning("Эмодзи %s не поддерживается в чате %s: %s", emoji, chat_id, exc)
+            return False
         raise
 
 
