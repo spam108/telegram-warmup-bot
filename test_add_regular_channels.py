@@ -40,7 +40,7 @@ def test_add_regular_channels_success_and_failure(monkeypatch):
         "account": "test_session",
         "account_id": 123,
         "chance": 25,
-        "systempromt": "Test prompt",
+        "system_prompt": "Test prompt",
         "sleeps": "5-10",
         "reaction_chance": 60,
         "reaction_discussion_chance": 40,

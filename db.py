@@ -1008,10 +1008,10 @@ async def mark_account_stopped(account_id: int) -> None:
     )
 
 
-async def delete_account(user_id: int, phone: str) -> None:
+async def delete_account(account_id: int, phone: str) -> None:
     await _execute(
-        "DELETE FROM accounts WHERE user_id = ? AND phone = ?",
-        (user_id, phone),
+        "DELETE FROM accounts WHERE id = ? AND phone = ?",
+        (account_id, phone),
     )
 
 

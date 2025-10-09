@@ -49,17 +49,17 @@ def test_state_data_processing():
     # Симулируем данные состояния
     state_data = {
         "sleeps": "15-25",
-        "systempromt": "Тестовый промпт",
+        "system_prompt": "Тестовый промпт",
         "chance": 30
     }
     
     # Извлекаем данные как в main.py
     sleeps = state_data.get("sleeps")
-    system_promt = state_data.get("systempromt")
+    system_prompt = state_data.get("system_prompt")
     chance = state_data.get("chance")
     
     print(f"Исходные данные: {state_data}")
-    print(f"Извлеченные данные: sleeps={sleeps}, system_promt={system_promt}, chance={chance}")
+    print(f"Извлеченные данные: sleeps={sleeps}, system_prompt={system_prompt}, chance={chance}")
     
     # Парсим sleeps
     sleep_min, sleep_max = None, None
