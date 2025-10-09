@@ -5,10 +5,10 @@ import logging
 import shutil
 import sqlite3
 from collections import Counter, defaultdict
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, time, timezone, timedelta
-from typing import Awaitable, Callable, Dict, List, Optional, Set, Any, Union, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Any, Union, Tuple, AsyncIterator
 from types import SimpleNamespace
 import random
 import re
@@ -177,6 +177,19 @@ class warmupmanage(StatesGroup):
 active_sessions: Dict[str, bool] = {}  # Глобальный словарь для хранения активных сессий
 active_account_ids: Dict[str, int] = {}
 quiet_sessions_notified: Set[str] = set()
+class _NoOpAsyncContextManager:
+    """A lightweight async context manager that does nothing."""
+
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, exc_type, exc, tb) -> Optional[bool]:
+        return None
+
+
+_NOOP_ASYNC_CONTEXT = _NoOpAsyncContextManager()
+
+
 class AsyncSessionLock:
     """Wrap a threading.Lock for use with ``async with``."""
 
@@ -222,6 +235,7 @@ async def safe_session_operation(
     operation_timeout: Optional[float] = None,
     disconnect_timeout: Optional[float] = None,
     operation_name: Optional[str] = None,
+    acquire_lock: bool = True,
 ):
     """Execute ``coro_func`` with exclusive access to a Pyrogram session."""
 
@@ -230,15 +244,30 @@ async def safe_session_operation(
 
     loop = asyncio.get_running_loop()
     wait_started_at = loop.time()
-    logging.debug("safe_session_operation[%s]: waiting for lock", op_name)
-
-    async with get_session_lock(key):
-        lock_acquired_at = loop.time()
+    if acquire_lock:
+        logging.debug("safe_session_operation[%s]: waiting for lock", op_name)
+        lock_context = get_session_lock(key)
+    else:
         logging.debug(
-            "safe_session_operation[%s]: lock acquired in %.2fs",
+            "safe_session_operation[%s]: skipping lock acquisition (already held)",
             op_name,
-            lock_acquired_at - wait_started_at,
         )
+        lock_context = _NOOP_ASYNC_CONTEXT
+
+    async with lock_context:
+        lock_acquired_at = loop.time()
+        if acquire_lock:
+            logging.debug(
+                "safe_session_operation[%s]: lock acquired in %.2fs",
+                op_name,
+                lock_acquired_at - wait_started_at,
+            )
+        else:
+            logging.debug(
+                "safe_session_operation[%s]: lock acquisition skipped in %.2fs",
+                op_name,
+                lock_acquired_at - wait_started_at,
+            )
 
         ensure_session_file_permissions(f"{session_path}.session")
         permissions_ready_at = loop.time()
@@ -352,6 +381,7 @@ async def with_retry(
     *,
     lock_key: Optional[str] = None,
     max_retries: int = 3,
+    acquire_lock: bool = True,
     **session_kwargs: Any,
 ):
     """Run a session-bound coroutine with retry logic for SQLite locks."""
@@ -362,6 +392,7 @@ async def with_retry(
                 session_path,
                 coro_func,
                 lock_key=lock_key,
+                acquire_lock=acquire_lock,
                 **session_kwargs,
             )
         except OperationalError as exc:
@@ -529,6 +560,46 @@ async def _stop_client_with_retries(
         base_delay=base_delay,
         on_retry=_prepare_session if session_file else None,
     )
+
+
+@asynccontextmanager
+async def _client_session(
+    client: Client,
+    *,
+    session_file: Optional[str] = None,
+    attempts: int = 8,
+    base_delay: float = 0.5,
+    lock_key: Optional[str] = None,
+) -> AsyncIterator[Client]:
+    key = lock_key or session_file or getattr(client, "name", None) or str(id(client))
+
+    async with get_session_lock(key):
+        await _start_client_with_retries(
+            client,
+            session_file=session_file,
+            attempts=attempts,
+            base_delay=base_delay,
+        )
+        try:
+            yield client
+        finally:
+            try:
+                await _stop_client_with_retries(
+                    client,
+                    session_file=session_file,
+                    attempts=max(3, attempts // 2),
+                    base_delay=base_delay,
+                )
+            except sqlite3.OperationalError:
+                logging.exception(
+                    "Не удалось корректно остановить клиента %s из-за блокировки БД",
+                    getattr(client, "name", "<unknown>"),
+                )
+            except Exception:
+                logging.exception(
+                    "Не удалось корректно остановить клиента %s",
+                    getattr(client, "name", "<unknown>"),
+                )
 
 
 async def _disconnect_client_with_retries(
@@ -1794,6 +1865,7 @@ async def check_account(user_id, phone):
                     session_base,
                     _ensure_identity,
                     lock_key=key,
+                    acquire_lock=False,
                     connect_timeout=CHECK_ACCOUNT_CONNECT_TIMEOUT,
                     operation_timeout=CHECK_ACCOUNT_OPERATION_TIMEOUT,
                     disconnect_timeout=CHECK_ACCOUNT_DISCONNECT_TIMEOUT,
