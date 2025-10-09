@@ -886,6 +886,7 @@ async def _maybe_send_reaction(
             await client.send_reaction(message.chat.id, message.id, emoji)
 
             now = datetime.now(timezone.utc)
+            await update_last_reaction_at(account_id, now)
             await add_comment_log(
                 account_id,
                 channel=str(message.chat.id),
