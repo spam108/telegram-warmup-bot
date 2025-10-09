@@ -247,6 +247,11 @@ async def test_reaction_settings_apply_all_triggers_bulk(monkeypatch):
         async def answer(self, *args, **kwargs):  # noqa: ANN001
             return None
 
+    async def fake_init_db():  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(main, "init_db", fake_init_db)
+
     await main.callbacks(DummyCallback(), state)
 
     assert len(captured_updates) == 2
@@ -316,6 +321,11 @@ async def test_reaction_apply_all_notifies_user_from_bot_message(monkeypatch):
         async def answer(self, *args, **kwargs):  # noqa: ANN001
             return None
 
+    async def fake_init_db():  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(main, "init_db", fake_init_db)
+
     await main.callbacks(DummyCallback(), state)
 
     assert captured_updates and captured_updates[0][0] == state_data["account_id"]
@@ -381,6 +391,11 @@ async def test_reaction_apply_all_returns_main_menu_to_real_user(monkeypatch):
 
         async def answer(self, *args, **kwargs):  # noqa: ANN001
             return None
+
+    async def fake_init_db():  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(main, "init_db", fake_init_db)
 
     await main.callbacks(DummyCallback(), state)
 
@@ -504,7 +519,7 @@ async def test_discussion_settings_dash_keeps_previous(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
-async def test_reaction_emojis_rejects_unsupported(monkeypatch):
+async def test_reaction_emojis_accepts_unique_without_validation(monkeypatch):
     user_id = 77
     state_data = {"account": "79991110000", "account_id": 900}
     state = DummyState(state_data)
@@ -529,27 +544,16 @@ async def test_reaction_emojis_rejects_unsupported(monkeypatch):
         nonlocal save_calls
         save_calls += 1
 
-    async def fake_get_available(user: int, session: str | None, chat_id: int | None = None):  # noqa: ANN001
-        assert user == user_id
-        assert session == state_data["account"]
-        assert chat_id is None
-        return {"🔥", "👍"}
-
     monkeypatch.setattr(main, "_load_account_data", fake_load_account_data)
     monkeypatch.setattr(main.bot, "send_message", fake_send_message)
     monkeypatch.setattr(main, "_prompt_reaction_emojis", fake_prompt_reaction_emojis)
     monkeypatch.setattr(main, "_save_reaction_settings", fake_save_reaction_settings)
-    monkeypatch.setattr(main, "_get_available_quick_reaction_emojis", fake_get_available)
 
     await main.add_reaction_emojis(DummyMessage("😀 😎", user_id), state)
 
-    assert save_calls == 0, "Настройки не должны сохраняться при полностью неподдерживаемом вводе"
-    assert reprompt_called is True, "Пользователь должен получить повторный запрос"
-    assert "reaction_emojis" not in state._data, "Ввод не должен попадать в состояние"
+    assert save_calls == 1, "Настройки должны сохраняться один раз"
+    assert reprompt_called is False, "Не должно быть повторного запроса"
+    assert state._data["reaction_emojis"] == ["😀", "😎"], "Эмодзи должны сохраняться в порядке ввода"
     assert any(
-        "Ни один из указанных эмодзи недоступен" in text for _, text in sent_messages
-    )
-    assert any(
-        "Доступные реакции:" in text and "🔥" in text and "👍" in text
-        for _, text in sent_messages
-    )
+        "Настройки реакций сохранены" in text for _, text in sent_messages
+    ), "Пользователь должен получить подтверждение"

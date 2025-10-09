@@ -39,6 +39,8 @@ _POOL: Optional[AsyncpgPool] = None
 _BACKEND: str = "postgres"
 _UNSET = object()
 
+DEFAULT_REACTION_EMOJIS = ['❤️', '👍', '🔥', '🎉', '👏']
+
 
 def _normalise_postgres_dsn(dsn: str) -> str:
     if dsn.startswith("postgresql+asyncpg://"):
@@ -673,7 +675,7 @@ async def update_account_settings(
     discussion_reply_chance: Any = _UNSET,
     reaction_sleep_min: Optional[int] = None,
     reaction_sleep_max: Optional[int] = None,
-    reaction_emojis: Optional[List[str]] = None,
+    reaction_emojis: Any = _UNSET,
     reaction_limit_per_message: Any = _UNSET,
     last_reaction_at: Any = _UNSET,
     channels: Optional[List[str]] = None,
@@ -721,7 +723,9 @@ async def update_account_settings(
     if reaction_sleep_max is not None:
         updates.append("reaction_sleep_max = ?")
         values.append(reaction_sleep_max)
-    if reaction_emojis is not None:
+    if reaction_emojis is not _UNSET:
+        if reaction_emojis is None:
+            reaction_emojis = DEFAULT_REACTION_EMOJIS
         updates.append("reaction_emojis = ?")
         values.append(_serialize_list(reaction_emojis))
     if reaction_limit_per_message is not _UNSET:
