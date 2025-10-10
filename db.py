@@ -782,7 +782,7 @@ async def update_account_settings(
     if last_reaction_at is not _UNSET:
         updates.append("last_reaction_at = ?")
         if isinstance(last_reaction_at, datetime):
-            values.append(last_reaction_at.isoformat())
+            values.append(last_reaction_at)
         else:
             values.append(last_reaction_at)
     if channels is not None:
@@ -920,7 +920,7 @@ async def set_account_mode(account_id: int, mode: str, warmup_days: Optional[int
     if warmup_days is not None:
         target = datetime.utcnow() + timedelta(days=warmup_days)
         updates.append("warmup_end_at = ?")
-        params.append(target.isoformat())
+        params.append(target)
 
     if mode == "warmup":
         updates.extend(
