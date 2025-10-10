@@ -409,19 +409,24 @@ async def safe_session_operation(
         connect_started_at = loop.time()
 
         try:
-            start_action = app.__aenter__ if start_client else app.connect
-            try:
-                if connect_timeout is not None:
-                    await asyncio.wait_for(start_action(), timeout=connect_timeout)
-                else:
-                    await start_action()
-            except asyncio.TimeoutError:
-                logging.error(
-                    "safe_session_operation[%s]: timeout while connecting after %.2fs",
-                    op_name,
-                    loop.time() - connect_started_at,
-                )
-                raise
+            if start_client:
+                try:
+                    if connect_timeout is not None:
+                        await asyncio.wait_for(
+                            app.__aenter__(),
+                            timeout=connect_timeout,
+                        )
+                    else:
+                        await app.__aenter__()
+                except asyncio.TimeoutError:
+                    logging.error(
+                        "safe_session_operation[%s]: timeout while connecting after %.2fs",
+                        op_name,
+                        loop.time() - connect_started_at,
+                    )
+                    raise
+            else:
+                app.connect()
 
             entered_context = True
             connected_at = loop.time()
@@ -460,19 +465,17 @@ async def safe_session_operation(
         finally:
             if entered_context:
                 disconnect_started_at = loop.time()
-                stop_action = (
-                    lambda: app.__aexit__(None, None, None)
-                    if start_client
-                    else app.disconnect
-                )
                 try:
-                    if disconnect_timeout is not None:
-                        await asyncio.wait_for(
-                            stop_action(),
-                            timeout=disconnect_timeout,
-                        )
+                    if start_client:
+                        if disconnect_timeout is not None:
+                            await asyncio.wait_for(
+                                app.__aexit__(None, None, None),
+                                timeout=disconnect_timeout,
+                            )
+                        else:
+                            await app.__aexit__(None, None, None)
                     else:
-                        await stop_action()
+                        app.disconnect()
                 except asyncio.TimeoutError:
                     logging.error(
                         "safe_session_operation[%s]: timeout while closing client after %.2fs",
