@@ -55,13 +55,16 @@
    # Для SQLite
    DATABASE_URL=sqlite:///data/CDXBOT0310.db
    # Для PostgreSQL
-   # DATABASE_URL=postgresql://user:password@host:5432/database
+   # DATABASE_URL=postgresql://bot_user:bot_password@telegram_bot_postgres:5432/telegram_bot
    ```
 
    Дополнительно доступны:
    - `WARMUP_VERBOSE_LOGS=1` — подробные логи в консоли.
    - `WARMUP_VERBOSE_NOTIFICATIONS=1` — расширенные уведомления в лог-канал.
    - `REACTION_LIMIT_PER_MESSAGE`, `REACTION_MIN_INTERVAL_SECONDS` — лимиты реакций.
+
+   > 💡 По умолчанию `docker-compose` создаёт базу данных `telegram_bot` с пользователем `bot_user`.
+   > Эти же значения используются в `.env.example` и в переменной `DATABASE_URL`.
 
 5. **Проверьте файл расписания `schedule.json`** — в нём задаются тихие периоды и окно прогрева. Значения по умолчанию:
    ```json

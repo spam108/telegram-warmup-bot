@@ -8,7 +8,7 @@ services:
     environment:
       - POSTGRES_DB=telegram_bot
       - POSTGRES_USER=bot_user
-      - POSTGRES_PASSWORD=postgresbot1010
+      - POSTGRES_PASSWORD=bot_password
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init_database.sql:/docker-entrypoint-initdb.d/00_init_database.sql:ro
@@ -26,7 +26,7 @@ services:
     container_name: telegram_bot
     hostname: bot
     environment:
-      - DATABASE_URL=postgresql://bot_user:postgresbot1010@postgres:5432/telegram_bot
+      - DATABASE_URL=postgresql://bot_user:bot_password@postgres:5432/telegram_bot
     env_file:
       - .env
     volumes:

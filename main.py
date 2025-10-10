@@ -859,15 +859,31 @@ async def _maybe_send_reaction(
             )
             return current_last_reaction_at, False
 
-    if reaction_limit_per_message is not None and reaction_limit_per_message <= 0:
-        await add_comment_log(
-            account_id,
-            channel=str(getattr(getattr(message, 'chat', None), 'id', '')),
-            message_id=getattr(message, 'id', None),
-            status=f'reaction_skipped{status_suffix}',
-            error=f'reaction limit {reaction_limit_per_message} reached',
-        )
-        return current_last_reaction_at, True
+    channel_for_reactions = str(getattr(getattr(message, "chat", None), "id", ""))
+    message_identifier = getattr(message, "id", None)
+
+    if reaction_limit_per_message is not None:
+        if reaction_limit_per_message <= 0:
+            await add_comment_log(
+                account_id,
+                channel=channel_for_reactions,
+                message_id=message_identifier,
+                status=f'reaction_skipped{status_suffix}',
+                error=f'reaction limit {reaction_limit_per_message} reached',
+            )
+            return current_last_reaction_at, True
+
+        if channel_for_reactions and message_identifier is not None:
+            reaction_count = await count_reactions_for_message(channel_for_reactions, message_identifier)
+            if reaction_count >= reaction_limit_per_message:
+                await add_comment_log(
+                    account_id,
+                    channel=channel_for_reactions,
+                    message_id=message_identifier,
+                    status=f'reaction_skipped{status_suffix}',
+                    error=f'reaction limit {reaction_count}/{reaction_limit_per_message}',
+                )
+                return current_last_reaction_at, True
 
     working_emojis = list(reaction_emojis)
     max_attempts = 3
@@ -891,6 +907,7 @@ async def _maybe_send_reaction(
                 channel=str(message.chat.id),
                 message_id=message.id,
                 status=f'reaction_success{status_suffix}',
+                emoji=emoji,
             )
 
             reaction_link = post_base_link or _build_post_link(message, message)
@@ -915,6 +932,7 @@ async def _maybe_send_reaction(
                 message_id=message.id,
                 status=f'reaction_error{status_suffix}',
                 error=str(e),
+                emoji=emoji,
             )
             break
 
