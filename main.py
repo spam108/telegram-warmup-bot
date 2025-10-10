@@ -426,7 +426,7 @@ async def safe_session_operation(
                     )
                     raise
             else:
-                app.connect()
+                await app.start()
 
             entered_context = True
             connected_at = loop.time()
@@ -475,7 +475,7 @@ async def safe_session_operation(
                         else:
                             await app.__aexit__(None, None, None)
                     else:
-                        app.disconnect()
+                        await app.stop()
                 except asyncio.TimeoutError:
                     logging.error(
                         "safe_session_operation[%s]: timeout while closing client after %.2fs",
