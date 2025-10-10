@@ -3863,15 +3863,12 @@ async def add_sleeps(message: Message, state: FSMContext) -> None:
 
 @dp.message(startaccount.channels)
 async def add_channels(message: Message, state: FSMContext) -> None:
-    print(f"DEBUG: add_channels called with message: {message.text}")
     
     state_data = await state.get_data()
     session = state_data.get("account")
     sleeps = state_data.get("sleeps")
     system_prompt = state_data.get("system_prompt")
     chance = state_data.get("chance")
-    print(f"DEBUG: State data - sleeps: {sleeps}, system_prompt: {system_prompt}, chance: {chance}")
-
     account_id = state_data.get("account_id")
     warmup_channels = []
     channels = []
@@ -3945,32 +3942,14 @@ async def add_channels(message: Message, state: FSMContext) -> None:
                 sleep_max = int(sleep_parts[1])
         except ValueError:
             pass
-    print(
-        "DEBUG: About to save settings - "
-        f"account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, "
-        f"system_prompt={system_prompt}"
-    )
     await bot.send_message(
         log_channel,
-        "DEBUG: About to save settings - "
-        f"account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, "
-        f"system_prompt={system_prompt}"
+        f"Settings saved - account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, system_prompt={system_prompt}"
     )
-
-    update_kwargs: Dict[str, Any] = {
-        "sleep_min": sleep_min,
-        "sleep_max": sleep_max,
-        "chance": chance,
-        "system_prompt": system_prompt,
-    }
 
     await update_account_settings(account_id, **update_kwargs)
 
-    print(f"DEBUG: Settings saved successfully for account_id={account_id}")
-    await bot.send_message(log_channel, f"DEBUG: Settings saved successfully for account_id={account_id}")
-
     # Переходим к вводу каналов для прогрева
-    await state.update_data({"account_id": account_id})
 
 
 async def send_comments(userid, session, account_id):
@@ -3980,8 +3959,6 @@ async def send_comments(userid, session, account_id):
 
         account = await get_account_by_id(account_id)
         if not account:
-            active_pyrogram_clients.pop(key, None)
-            _release_session_lock(key)
             active_sessions.pop(make_session_key(userid, session), None)
             return
         
