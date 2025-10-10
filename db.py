@@ -572,6 +572,10 @@ async def update_warmup_settings(
     updates: List[str] = []
     params: List[Any] = []
 
+    # DEBUG: Check input parameters
+    print(f"DEBUG: db_update_warmup_schedule called with next_join={next_join}, type={type(next_join)}")
+    print(f"DEBUG: db_update_warmup_schedule called with last_join={last_join}, type={type(last_join)}")
+
     if channels_per_day is not None:
         updates.append("channels_per_day = ?")
         params.append(channels_per_day)
@@ -1056,16 +1060,19 @@ async def db_update_warmup_schedule(
     updates: List[str] = []
     params: List[Any] = []
 
+    # DEBUG: Check input parameters
+    print(f"DEBUG: db_update_warmup_schedule called with next_join={next_join}, type={type(next_join)}")
+    print(f"DEBUG: db_update_warmup_schedule called with last_join={last_join}, type={type(last_join)}")
+
     if next_join is not None:
         updates.append("warmup_next_join_at = ?")
-        params.append(next_join.isoformat())
+        params.append(next_join)
 
     if last_join is not None:
-        iso = last_join.isoformat()
         updates.append("warmup_last_join_at = ?")
-        params.append(iso)
+        params.append(last_join)
         updates.append("warmup_last_join = ?")
-        params.append(last_join.date().isoformat())
+        params.append(last_join.date())
 
     if not updates:
         return
