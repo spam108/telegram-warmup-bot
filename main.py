@@ -348,6 +348,7 @@ async def safe_session_operation(
     disconnect_timeout: Optional[float] = None,
     operation_name: Optional[str] = None,
     acquire_lock: bool = True,
+    start_client: bool = True,
 ):
     """Execute ``coro_func`` with exclusive access to a Pyrogram session."""
 
@@ -408,11 +409,12 @@ async def safe_session_operation(
         connect_started_at = loop.time()
 
         try:
+            start_action = app.__aenter__ if start_client else app.connect
             try:
                 if connect_timeout is not None:
-                    await asyncio.wait_for(app.__aenter__(), timeout=connect_timeout)
+                    await asyncio.wait_for(start_action(), timeout=connect_timeout)
                 else:
-                    await app.__aenter__()
+                    await start_action()
             except asyncio.TimeoutError:
                 logging.error(
                     "safe_session_operation[%s]: timeout while connecting after %.2fs",
@@ -424,8 +426,9 @@ async def safe_session_operation(
             entered_context = True
             connected_at = loop.time()
             logging.debug(
-                "safe_session_operation[%s]: client connected in %.2fs",
+                "safe_session_operation[%s]: client %s in %.2fs",
                 op_name,
+                "started" if start_client else "connected",
                 connected_at - connect_started_at,
             )
 
@@ -457,14 +460,19 @@ async def safe_session_operation(
         finally:
             if entered_context:
                 disconnect_started_at = loop.time()
+                stop_action = (
+                    lambda: app.__aexit__(None, None, None)
+                    if start_client
+                    else app.disconnect
+                )
                 try:
                     if disconnect_timeout is not None:
                         await asyncio.wait_for(
-                            app.__aexit__(None, None, None),
+                            stop_action(),
                             timeout=disconnect_timeout,
                         )
                     else:
-                        await app.__aexit__(None, None, None)
+                        await stop_action()
                 except asyncio.TimeoutError:
                     logging.error(
                         "safe_session_operation[%s]: timeout while closing client after %.2fs",
@@ -4449,6 +4457,7 @@ async def add_number(message: Message, state: FSMContext) -> None:
                 session_name,
                 _send_code,
                 lock_key=lock_key,
+                start_client=False,
             )
 
             await state.update_data({"code_hash": sent_code.phone_code_hash})
@@ -4496,6 +4505,7 @@ async def add_code(message: Message, state: FSMContext) -> None:
                 session_name,
                 _sign_in,
                 lock_key=str(lock_key),
+                start_client=False,
             )
 
             await message.answer("✅ Успешная авторизация!")
