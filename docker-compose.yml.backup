@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: ${PROJECT_NAME}_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-${PROJECT_NAME}_db}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ${PROJECT_NAME}_postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    restart: unless-stopped
+    networks:
+      - project
+
+  bot:
+    build: .
+    container_name: ${PROJECT_NAME}_bot
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${PROJECT_NAME}_postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-${PROJECT_NAME}_db}
+    env_file:
+      - .env
+    volumes:
+      - ./sessions:/app/sessions
+      - ./logs:/app/logs
+      - ./schedule.json:/app/schedule.json
+      - ./data:/app/data
+    restart: unless-stopped
+    user: "0:0"
+    depends_on:
+      - postgres
+    networks:
+      - project
+
+volumes:
+  ${PROJECT_NAME}_postgres_data:
+
+networks:
+  project:
+    name: ${PROJECT_NAME}_network

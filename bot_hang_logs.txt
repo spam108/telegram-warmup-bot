@@ -1,0 +1,15 @@
+pgbot1010_bot  | INFO:root:Удалено устаревших записей comment_logs при запуске: 0
+pgbot1010_bot  | INFO:aiogram.dispatcher:Start polling
+pgbot1010_bot  | INFO:aiogram.dispatcher:Run polling for bot @ap4combot id=8337266687 - 'ap4combot'
+pgbot1010_bot  | INFO:aiogram.event:Update id=628632706 is handled. Duration 330 ms by bot id=8337266687
+pgbot1010_bot  | INFO:aiogram.event:Update id=628632708 is handled. Duration 52 ms by bot id=8337266687
+pgbot1010_bot  | INFO:aiogram.event:Update id=628632709 is handled. Duration 47 ms by bot id=8337266687
+pgbot1010_bot  | INFO:aiogram.event:Update id=628632711 is handled. Duration 409 ms by bot id=8337266687
+pgbot1010_bot  | WARNING:aiogram.dispatcher:Received SIGTERM signal
+pgbot1010_bot  | INFO:aiogram.dispatcher:Polling stopped for bot @ap4combot id=8337266687 - 'ap4combot'
+pgbot1010_bot  | INFO:aiogram.dispatcher:Polling stopped
+pgbot1010_bot  | INFO:aiogram.event:Update id=628632707 is not handled. Duration 256835 ms by bot id=8337266687
+pgbot1010_bot  | INFO:aiogram.event:Update id=628632710 is not handled. Duration 233700 ms by bot id=8337266687
+pgbot1010_bot  | INFO:root:Удалено устаревших записей comment_logs при запуске: 0
+pgbot1010_bot  | INFO:aiogram.dispatcher:Start polling
+pgbot1010_bot  | INFO:aiogram.dispatcher:Run polling for bot @ap4combot id=8337266687 - 'ap4combot'
