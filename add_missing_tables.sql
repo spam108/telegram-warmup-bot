@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS comment_logs (
     channel TEXT,
     message_id BIGINT,
     status TEXT NOT NULL,
+    error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

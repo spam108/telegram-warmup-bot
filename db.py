@@ -371,6 +371,50 @@ async def _init_postgres_schema() -> None:
 
         await connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS posts (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                channel TEXT NOT NULL,
+                post_id INTEGER NOT NULL,
+                message TEXT,
+                has_media BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (account_id, channel, post_id)
+            )
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_posts_account_id
+            ON posts (account_id)
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reaction_logs (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                channel TEXT NOT NULL,
+                message_id INTEGER NOT NULL,
+                emoji TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_reaction_logs_account_id
+            ON reaction_logs (account_id)
+            """
+        )
+
+        await connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS telegram_sessions (
                 id BIGSERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
@@ -1125,6 +1169,7 @@ async def add_comment_log(
     message_id: Optional[int],
     status: str,
     error: Optional[str] = None,
+    emoji: Optional[str] = None,
 ) -> None:
     await _execute(
         """
@@ -1133,6 +1178,23 @@ async def add_comment_log(
         """,
         (account_id, channel, message_id, status, error),
     )
+
+    if status.startswith("reaction_"):
+        reaction_status = status[len("reaction_") :]
+        base_status = reaction_status.split("_", 1)[0]
+        if base_status == "error":
+            normalized_status = "failed"
+        else:
+            normalized_status = base_status
+
+        await add_reaction_log(
+            account_id,
+            channel=channel,
+            message_id=message_id,
+            emoji=emoji,
+            status=normalized_status,
+            error_message=error,
+        )
 
 
 async def record_post(
@@ -1165,26 +1227,21 @@ async def record_post(
 async def add_reaction_log(
     account_id: int,
     *,
-    channel: str,
-    message_id: int,
+    channel: Optional[str],
+    message_id: Optional[int],
     emoji: Optional[str],
     status: str,
     error_message: Optional[str] = None,
 ) -> None:
     emoji_value = emoji if emoji else "N/A"
+    channel_value = channel or ""
+    message_value = message_id if message_id is not None else 0
     await _execute(
         """
         INSERT INTO reaction_logs (account_id, channel, message_id, emoji, status, error_message)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (
-            account_id,
-            channel,
-            message_id,
-            emoji_value,
-            status,
-            error_message,
-        ),
+        (account_id, channel_value, message_value, emoji_value, status, error_message),
     )
 
 
