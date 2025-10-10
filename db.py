@@ -572,9 +572,13 @@ async def update_warmup_settings(
     updates: List[str] = []
     params: List[Any] = []
 
-    # DEBUG: Check input parameters
-    print(f"DEBUG: db_update_warmup_schedule called with next_join={next_join}, type={type(next_join)}")
-    print(f"DEBUG: db_update_warmup_schedule called with last_join={last_join}, type={type(last_join)}")
+    # TEMP DEBUG - REMOVE LATER
+    print(f"TEMP DEBUG db_update_warmup_schedule: next_join type = {type(next_join)}, value = {next_join}")
+    if next_join is not None and isinstance(next_join, str):
+        print(f"TEMP DEBUG: ERROR - next_join is string: {next_join}")
+        import traceback
+        traceback.print_stack()
+
 
     if channels_per_day is not None:
         updates.append("channels_per_day = ?")
@@ -1060,9 +1064,13 @@ async def db_update_warmup_schedule(
     updates: List[str] = []
     params: List[Any] = []
 
-    # DEBUG: Check input parameters
-    print(f"DEBUG: db_update_warmup_schedule called with next_join={next_join}, type={type(next_join)}")
-    print(f"DEBUG: db_update_warmup_schedule called with last_join={last_join}, type={type(last_join)}")
+    # TEMP DEBUG - REMOVE LATER
+    print(f"TEMP DEBUG db_update_warmup_schedule: next_join type = {type(next_join)}, value = {next_join}")
+    if next_join is not None and isinstance(next_join, str):
+        print(f"TEMP DEBUG: ERROR - next_join is string: {next_join}")
+        import traceback
+        traceback.print_stack()
+
 
     if next_join is not None:
         updates.append("warmup_next_join_at = ?")
