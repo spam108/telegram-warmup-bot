@@ -11,12 +11,11 @@ services:
       - POSTGRES_PASSWORD=postgres
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init_database.sql:/docker-entrypoint-initdb.d/00_init_database.sql:ro
     ports:
       - "5432:5432"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bot_user -d telegram_bot"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pgbot1010"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -32,12 +31,11 @@ services:
     env_file:
       - .env
     volumes:
-      - ./sessions:/app/sessions
+      - ./sessions:/app/sessions:rw
       - ./logs:/app/logs
       - ./schedule.json:/app/schedule.json
       - ./data:/app/data
     restart: unless-stopped
-    user: "0:0"
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,3 +1,0 @@
-CREATE USER bot_user WITH PASSWORD 'bot_password';
-CREATE DATABASE pgbot1010 OWNER bot_user;
-GRANT ALL PRIVILEGES ON DATABASE pgbot1010 TO bot_user;
