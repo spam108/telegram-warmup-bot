@@ -278,6 +278,25 @@ async def _init_postgres_schema() -> None:
 
         await connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS reaction_settings (
+                user_id BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+                reaction_chance INTEGER,
+                reaction_discussion_chance INTEGER,
+                discussion_reply_prompt TEXT,
+                discussion_reply_chance INTEGER,
+                reaction_sleep_min INTEGER,
+                reaction_sleep_max INTEGER,
+                reaction_emojis TEXT,
+                reaction_limit_per_message INTEGER,
+                reactions_enabled BOOLEAN,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        await connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS account_settings (
                 id BIGSERIAL PRIMARY KEY,
                 account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -618,6 +637,8 @@ async def ensure_user(user_id: int) -> None:
         (user_id,),
     )
 
+    await ensure_reaction_settings(user_id)
+
 
 async def set_user_authenticated(user_id: int, value: bool) -> None:
     await _execute(
@@ -810,6 +831,119 @@ async def update_account_settings(
     logger.debug("update_account_settings completed for account_id=%s", account_id)
 
 
+async def ensure_reaction_settings(user_id: int) -> None:
+    """Ensure that a reaction settings row exists for the given user."""
+
+    await _execute(
+        """
+        INSERT INTO reaction_settings (user_id)
+        VALUES (?)
+        ON CONFLICT(user_id) DO NOTHING
+        """,
+        (user_id,),
+    )
+
+
+async def get_reaction_settings_for_user(user_id: int) -> Dict[str, Any]:
+    """Fetch reaction settings for a user, returning an empty dict if missing."""
+
+    row = await _fetchone(
+        """
+        SELECT
+            reaction_chance,
+            reaction_discussion_chance,
+            discussion_reply_prompt,
+            discussion_reply_chance,
+            reaction_sleep_min,
+            reaction_sleep_max,
+            reaction_emojis,
+            reaction_limit_per_message,
+            reactions_enabled
+        FROM reaction_settings
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    )
+
+    if not row:
+        return {}
+
+    data = dict(row)
+    data["reaction_emojis"] = _deserialize_list(data.get("reaction_emojis"))
+    reactions_enabled = data.get("reactions_enabled")
+    if reactions_enabled is not None:
+        data["reactions_enabled"] = bool(reactions_enabled)
+    return data
+
+
+async def update_reaction_settings(
+    user_id: int,
+    *,
+    reaction_chance: Any = _UNSET,
+    reaction_discussion_chance: Any = _UNSET,
+    discussion_reply_prompt: Any = _UNSET,
+    discussion_reply_chance: Any = _UNSET,
+    reaction_sleep_min: Any = _UNSET,
+    reaction_sleep_max: Any = _UNSET,
+    reaction_emojis: Any = _UNSET,
+    reaction_limit_per_message: Any = _UNSET,
+    reactions_enabled: Any = _UNSET,
+) -> None:
+    """Update or create reaction settings for a user."""
+
+    updates: List[str] = []
+    values: List[Any] = []
+
+    if reaction_chance is not _UNSET:
+        updates.append("reaction_chance = ?")
+        values.append(reaction_chance)
+    if reaction_discussion_chance is not _UNSET:
+        updates.append("reaction_discussion_chance = ?")
+        values.append(reaction_discussion_chance)
+    if discussion_reply_prompt is not _UNSET:
+        updates.append("discussion_reply_prompt = ?")
+        values.append(discussion_reply_prompt)
+    if discussion_reply_chance is not _UNSET:
+        updates.append("discussion_reply_chance = ?")
+        values.append(discussion_reply_chance)
+    if reaction_sleep_min is not _UNSET:
+        updates.append("reaction_sleep_min = ?")
+        values.append(reaction_sleep_min)
+    if reaction_sleep_max is not _UNSET:
+        updates.append("reaction_sleep_max = ?")
+        values.append(reaction_sleep_max)
+    if reaction_emojis is not _UNSET:
+        if reaction_emojis is None:
+            reaction_emojis = DEFAULT_REACTION_EMOJIS
+        updates.append("reaction_emojis = ?")
+        values.append(_serialize_list(reaction_emojis))
+    if reaction_limit_per_message is not _UNSET:
+        updates.append("reaction_limit_per_message = ?")
+        values.append(reaction_limit_per_message)
+    if reactions_enabled is not _UNSET:
+        updates.append("reactions_enabled = ?")
+        if reactions_enabled is None:
+            values.append(None)
+        else:
+            values.append(adapt_bool(bool(reactions_enabled)))
+
+    if not updates:
+        return
+
+    await ensure_reaction_settings(user_id)
+
+    updates.append("updated_at = CURRENT_TIMESTAMP")
+    values.append(user_id)
+
+    query = f"""
+        UPDATE reaction_settings
+        SET {', '.join(updates)}
+        WHERE user_id = ?
+    """
+
+    await _execute(query, tuple(values))
+
+
 async def bulk_update_reaction_settings(
     user_id: int,
     *,
@@ -870,6 +1004,29 @@ async def bulk_update_reaction_settings(
     """
 
     await _execute(query, tuple(values))
+
+    user_updates: Dict[str, Any] = {}
+    if reaction_chance is not None:
+        user_updates["reaction_chance"] = reaction_chance
+    if reaction_discussion_chance is not _UNSET:
+        user_updates["reaction_discussion_chance"] = reaction_discussion_chance
+    if discussion_reply_prompt is not _UNSET:
+        user_updates["discussion_reply_prompt"] = discussion_reply_prompt
+    if discussion_reply_chance is not _UNSET:
+        user_updates["discussion_reply_chance"] = discussion_reply_chance
+    if reaction_sleep_min is not None:
+        user_updates["reaction_sleep_min"] = reaction_sleep_min
+    if reaction_sleep_max is not None:
+        user_updates["reaction_sleep_max"] = reaction_sleep_max
+    if reaction_emojis is not None:
+        user_updates["reaction_emojis"] = reaction_emojis
+    if reaction_limit_per_message is not _UNSET:
+        user_updates["reaction_limit_per_message"] = reaction_limit_per_message
+    if reactions_enabled is not _UNSET:
+        user_updates["reactions_enabled"] = reactions_enabled
+
+    if user_updates:
+        await update_reaction_settings(user_id, **user_updates)
 
 
 async def update_last_reaction_at(
