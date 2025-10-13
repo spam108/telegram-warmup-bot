@@ -12,7 +12,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 os.environ.setdefault(
     "DATABASE_URL",
-    "postgresql://pgbot1010_user:pgbot1010_password@localhost:5432/pgbot1010",
+    "postgresql://bot_user:bot_password@localhost:5432/telegram_bot",
 )
 
 from db import (

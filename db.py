@@ -1,6 +1,5 @@
 import os
 import json
-import asyncio
 import importlib
 import importlib.util
 import logging
@@ -39,28 +38,6 @@ else:  # pragma: no cover - executed only when asyncpg is not installed
 _POOL: Optional[AsyncpgPool] = None
 _BACKEND: str = "postgres"
 _UNSET = object()
-
-_REQUIRED_TABLES = (
-    "public.users",
-    "public.accounts",
-    "public.account_settings",
-    "public.warmup_channels",
-    "public.warmup_settings",
-    "public.comment_logs",
-    "public.posts",
-    "public.reaction_logs",
-    "public.telegram_sessions",
-)
-
-_WARMUP_ENV_OVERRIDES = {
-    "WARMUP_CHANNELS_PER_DAY": "channels_per_day",
-    "WARMUP_DELAY_MINUTES": "delay_minutes",
-    "WARMUP_DEFAULT_DAYS": "default_days",
-    "WARMUP_JOIN_START_HOUR": "join_start_hour",
-    "WARMUP_JOIN_START_MINUTE": "join_start_minute",
-    "WARMUP_JOIN_END_HOUR": "join_end_hour",
-    "WARMUP_JOIN_END_MINUTE": "join_end_minute",
-}
 
 DEFAULT_REACTION_EMOJIS = ['❤️', '👍', '🔥', '🎉', '👏']
 
@@ -101,17 +78,6 @@ def _serialize_list(value: Optional[Iterable[str]]) -> Optional[str]:
     if value is None:
         return None
     return json.dumps(list(value))
-
-
-def _get_env_int_value(name: str) -> Optional[int]:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        logger.warning("Invalid integer value for %s: %s", name, raw)
-        return None
 
 
 def _require_pool() -> AsyncpgPool:
@@ -229,7 +195,7 @@ async def _fetchall(query: str, params: Sequence[Any] = ()):
         return await connection.fetch(prepared_query, *prepared_params)
 
 
-async def init_db(*, max_attempts: int = 5, initial_delay: float = 1.0) -> None:
+async def init_db() -> None:
     """Initialise database connection pool and ensure schema exists."""
 
     global _POOL, _BACKEND
@@ -251,30 +217,9 @@ async def init_db(*, max_attempts: int = 5, initial_delay: float = 1.0) -> None:
             "asyncpg is required for PostgreSQL connections. Install the 'asyncpg' package to use a PostgreSQL DSN."
         )
 
-    attempt = 0
-    delay = max(initial_delay, 0.1)
-    last_error: Optional[BaseException] = None
-
-    while attempt < max_attempts:
-        attempt += 1
-        try:
-            _POOL = await asyncpg.create_pool(dsn)
-            _BACKEND = "postgres"
-            await ensure_schema_integrity()
-            logger.info("Database connection established on attempt %d", attempt)
-            return
-        except Exception as exc:  # pragma: no cover - requires postgres
-            last_error = exc
-            logger.exception("Database initialisation attempt %d failed: %s", attempt, exc)
-            if _POOL is not None:
-                await _POOL.close()
-                _POOL = None
-            if attempt >= max_attempts:
-                break
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 30.0)
-
-    raise RuntimeError("Failed to initialise PostgreSQL connection pool") from last_error
+    _POOL = await asyncpg.create_pool(dsn)
+    _BACKEND = "postgres"
+    await _init_postgres_schema()
 
 async def _init_postgres_schema() -> None:
     pool = _require_pool()
@@ -369,13 +314,12 @@ async def _init_postgres_schema() -> None:
             """
             CREATE TABLE IF NOT EXISTS warmup_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                channels_per_day INTEGER NOT NULL DEFAULT 15,
-                delay_minutes INTEGER NOT NULL DEFAULT 7,
-                default_days INTEGER NOT NULL DEFAULT 7,
-                join_start_hour INTEGER NOT NULL DEFAULT 1,
-                join_start_minute INTEGER NOT NULL DEFAULT 0,
-                join_end_hour INTEGER NOT NULL DEFAULT 3,
-                join_end_minute INTEGER NOT NULL DEFAULT 0,
+                channels_per_day INTEGER NOT NULL,
+                delay_minutes INTEGER NOT NULL,
+                join_start_hour INTEGER NOT NULL,
+                join_start_minute INTEGER NOT NULL,
+                join_end_hour INTEGER NOT NULL,
+                join_end_minute INTEGER NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -541,71 +485,6 @@ async def _init_postgres_schema() -> None:
             """
         )
 
-    await ensure_required_columns()
-
-
-async def _detect_missing_tables(connection: "asyncpg_type.connection.Connection") -> List[str]:
-    missing: List[str] = []
-    for table in _REQUIRED_TABLES:
-        exists = await connection.fetchval("SELECT to_regclass($1)", table)
-        if exists is None:
-            missing.append(table)
-    return missing
-
-
-async def recover_partial_schema(missing_tables: Optional[Sequence[str]] = None) -> None:
-    """Attempt to recreate missing tables using the declarative schema."""
-
-    if missing_tables:
-        logger.warning("Attempting schema recovery for tables: %s", ", ".join(missing_tables))
-    else:
-        logger.warning("Attempting schema recovery due to missing database objects")
-    await _init_postgres_schema()
-
-
-async def ensure_schema_integrity() -> None:
-    """Validate that all required tables exist, recovering if necessary."""
-
-    pool = _POOL
-    if pool is None:
-        raise DatabaseNotInitialized("init_db() must be called before ensure_schema_integrity().")
-
-    async with pool.acquire() as connection:
-        missing = await _detect_missing_tables(connection)
-
-    if missing:
-        await recover_partial_schema(missing)
-        async with pool.acquire() as connection:
-            remaining = await _detect_missing_tables(connection)
-        if remaining:
-            raise RuntimeError(
-                "Failed to initialise required database tables: " + ", ".join(remaining)
-            )
-    else:
-        logger.debug("All required tables are present in the database")
-
-    await ensure_required_columns()
-
-
-async def ensure_required_columns() -> None:
-    """Добавляет недостающие обязательные колонки в таблице warmup_settings."""
-
-    pool = _require_pool()
-
-    async with pool.acquire() as connection:
-        await connection.execute(
-            """
-            ALTER TABLE warmup_settings
-            ADD COLUMN IF NOT EXISTS channels_per_day INTEGER DEFAULT 15,
-            ADD COLUMN IF NOT EXISTS delay_minutes INTEGER DEFAULT 7,
-            ADD COLUMN IF NOT EXISTS default_days INTEGER DEFAULT 7,
-            ADD COLUMN IF NOT EXISTS join_start_hour INTEGER DEFAULT 1,
-            ADD COLUMN IF NOT EXISTS join_start_minute INTEGER DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS join_end_hour INTEGER DEFAULT 3,
-            ADD COLUMN IF NOT EXISTS join_end_minute INTEGER DEFAULT 0
-            """
-        )
-
 
 async def close_db() -> None:
     global _POOL
@@ -618,7 +497,6 @@ async def ensure_warmup_settings(
     *,
     channels_per_day: int,
     delay_minutes: int,
-    default_days: int,
     join_start_hour: int,
     join_start_minute: int,
     join_end_hour: int,
@@ -632,19 +510,17 @@ async def ensure_warmup_settings(
             id,
             channels_per_day,
             delay_minutes,
-            default_days,
             join_start_hour,
             join_start_minute,
             join_end_hour,
             join_end_minute
         )
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (1, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO NOTHING
         """,
         (
             channels_per_day,
             delay_minutes,
-            default_days,
             join_start_hour,
             join_start_minute,
             join_end_hour,
@@ -660,7 +536,6 @@ async def get_warmup_settings() -> Dict[str, int]:
         """
         SELECT channels_per_day,
                delay_minutes,
-               default_days,
                join_start_hour,
                join_start_minute,
                join_end_hour,
@@ -673,57 +548,20 @@ async def get_warmup_settings() -> Dict[str, int]:
     if not row:
         raise RuntimeError("Warmup settings are not initialised")
 
-    row_data = dict(row)
-
     return {
-        "channels_per_day": int(row_data["channels_per_day"]),
-        "delay_minutes": int(row_data["delay_minutes"]),
-        "default_days": int(row_data.get("default_days", 7)),
-        "join_start_hour": int(row_data["join_start_hour"]),
-        "join_start_minute": int(row_data["join_start_minute"]),
-        "join_end_hour": int(row_data["join_end_hour"]),
-        "join_end_minute": int(row_data["join_end_minute"]),
+        "channels_per_day": int(row["channels_per_day"]),
+        "delay_minutes": int(row["delay_minutes"]),
+        "join_start_hour": int(row["join_start_hour"]),
+        "join_start_minute": int(row["join_start_minute"]),
+        "join_end_hour": int(row["join_end_hour"]),
+        "join_end_minute": int(row["join_end_minute"]),
     }
-
-
-async def ensure_default_warmup_settings() -> None:
-    """Ensure default warmup settings are present."""
-
-    try:
-        await ensure_warmup_settings(
-            channels_per_day=15,
-            delay_minutes=7,
-            default_days=7,
-            join_start_hour=1,
-            join_start_minute=0,
-            join_end_hour=3,
-            join_end_minute=0,
-        )
-    except Exception as exc:  # pragma: no cover - requires postgres
-        logger.error("Failed to ensure default warmup settings: %s", exc)
-
-
-async def ensure_warmup_settings_from_env() -> None:
-    """Override warmup settings using environment variables when provided."""
-
-    overrides: Dict[str, int] = {}
-    for env_name, column in _WARMUP_ENV_OVERRIDES.items():
-        value = _get_env_int_value(env_name)
-        if value is not None:
-            overrides[column] = value
-
-    if not overrides:
-        return
-
-    logger.info("Applying warmup settings overrides from environment: %s", overrides)
-    await update_warmup_settings(**overrides)
 
 
 async def update_warmup_settings(
     *,
     channels_per_day: Optional[int] = None,
     delay_minutes: Optional[int] = None,
-    default_days: Optional[int] = None,
     join_start_hour: Optional[int] = None,
     join_start_minute: Optional[int] = None,
     join_end_hour: Optional[int] = None,
@@ -742,9 +580,6 @@ async def update_warmup_settings(
     if delay_minutes is not None:
         updates.append("delay_minutes = ?")
         params.append(delay_minutes)
-    if default_days is not None:
-        updates.append("default_days = ?")
-        params.append(default_days)
     if join_start_hour is not None:
         updates.append("join_start_hour = ?")
         params.append(join_start_hour)
@@ -761,25 +596,16 @@ async def update_warmup_settings(
     if not updates:
         return
 
+    updates.append("updated_at = CURRENT_TIMESTAMP")
+    params.append(1)
+
     query = f"""
         UPDATE warmup_settings
-        SET {', '.join(updates)},
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = 1
+        SET {', '.join(updates)}
+        WHERE id = ?
     """
 
     await _execute(query, tuple(params))
-
-
-async def validate_database_integrity() -> bool:
-    """Run integrity checks and report status without raising."""
-
-    try:
-        await ensure_schema_integrity()
-    except Exception as exc:  # pragma: no cover - requires postgres
-        logger.error("Database integrity validation failed: %s", exc)
-        return False
-    return True
 
 
 async def ensure_user(user_id: int) -> None:
