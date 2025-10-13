@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import datetime, time, timezone, timedelta
 from typing import Awaitable, Callable, Dict, List, Optional, Set, Any, Union, Tuple, AsyncIterator, IO
 from types import SimpleNamespace
-from urllib.parse import urlsplit
 import random
 import re
 from pyrogram import Client, filters
@@ -42,8 +41,7 @@ from db import (
     ensure_account,
     ensure_user,
     cleanup_comment_logs,
-    ensure_default_warmup_settings,
-    ensure_warmup_settings_from_env,
+    ensure_warmup_settings,
     get_account_by_id,
     get_account_by_session,
     get_accounts_for_user,
@@ -67,7 +65,6 @@ from db import (
     update_account_settings,
     update_last_reaction_at,
     update_warmup_settings,
-    validate_database_integrity,
     _require_pool,
 )
 
@@ -94,20 +91,6 @@ def load_env_file():
 
 # Load environment variables
 env_vars = load_env_file()
-
-
-def validate_env_config() -> None:
-    required_vars = ["BOT_TOKEN", "API_ID", "API_HASH", "DATABASE_URL"]
-    missing = [var for var in required_vars if not (env_vars.get(var) or os.getenv(var))]
-    if missing:
-        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
-    dsn = os.getenv("DATABASE_URL") or env_vars.get("DATABASE_URL")
-    if dsn:
-        parsed = urlsplit(dsn)
-        host = parsed.hostname or "<unknown>"
-        if parsed.port:
-            host = f"{host}:{parsed.port}"
-        logger.info("Environment configuration validated for database host %s", host)
 
 
 def _get_bool_env(name: str, default: bool = False) -> bool:
@@ -5243,39 +5226,26 @@ async def send_account_summary_to_logs(account_id, session_name):
     else:
         await bot.send_message(log_channel, f"❌ Не удалось получить информацию об аккаунте {session_name}")
 
-
-async def _initialise_database(log_file: IO[str]) -> None:
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            await init_db()
-            await ensure_default_warmup_settings()
-            await ensure_warmup_settings_from_env()
-
-            if not await validate_database_integrity():
-                raise RuntimeError("Database integrity validation failed")
-
-            logging.info("✅ Database initialized successfully")
-            log_file.write("Database initialized successfully\n")
-            log_file.flush()
-            return
-        except Exception as exc:
-            logger.error("Database initialization failed (attempt %d): %s", attempt, exc)
-            log_file.write(f"Database initialization failed (attempt {attempt}): {exc}\n")
-            log_file.flush()
-            await asyncio.sleep(min(5 * attempt, 60))
-
 async def main():
     try:
-        validate_env_config()
         _acquire_process_lock()
         with open("bot_log.txt", "w") as log_file:
             log_file.write("Starting bot initialization...\n")
             log_file.flush()
-
-            await _initialise_database(log_file)
+            
+            await init_db()
+            await ensure_warmup_settings(
+                channels_per_day=DEFAULT_WARMUP_SETTINGS.channels_per_day,
+                delay_minutes=DEFAULT_WARMUP_SETTINGS.delay_minutes,
+                join_start_hour=DEFAULT_WARMUP_SETTINGS.join_start_hour,
+                join_start_minute=DEFAULT_WARMUP_SETTINGS.join_start_minute,
+                join_end_hour=DEFAULT_WARMUP_SETTINGS.join_end_hour,
+                join_end_minute=DEFAULT_WARMUP_SETTINGS.join_end_minute,
+            )
             await ensure_latest_warmup_settings(force=True)
+            logging.info("✅ Database initialized successfully")
+            log_file.write("Database initialized successfully\n")
+            log_file.flush()
 
             deleted_logs = await cleanup_comment_logs(COMMENT_LOG_RETENTION_DAYS)
             logging.info("Удалено устаревших записей comment_logs при запуске: %d", deleted_logs)
