@@ -42,7 +42,14 @@ API_ID=your_api_id
 API_HASH=your_api_hash
 OPENAI_API_KEY=your_openai_key
 PASSWORD=your_admin_password
-DATABASE_URL=sqlite:///data/CDXBOT0310.db
+DATABASE_NAME=pgbot1010
+DATABASE_USER=pgbot1010_user
+DATABASE_PASSWORD=pgbot1010_password
+DATABASE_HOST=localhost
+DATABASE_PORT=5432
+DATABASE_URL=postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@${DATABASE_HOST}:${DATABASE_PORT}/${DATABASE_NAME}
+DATABASE_ADMIN_URL=postgresql://postgres:postgres@localhost:5432/postgres
+DATABASE_BACKUP_DIR=/var/lib/telegram-warmup-bot/backups
 LOG_CHANNEL_ID=your_log_channel_id
 ```
 

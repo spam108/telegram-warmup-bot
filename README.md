@@ -52,10 +52,14 @@
    API_HASH=ваш_api_hash
    OPENAI_API_KEY=ключ_openai
    PASSWORD=пароль_для_доступа_к_боту
-   # Для SQLite
-   DATABASE_URL=sqlite:///data/CDXBOT0310.db
-   # Для PostgreSQL
-   # DATABASE_URL=postgresql://bot_user:bot_password@telegram_bot_postgres:5432/telegram_bot
+   DATABASE_NAME=pgbot1010
+   DATABASE_USER=pgbot1010_user
+   DATABASE_PASSWORD=pgbot1010_password
+   DATABASE_HOST=postgres
+   DATABASE_PORT=5432
+   DATABASE_URL=postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@${DATABASE_HOST}:${DATABASE_PORT}/${DATABASE_NAME}
+   DATABASE_ADMIN_URL=postgresql://postgres:postgres@postgres:5432/postgres
+   DATABASE_BACKUP_DIR=backups
    ```
 
    Дополнительно доступны:
@@ -63,8 +67,8 @@
    - `WARMUP_VERBOSE_NOTIFICATIONS=1` — расширенные уведомления в лог-канал.
    - `REACTION_LIMIT_PER_MESSAGE`, `REACTION_MIN_INTERVAL_SECONDS` — лимиты реакций.
 
-   > 💡 По умолчанию `docker-compose` создаёт базу данных `telegram_bot` с пользователем `bot_user`.
-   > Эти же значения используются в `.env.example` и в переменной `DATABASE_URL`.
+   > 💡 По умолчанию `docker-compose` создаёт базу данных `pgbot1010` и пользователя `pgbot1010_user`.
+   > Эти же значения используются в `.env.example` и формируют `DATABASE_URL`.
 
 5. **Проверьте файл расписания `schedule.json`** — в нём задаются тихие периоды и окно прогрева. Значения по умолчанию:
    ```json
@@ -122,6 +126,46 @@
 - `docker-compose.yml` — запуск бота в контейнере с монтированием данных и расписания.
 - `fix_mode.py` — вспомогательный скрипт для смены режима аккаунтов вне бота.
 - `tests/` (файлы `test_*.py`) — модульные тесты ключевых сценариев.
+- `scripts/` — утилиты резервного копирования и обслуживания базы (`db_backup.sh`, `db_restore.sh`).
+
+## База данных
+
+### Инициализация и миграции
+
+- При старте бота вызывается функция `initialize_database()`, которая:
+  1. Подключается к `DATABASE_ADMIN_URL` (если задан) и создаёт пользователя/базу с правами из `.env`.
+  2. Поднимает пул соединений `asyncpg` и создаёт резервную копию (через `pg_dump`), если в базе уже есть данные и доступен `pg_dump`.
+  3. Запускает `migrate_database()` — создание таблиц, индексов, конвертацию `TEXT` → `JSONB` и заполнение дефолтных настроек.
+  4. Выполняет `check_database_health()` и логирует результат.
+- Для ручного запуска можно выполнить:
+
+  ```bash
+  python -c "import asyncio, db; asyncio.run(db.initialize_database())"
+  ```
+
+### Проверка состояния
+
+- `await db.check_database_health()` возвращает словарь с отсутствующими таблицами/колонками.
+- В unit-тестах можно использовать `migrate_database()` для подготовки чистой базы.
+
+### Резервное копирование
+
+- Скрипт `scripts/db_backup.sh` создаёт дамп в формате `pg_dump --format=custom`.
+- Восстановление выполняется через `scripts/db_restore.sh <путь_к_dump>`.
+- Каталог по умолчанию задаётся `DATABASE_BACKUP_DIR` (в Docker — `/app/backups`).
+
+### ERD
+
+```mermaid
+erDiagram
+    USERS ||--o{ ACCOUNTS : owns
+    ACCOUNTS ||--o{ WARMUP_CHANNELS : schedules
+    ACCOUNTS ||--o{ REACTION_SETTINGS : configures
+    ACCOUNTS ||--o{ COMMENT_LOGS : writes
+    ACCOUNTS ||--o{ SKIP_LOGS : skips
+    ACCOUNTS ||--o{ POSTS : tracks
+    ACCOUNTS ||--o{ REACTION_LOGS : reacts
+```
 
 ## Развёртывание
 

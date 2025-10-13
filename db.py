@@ -1,10 +1,16 @@
+import asyncio
 import os
 import json
 import importlib
 import importlib.util
 import logging
+import shutil
+import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, TYPE_CHECKING
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     import asyncpg as asyncpg_type
@@ -25,6 +31,20 @@ else:
     AsyncpgPool = Any
 
 
+@dataclass
+class DatabaseConfig:
+    """Runtime configuration for the PostgreSQL database."""
+
+    dsn: str
+    user: str
+    password: str
+    database: str
+    host: str
+    port: int
+    admin_dsn: Optional[str]
+    backup_dir: Optional[Path]
+
+
 class _AsyncpgUniqueViolationError(Exception):
     """Placeholder error used when asyncpg is unavailable."""
 
@@ -37,9 +57,400 @@ else:  # pragma: no cover - executed only when asyncpg is not installed
 
 _POOL: Optional[AsyncpgPool] = None
 _BACKEND: str = "postgres"
+_DB_CONFIG: Optional[DatabaseConfig] = None
 _UNSET = object()
 
 DEFAULT_REACTION_EMOJIS = ['❤️', '👍', '🔥', '🎉', '👏']
+DEFAULT_REACTION_EMOJIS_JSON = json.dumps(DEFAULT_REACTION_EMOJIS, ensure_ascii=False)
+DEFAULT_BACKUP_DIR = Path("backups")
+
+SCHEMA_CREATE_STATEMENTS: Tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT UNIQUE NOT NULL,
+        username TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        is_authenticated BOOLEAN NOT NULL DEFAULT FALSE,
+        last_login TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS accounts (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        session TEXT NOT NULL,
+        session_path TEXT,
+        phone TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'standard',
+        sleep_min INTEGER NOT NULL DEFAULT 10,
+        sleep_max INTEGER NOT NULL DEFAULT 30,
+        chance INTEGER NOT NULL DEFAULT 50,
+        system_prompt TEXT,
+        warmup_joined_today INTEGER NOT NULL DEFAULT 0,
+        warmup_last_join DATE,
+        warmup_last_join_at TIMESTAMPTZ,
+        warmup_next_join_at TIMESTAMPTZ,
+        warmup_end_at TIMESTAMPTZ,
+        last_reaction_at TIMESTAMPTZ,
+        channels JSONB NOT NULL DEFAULT '[]'::jsonb,
+        warmup_channels JSONB NOT NULL DEFAULT '[]'::jsonb,
+        regular_channels JSONB NOT NULL DEFAULT '[]'::jsonb,
+        reaction_emojis JSONB NOT NULL DEFAULT '["❤️", "👍", "🔥", "🎉", "👏"]'::jsonb,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        last_activity TIMESTAMPTZ,
+        comment_count INTEGER NOT NULL DEFAULT 0,
+        reaction_count INTEGER NOT NULL DEFAULT 0,
+        last_started_at TIMESTAMPTZ,
+        last_stopped_at TIMESTAMPTZ,
+        status TEXT NOT NULL DEFAULT 'stopped',
+        reaction_chance INTEGER NOT NULL DEFAULT 50,
+        reaction_discussion_chance INTEGER NOT NULL DEFAULT 50,
+        discussion_reply_prompt TEXT,
+        discussion_reply_chance INTEGER NOT NULL DEFAULT 50,
+        reaction_sleep_min INTEGER NOT NULL DEFAULT 10,
+        reaction_sleep_max INTEGER NOT NULL DEFAULT 30,
+        reaction_limit_per_message INTEGER NOT NULL DEFAULT 50,
+        reactions_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        last_comment_at TIMESTAMPTZ,
+        channels_last_synced_at TIMESTAMPTZ,
+        system_tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (mode IN ('warmup', 'standard')),
+        UNIQUE (user_id, phone)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS account_settings (
+        id SERIAL PRIMARY KEY,
+        account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        setting_key TEXT NOT NULL,
+        setting_value TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (account_id, setting_key)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS warmup_channels (
+        id SERIAL PRIMARY KEY,
+        account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        channel TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        error TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_attempt_at TIMESTAMPTZ,
+        joined_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (account_id, channel),
+        CHECK (status IN ('pending', 'joined', 'error'))
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS warmup_settings (
+        id SERIAL PRIMARY KEY,
+        channels_per_day INTEGER NOT NULL DEFAULT 15,
+        delay_minutes INTEGER NOT NULL DEFAULT 7,
+        default_days INTEGER NOT NULL DEFAULT 7,
+        join_start_hour INTEGER NOT NULL DEFAULT 1,
+        join_start_minute INTEGER NOT NULL DEFAULT 0,
+        join_end_hour INTEGER NOT NULL DEFAULT 3,
+        join_end_minute INTEGER NOT NULL DEFAULT 0,
+        join_limit INTEGER NOT NULL DEFAULT 15,
+        window_start TIME NOT NULL DEFAULT TIME '01:00',
+        window_end TIME NOT NULL DEFAULT TIME '03:00',
+        spans_midnight BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS reaction_settings (
+        id SERIAL PRIMARY KEY,
+        account_id INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
+        reaction_limit INTEGER NOT NULL DEFAULT 50,
+        post_reaction_chance INTEGER NOT NULL DEFAULT 50,
+        discussion_reaction_chance INTEGER NOT NULL DEFAULT 50,
+        discussion_reply_chance INTEGER NOT NULL DEFAULT 50,
+        discussion_prompt TEXT,
+        sleep_min INTEGER NOT NULL DEFAULT 10,
+        sleep_max INTEGER NOT NULL DEFAULT 30,
+        emojis JSONB NOT NULL DEFAULT '["❤️", "👍", "🔥", "🎉", "👏"]'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS comment_logs (
+        id SERIAL PRIMARY KEY,
+        account_id INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
+        channel TEXT,
+        message_id BIGINT,
+        comment TEXT,
+        status TEXT,
+        error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS skip_logs (
+        id SERIAL PRIMARY KEY,
+        account_id INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
+        channel TEXT,
+        reason TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS posts (
+        id SERIAL PRIMARY KEY,
+        account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        channel TEXT NOT NULL,
+        post_id BIGINT NOT NULL,
+        message TEXT,
+        has_media BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (account_id, channel, post_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS reaction_logs (
+        id SERIAL PRIMARY KEY,
+        account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        channel TEXT NOT NULL,
+        message_id BIGINT NOT NULL,
+        emoji TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error_message TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS telegram_sessions (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        phone TEXT NOT NULL,
+        session_data BYTEA,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (user_id, phone)
+    )
+    """,
+)
+
+TABLE_ALTER_STATEMENTS: Mapping[str, Tuple[str, ...]] = {
+    "users": (
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_authenticated BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMPTZ",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+    ),
+    "accounts": (
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS session TEXT",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS session_path TEXT",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'standard'",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS sleep_min INTEGER NOT NULL DEFAULT 10",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS sleep_max INTEGER NOT NULL DEFAULT 30",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS chance INTEGER NOT NULL DEFAULT 50",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS system_prompt TEXT",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS warmup_joined_today INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS warmup_last_join DATE",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS warmup_last_join_at TIMESTAMPTZ",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS warmup_next_join_at TIMESTAMPTZ",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS warmup_end_at TIMESTAMPTZ",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_reaction_at TIMESTAMPTZ",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'stopped'",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_started_at TIMESTAMPTZ",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_stopped_at TIMESTAMPTZ",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reaction_chance INTEGER NOT NULL DEFAULT 50",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reaction_discussion_chance INTEGER NOT NULL DEFAULT 50",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS discussion_reply_prompt TEXT",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS discussion_reply_chance INTEGER NOT NULL DEFAULT 50",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reaction_sleep_min INTEGER NOT NULL DEFAULT 10",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reaction_sleep_max INTEGER NOT NULL DEFAULT 30",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reaction_limit_per_message INTEGER NOT NULL DEFAULT 50",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reactions_enabled BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_comment_at TIMESTAMPTZ",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS channels_last_synced_at TIMESTAMPTZ",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS comment_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reaction_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_activity TIMESTAMPTZ",
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS system_tags JSONB NOT NULL DEFAULT '[]'::jsonb",
+    ),
+    "warmup_settings": (
+        "ALTER TABLE warmup_settings ADD COLUMN IF NOT EXISTS default_days INTEGER NOT NULL DEFAULT 7",
+        "ALTER TABLE warmup_settings ADD COLUMN IF NOT EXISTS join_limit INTEGER NOT NULL DEFAULT 15",
+        "ALTER TABLE warmup_settings ADD COLUMN IF NOT EXISTS window_start TIME NOT NULL DEFAULT TIME '01:00'",
+        "ALTER TABLE warmup_settings ADD COLUMN IF NOT EXISTS window_end TIME NOT NULL DEFAULT TIME '03:00'",
+        "ALTER TABLE warmup_settings ADD COLUMN IF NOT EXISTS spans_midnight BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE warmup_settings ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+        "ALTER TABLE warmup_settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+    ),
+    "comment_logs": (
+        "ALTER TABLE comment_logs ADD COLUMN IF NOT EXISTS comment TEXT",
+        "ALTER TABLE comment_logs ADD COLUMN IF NOT EXISTS status TEXT",
+        "ALTER TABLE comment_logs ADD COLUMN IF NOT EXISTS error TEXT",
+    ),
+}
+
+INDEX_DEFINITIONS: Tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_account_settings_account_id ON account_settings (account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_warmup_channels_pending ON warmup_channels (account_id, status, position)",
+    "CREATE INDEX IF NOT EXISTS idx_telegram_sessions_user_phone ON telegram_sessions (user_id, phone)",
+    "CREATE INDEX IF NOT EXISTS idx_posts_account_id ON posts (account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_reaction_logs_account_id ON reaction_logs (account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_reaction_logs_channel_message ON reaction_logs (channel, message_id)",
+    "CREATE INDEX IF NOT EXISTS idx_comment_logs_created ON comment_logs (created_at)",
+)
+
+JSONB_COLUMNS: Mapping[str, Mapping[str, str]] = {
+    "accounts": {
+        "channels": "[]",
+        "warmup_channels": "[]",
+        "regular_channels": "[]",
+        "reaction_emojis": DEFAULT_REACTION_EMOJIS_JSON,
+        "system_tags": "[]",
+    },
+    "reaction_settings": {"emojis": DEFAULT_REACTION_EMOJIS_JSON},
+}
+
+DEFAULT_DATA_STATEMENTS: Tuple[Tuple[str, Tuple[Any, ...]], ...] = (
+    (
+        """
+        INSERT INTO warmup_settings (
+            id,
+            channels_per_day,
+            delay_minutes,
+            default_days,
+            join_start_hour,
+            join_start_minute,
+            join_end_hour,
+            join_end_minute,
+            join_limit,
+            window_start,
+            window_end,
+            spans_midnight
+        )
+        VALUES (1, 15, 7, 7, 1, 0, 3, 0, 15, TIME '01:00', TIME '03:00', TRUE)
+        ON CONFLICT (id) DO UPDATE SET
+            channels_per_day = excluded.channels_per_day,
+            delay_minutes = excluded.delay_minutes,
+            default_days = excluded.default_days,
+            join_start_hour = excluded.join_start_hour,
+            join_start_minute = excluded.join_start_minute,
+            join_end_hour = excluded.join_end_hour,
+            join_end_minute = excluded.join_end_minute,
+            join_limit = excluded.join_limit,
+            window_start = excluded.window_start,
+            window_end = excluded.window_end,
+            spans_midnight = excluded.spans_midnight,
+            updated_at = NOW()
+        """,
+        tuple(),
+    ),
+)
+
+REQUIRED_COLUMNS: Mapping[str, Set[str]] = {
+    "users": {
+        "id",
+        "user_id",
+        "username",
+        "first_name",
+        "last_name",
+        "is_active",
+        "is_authenticated",
+        "created_at",
+        "updated_at",
+    },
+    "accounts": {
+        "id",
+        "user_id",
+        "session",
+        "phone",
+        "mode",
+        "sleep_min",
+        "sleep_max",
+        "chance",
+        "system_prompt",
+        "warmup_joined_today",
+        "warmup_last_join",
+        "warmup_last_join_at",
+        "warmup_next_join_at",
+        "warmup_end_at",
+        "last_reaction_at",
+        "channels",
+        "warmup_channels",
+        "regular_channels",
+        "reaction_emojis",
+        "is_active",
+        "last_activity",
+        "comment_count",
+        "reaction_count",
+        "created_at",
+        "updated_at",
+        "reactions_enabled",
+        "reaction_limit_per_message",
+        "reaction_chance",
+        "reaction_discussion_chance",
+        "discussion_reply_prompt",
+        "discussion_reply_chance",
+        "reaction_sleep_min",
+        "reaction_sleep_max",
+    },
+    "warmup_settings": {
+        "id",
+        "channels_per_day",
+        "delay_minutes",
+        "default_days",
+        "join_start_hour",
+        "join_start_minute",
+        "join_end_hour",
+        "join_end_minute",
+        "join_limit",
+        "window_start",
+        "window_end",
+        "spans_midnight",
+    },
+    "reaction_settings": {
+        "id",
+        "account_id",
+        "reaction_limit",
+        "post_reaction_chance",
+        "discussion_reaction_chance",
+        "discussion_reply_chance",
+        "discussion_prompt",
+        "sleep_min",
+        "sleep_max",
+        "emojis",
+    },
+    "comment_logs": {
+        "id",
+        "account_id",
+        "channel",
+        "message_id",
+        "comment",
+        "created_at",
+    },
+    "skip_logs": {
+        "id",
+        "account_id",
+        "channel",
+        "reason",
+        "created_at",
+    },
+}
 
 
 def _normalise_postgres_dsn(dsn: str) -> str:
@@ -62,21 +473,24 @@ def _is_sqlite() -> bool:
     return _BACKEND == "sqlite"
 
 
-def _deserialize_list(value: Optional[str]) -> List[str]:
-    if not value:
+def _deserialize_list(value: Any) -> List[str]:
+    if value in (None, ""):
         return []
-    try:
-        parsed = json.loads(value)
-        if isinstance(parsed, list):
-            return [str(item) for item in parsed]
-    except json.JSONDecodeError:
-        pass
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        except json.JSONDecodeError:
+            return [value]
     return []
 
 
-def _serialize_list(value: Optional[Iterable[str]]) -> Optional[str]:
+def _serialize_list(value: Optional[Iterable[str]]) -> str:
     if value is None:
-        return None
+        return json.dumps([])
     return json.dumps(list(value))
 
 
@@ -122,6 +536,493 @@ def _convert_placeholders(query: str) -> str:
         i += 1
 
     return "".join(result)
+
+
+def _build_database_config() -> DatabaseConfig:
+    """Construct :class:`DatabaseConfig` from environment variables."""
+
+    dsn_env = os.getenv("DATABASE_URL")
+    user_env = os.getenv("DATABASE_USER")
+    password_env = os.getenv("DATABASE_PASSWORD")
+    database_env = os.getenv("DATABASE_NAME")
+    host_env = os.getenv("DATABASE_HOST", "postgres")
+    port_env = os.getenv("DATABASE_PORT", "5432")
+
+    dsn = _normalise_postgres_dsn(dsn_env) if dsn_env else None
+    user = (user_env or "").strip()
+    password = password_env or ""
+    database = (database_env or "").strip()
+    host = host_env or "postgres"
+    port = int(port_env or "5432")
+
+    if dsn:
+        parsed = urlparse(dsn)
+        database = (parsed.path.lstrip("/") or database).strip()
+        user = (parsed.username or user).strip()
+        password = parsed.password or password
+        host = parsed.hostname or host
+        port = parsed.port or port
+
+    if not database or not user:
+        raise RuntimeError(
+            "Database configuration is incomplete. Provide DATABASE_URL or DATABASE_NAME, DATABASE_USER and DATABASE_PASSWORD."
+        )
+
+    if not dsn:
+        password_escaped = password.replace("@", "%40")
+        dsn = f"postgresql://{user}:{password_escaped}@{host}:{port}/{database}"
+
+    admin_dsn_env = os.getenv("DATABASE_ADMIN_URL")
+    admin_dsn = _normalise_postgres_dsn(admin_dsn_env) if admin_dsn_env else None
+
+    backup_dir_env = os.getenv("DATABASE_BACKUP_DIR")
+    if backup_dir_env is not None:
+        backup_dir_env = backup_dir_env.strip()
+    backup_dir: Optional[Path]
+    if backup_dir_env == "":
+        backup_dir = None
+    elif backup_dir_env:
+        backup_dir = Path(backup_dir_env).expanduser()
+    else:
+        backup_dir = DEFAULT_BACKUP_DIR
+
+    return DatabaseConfig(
+        dsn=dsn,
+        user=user,
+        password=password,
+        database=database,
+        host=host,
+        port=port,
+        admin_dsn=admin_dsn,
+        backup_dir=backup_dir,
+    )
+
+
+async def _provision_database(config: DatabaseConfig) -> None:
+    """Ensure the target database and role exist."""
+
+    if config.admin_dsn is None:
+        logger.debug("DATABASE_ADMIN_URL is not defined, skipping database provisioning")
+        return
+
+    if asyncpg is None:
+        raise RuntimeError(
+            "asyncpg is required for PostgreSQL connections. Install the 'asyncpg' package to use a PostgreSQL DSN."
+        )
+
+    logger.info(
+        "Ensuring role %s and database %s exist", config.user, config.database
+    )
+
+    async with asyncpg.create_pool(config.admin_dsn, min_size=1, max_size=1) as pool:
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = $1) THEN
+                        EXECUTE format('CREATE USER %I WITH PASSWORD %L', $1, $2);
+                    ELSE
+                        EXECUTE format('ALTER USER %I WITH PASSWORD %L', $1, $2);
+                    END IF;
+                END
+                $$;
+                """,
+                config.user,
+                config.password,
+            )
+
+            await connection.execute(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT FROM pg_database WHERE datname = $1) THEN
+                        EXECUTE format('CREATE DATABASE %I OWNER %I', $1, $2);
+                    END IF;
+                END
+                $$;
+                """,
+                config.database,
+                config.user,
+            )
+
+            await connection.execute(
+                """
+                DO $$
+                BEGIN
+                    EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', $1, $2);
+                END
+                $$;
+                """,
+                config.database,
+                config.user,
+            )
+
+    admin_database_dsn = config.admin_dsn
+
+    async with asyncpg.connect(admin_database_dsn, database=config.database) as connection:
+        await connection.execute(
+            """
+            DO $$
+            BEGIN
+                EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', $1);
+                EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I', $1);
+                EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', $1);
+                EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', $1);
+                EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %I', $1);
+            END
+            $$;
+            """,
+            config.user,
+        )
+
+
+async def _create_pool(dsn: str) -> None:
+    """Initialise the asyncpg connection pool if required."""
+
+    global _POOL, _BACKEND
+
+    if _POOL is not None:
+        return
+
+    if asyncpg is None:
+        raise RuntimeError(
+            "asyncpg is required for PostgreSQL connections. Install the 'asyncpg' package to use a PostgreSQL DSN."
+        )
+
+    pool_max_size = int(os.getenv("DATABASE_POOL_MAX", "10"))
+    _POOL = await asyncpg.create_pool(dsn, min_size=1, max_size=pool_max_size)
+    _BACKEND = "postgres"
+
+
+async def _perform_pre_migration_backup(config: DatabaseConfig) -> None:
+    """Create a compressed backup before running migrations."""
+
+    if config.backup_dir is None:
+        logger.debug("Database backups are disabled via DATABASE_BACKUP_DIR")
+        return
+
+    pg_dump_path = shutil.which("pg_dump")
+    if pg_dump_path is None:
+        logger.warning("pg_dump binary not found in PATH, skipping pre-migration backup")
+        return
+
+    pool = _require_pool()
+    async with pool.acquire() as connection:
+        existing_table_count = await connection.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+            """
+        )
+
+    if not existing_table_count:
+        logger.debug("No existing tables detected, skipping pre-migration backup")
+        return
+
+    backup_dir = config.backup_dir
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    backup_path = backup_dir / f"{config.database}_{timestamp}.dump"
+
+    env = os.environ.copy()
+    if config.password:
+        env["PGPASSWORD"] = config.password
+
+    cmd = [
+        pg_dump_path,
+        "--no-owner",
+        "--no-privileges",
+        "--format",
+        "custom",
+        "--host",
+        config.host,
+        "--port",
+        str(config.port),
+        "--username",
+        config.user,
+        "--file",
+        str(backup_path),
+        config.database,
+    ]
+
+    logger.info("Creating database backup at %s", backup_path)
+
+    result = await asyncio.to_thread(
+        subprocess.run,
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    if result.returncode != 0:
+        logger.error("pg_dump failed before migrations: %s", result.stderr.strip())
+        raise RuntimeError("pg_dump failed before migrations")
+
+
+async def _convert_text_column_to_jsonb(table: str, column: str, default_json: str) -> None:
+    """Convert a legacy TEXT column into JSONB while preserving data."""
+
+    rows = await _fetchall(f"SELECT id, {column} FROM {table}")
+    for row in rows:
+        raw_value = row[column]
+        if raw_value in (None, ""):
+            serialised = default_json
+        elif isinstance(raw_value, (list, tuple)):
+            serialised = json.dumps(list(raw_value))
+        elif isinstance(raw_value, str):
+            try:
+                json.loads(raw_value)
+                serialised = raw_value
+            except json.JSONDecodeError:
+                serialised = default_json
+        else:
+            serialised = json.dumps(raw_value)
+
+        await _execute(
+            f"UPDATE {table} SET {column} = ? WHERE id = ?",
+            (serialised, row["id"]),
+        )
+
+    await _execute(
+        f"ALTER TABLE {table} ALTER COLUMN {column} TYPE JSONB USING CASE"
+        f" WHEN {column} IS NULL THEN ?::jsonb"
+        f" ELSE {column}::jsonb END",
+        (default_json,),
+    )
+    await _execute(
+        f"ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT ?::jsonb",
+        (default_json,),
+    )
+    await _execute(
+        f"UPDATE {table} SET {column} = ?::jsonb WHERE {column} IS NULL",
+        (default_json,),
+    )
+
+
+async def _ensure_jsonb_column(table: str, column: str, default_json: str) -> None:
+    """Ensure a column exists with JSONB type and proper defaults."""
+
+    await _execute(
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} JSONB DEFAULT ?::jsonb",
+        (default_json,),
+    )
+
+    column_row = await _fetchone(
+        """
+        SELECT data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = ? AND column_name = ?
+        """,
+        (table, column),
+    )
+
+    column_type = column_row["data_type"] if column_row else None
+    if column_type != "jsonb":
+        await _convert_text_column_to_jsonb(table, column, default_json)
+    else:
+        await _execute(
+            f"ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT ?::jsonb",
+            (default_json,),
+        )
+        await _execute(
+            f"UPDATE {table} SET {column} = ?::jsonb WHERE {column} IS NULL",
+            (default_json,),
+        )
+
+
+async def _ensure_users_primary_key() -> None:
+    """Guarantee that users.id exists and is used as the primary key."""
+
+    await _execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS id BIGSERIAL")
+
+    await _execute(
+        """
+        UPDATE users
+        SET id = nextval(pg_get_serial_sequence('users', 'id'))
+        WHERE id IS NULL
+        """
+    )
+
+    constraint_row = await _fetchone(
+        """
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'users'::regclass AND contype = 'p'
+        """
+    )
+
+    if constraint_row and constraint_row["conname"] != "users_pkey":
+        await _execute(f"ALTER TABLE users DROP CONSTRAINT {constraint_row['conname']}")
+
+    await _execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conrelid = 'users'::regclass
+                  AND conname = 'users_pkey'
+            ) THEN
+                ALTER TABLE users ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+            END IF;
+        END
+        $$;
+        """
+    )
+
+    await _execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conrelid = 'users'::regclass
+                  AND conname = 'users_user_id_key'
+            ) THEN
+                ALTER TABLE users ADD CONSTRAINT users_user_id_key UNIQUE (user_id);
+            END IF;
+        END
+        $$;
+        """
+    )
+
+
+async def _ensure_accounts_session_column() -> None:
+    """Ensure the canonical session column exists and is populated."""
+
+    await _execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS session TEXT")
+    await _execute(
+        "UPDATE accounts SET session = session_path WHERE session IS NULL AND session_path IS NOT NULL"
+    )
+    await _execute(
+        "UPDATE accounts SET session = phone WHERE session IS NULL AND phone IS NOT NULL"
+    )
+    await _execute(
+        "ALTER TABLE accounts ALTER COLUMN session SET NOT NULL"
+    )
+
+
+async def migrate_database() -> None:
+    """Run structural migrations ensuring the expected schema is present."""
+
+    logger.info("Running database migrations")
+
+    for statement in SCHEMA_CREATE_STATEMENTS:
+        await _execute(statement)
+
+    for table, statements in TABLE_ALTER_STATEMENTS.items():
+        for statement in statements:
+            await _execute(statement)
+
+    await _ensure_users_primary_key()
+    await _ensure_accounts_session_column()
+
+    for table, columns in JSONB_COLUMNS.items():
+        for column, default_json in columns.items():
+            await _ensure_jsonb_column(table, column, default_json)
+
+    for index_statement in INDEX_DEFINITIONS:
+        await _execute(index_statement)
+
+    for query, params in DEFAULT_DATA_STATEMENTS:
+        await _execute(query, params)
+
+    logger.info("Database migrations completed")
+
+
+async def check_database_health(*, log_warnings: bool = True) -> Dict[str, Any]:
+    """Validate that all critical tables and columns exist."""
+
+    pool = _require_pool()
+    missing_tables: List[str] = []
+    missing_columns: Dict[str, List[str]] = {}
+
+    async with pool.acquire() as connection:
+        table_rows = await connection.fetch(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+            """
+        )
+        existing_tables = {row["table_name"] for row in table_rows}
+
+        for table, required in REQUIRED_COLUMNS.items():
+            if table not in existing_tables:
+                missing_tables.append(table)
+                continue
+
+            column_rows = await connection.fetch(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = $1
+                """,
+                table,
+            )
+            present_columns = {row["column_name"] for row in column_rows}
+            missing = sorted(required - present_columns)
+            if missing:
+                missing_columns[table] = missing
+
+    ok = not missing_tables and not missing_columns
+    if not ok and log_warnings:
+        logger.warning(
+            "Database health check detected issues: missing_tables=%s missing_columns=%s",
+            missing_tables,
+            missing_columns,
+        )
+
+    return {
+        "ok": ok,
+        "missing_tables": missing_tables,
+        "missing_columns": missing_columns,
+    }
+
+
+async def initialize_database(*, max_retries: int = 5, base_delay: float = 1.0) -> None:
+    """Provision the database, run migrations and validate health."""
+
+    global _DB_CONFIG
+
+    config = _build_database_config()
+    _DB_CONFIG = config
+
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            await _provision_database(config)
+            await _create_pool(config.dsn)
+            await _perform_pre_migration_backup(config)
+            await migrate_database()
+            health = await check_database_health(log_warnings=False)
+            if not health["ok"]:
+                raise RuntimeError(
+                    f"Database health check failed after migrations: {health}"
+                )
+            logger.info("Database initialisation successful")
+            break
+        except Exception as exc:  # pragma: no cover - defensive branch
+            if attempt >= max_retries:
+                logger.exception("Database initialisation failed after %s attempts", attempt)
+                raise
+            wait_time = base_delay * attempt
+            logger.warning(
+                "Database initialisation attempt %s/%s failed: %s. Retrying in %.1f seconds",
+                attempt,
+                max_retries,
+                exc,
+                wait_time,
+            )
+            await asyncio.sleep(wait_time)
 
 
 def adapt_bool(value: bool) -> Any:
@@ -196,295 +1097,9 @@ async def _fetchall(query: str, params: Sequence[Any] = ()):
 
 
 async def init_db() -> None:
-    """Initialise database connection pool and ensure schema exists."""
+    """Backward-compatible wrapper that delegates to :func:`initialize_database`."""
 
-    global _POOL, _BACKEND
-
-    if _POOL is not None:
-        return
-
-    dsn = os.getenv("DATABASE_URL")
-    if not dsn:
-        raise RuntimeError("DATABASE_URL environment variable is not set")
-
-    dsn = _normalise_postgres_dsn(dsn)
-
-    if not dsn.startswith(("postgres://", "postgresql://")):
-        raise RuntimeError("DATABASE_URL must use the postgres scheme")
-
-    if asyncpg is None:  # pragma: no cover - requires asyncpg installed
-        raise RuntimeError(
-            "asyncpg is required for PostgreSQL connections. Install the 'asyncpg' package to use a PostgreSQL DSN."
-        )
-
-    _POOL = await asyncpg.create_pool(dsn)
-    _BACKEND = "postgres"
-    await _init_postgres_schema()
-
-async def _init_postgres_schema() -> None:
-    pool = _require_pool()
-
-    async with pool.acquire() as connection:
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                is_authenticated BOOLEAN NOT NULL DEFAULT FALSE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS accounts (
-                id BIGSERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                phone TEXT NOT NULL,
-                session_path TEXT NOT NULL,
-                chance INTEGER,
-                system_prompt TEXT,
-                sleep_min INTEGER,
-                sleep_max INTEGER,
-                reaction_emojis TEXT,
-                reaction_chance INTEGER,
-                reaction_discussion_chance INTEGER,
-                discussion_reply_prompt TEXT,
-                discussion_reply_chance INTEGER,
-                reaction_sleep_min INTEGER,
-                reaction_sleep_max INTEGER,
-                reaction_limit_per_message INTEGER,
-                last_reaction_at TIMESTAMPTZ,
-                channels TEXT,
-                warmup_channels TEXT,
-                status TEXT NOT NULL DEFAULT 'stopped',
-                last_started_at TIMESTAMPTZ,
-                last_stopped_at TIMESTAMPTZ,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                mode TEXT NOT NULL DEFAULT 'warmup',
-                warmup_end_at TIMESTAMPTZ DEFAULT (CURRENT_TIMESTAMP + INTERVAL '7 days'),
-                warmup_joined_today INTEGER NOT NULL DEFAULT 0,
-                warmup_last_join DATE,
-                warmup_last_join_at TIMESTAMPTZ,
-                warmup_next_join_at TIMESTAMPTZ,
-                reactions_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                UNIQUE (user_id, phone),
-                CHECK (mode IN ('warmup', 'standard'))
-            )
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS account_settings (
-                id BIGSERIAL PRIMARY KEY,
-                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                setting_key TEXT NOT NULL,
-                setting_value TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (account_id, setting_key)
-            )
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS warmup_channels (
-                id BIGSERIAL PRIMARY KEY,
-                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                channel TEXT NOT NULL,
-                position INTEGER NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                error TEXT,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                last_attempt_at TIMESTAMPTZ,
-                joined_at TIMESTAMPTZ,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (account_id, channel),
-                CHECK (status IN ('pending', 'joined', 'error'))
-            )
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS warmup_settings (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                channels_per_day INTEGER NOT NULL,
-                delay_minutes INTEGER NOT NULL,
-                join_start_hour INTEGER NOT NULL,
-                join_start_minute INTEGER NOT NULL,
-                join_end_hour INTEGER NOT NULL,
-                join_end_minute INTEGER NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS comment_logs (
-                id BIGSERIAL PRIMARY KEY,
-                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                channel TEXT,
-                message_id BIGINT,
-                status TEXT NOT NULL,
-                error TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS posts (
-                id BIGSERIAL PRIMARY KEY,
-                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                channel TEXT NOT NULL,
-                post_id BIGINT NOT NULL,
-                message TEXT,
-                has_media BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(account_id, channel, post_id)
-            )
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reaction_logs (
-                id BIGSERIAL PRIMARY KEY,
-                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                channel TEXT NOT NULL,
-                message_id BIGINT NOT NULL,
-                emoji TEXT NOT NULL,
-                status TEXT NOT NULL,
-                error_message TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS posts (
-                id BIGSERIAL PRIMARY KEY,
-                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                channel TEXT NOT NULL,
-                post_id INTEGER NOT NULL,
-                message TEXT,
-                has_media BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (account_id, channel, post_id)
-            )
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_posts_account_id
-            ON posts (account_id)
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reaction_logs (
-                id BIGSERIAL PRIMARY KEY,
-                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                channel TEXT NOT NULL,
-                message_id INTEGER NOT NULL,
-                emoji TEXT NOT NULL,
-                status TEXT NOT NULL,
-                error_message TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_reaction_logs_account_id
-            ON reaction_logs (account_id)
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS telegram_sessions (
-                id BIGSERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                phone TEXT NOT NULL,
-                session_data BYTEA,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (user_id, phone)
-            )
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_account_settings_account_id
-            ON account_settings (account_id)
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_warmup_channels_pending
-            ON warmup_channels (account_id, status, position)
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_telegram_sessions_user_phone
-            ON telegram_sessions (user_id, phone)
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_posts_account_id
-            ON posts (account_id)
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_reaction_logs_account_id
-            ON reaction_logs (account_id)
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_reaction_logs_channel_message
-            ON reaction_logs (channel, message_id)
-            """
-        )
-
-        await connection.execute(
-            """
-            ALTER TABLE accounts
-            ADD COLUMN IF NOT EXISTS reaction_emojis TEXT,
-            ADD COLUMN IF NOT EXISTS reaction_chance INTEGER,
-            ADD COLUMN IF NOT EXISTS reaction_discussion_chance INTEGER,
-            ADD COLUMN IF NOT EXISTS discussion_reply_prompt TEXT,
-            ADD COLUMN IF NOT EXISTS discussion_reply_chance INTEGER,
-            ADD COLUMN IF NOT EXISTS reaction_sleep_min INTEGER,
-            ADD COLUMN IF NOT EXISTS reaction_sleep_max INTEGER,
-            ADD COLUMN IF NOT EXISTS reaction_limit_per_message INTEGER,
-            ADD COLUMN IF NOT EXISTS last_reaction_at TIMESTAMPTZ,
-            ADD COLUMN IF NOT EXISTS reactions_enabled BOOLEAN NOT NULL DEFAULT TRUE
-            """
-        )
-
+    await initialize_database()
 
 async def close_db() -> None:
     global _POOL
@@ -501,6 +1116,11 @@ async def ensure_warmup_settings(
     join_start_minute: int,
     join_end_hour: int,
     join_end_minute: int,
+    default_days: int = 7,
+    join_limit: int = 15,
+    window_start: str = "01:00",
+    window_end: str = "03:00",
+    spans_midnight: bool = True,
 ) -> None:
     """Ensure that a single warmup settings row exists in the database."""
 
@@ -510,21 +1130,43 @@ async def ensure_warmup_settings(
             id,
             channels_per_day,
             delay_minutes,
-            join_start_hour,
-            join_start_minute,
-            join_end_hour,
-            join_end_minute
-        )
-        VALUES (1, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO NOTHING
-        """,
-        (
-            channels_per_day,
-            delay_minutes,
+            default_days,
             join_start_hour,
             join_start_minute,
             join_end_hour,
             join_end_minute,
+            join_limit,
+            window_start,
+            window_end,
+            spans_midnight
+        )
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            channels_per_day = EXCLUDED.channels_per_day,
+            delay_minutes = EXCLUDED.delay_minutes,
+            default_days = EXCLUDED.default_days,
+            join_start_hour = EXCLUDED.join_start_hour,
+            join_start_minute = EXCLUDED.join_start_minute,
+            join_end_hour = EXCLUDED.join_end_hour,
+            join_end_minute = EXCLUDED.join_end_minute,
+            join_limit = EXCLUDED.join_limit,
+            window_start = EXCLUDED.window_start,
+            window_end = EXCLUDED.window_end,
+            spans_midnight = EXCLUDED.spans_midnight,
+            updated_at = NOW()
+        """,
+        (
+            channels_per_day,
+            delay_minutes,
+            default_days,
+            join_start_hour,
+            join_start_minute,
+            join_end_hour,
+            join_end_minute,
+            join_limit,
+            window_start,
+            window_end,
+            adapt_bool(spans_midnight),
         ),
     )
 
@@ -536,10 +1178,15 @@ async def get_warmup_settings() -> Dict[str, int]:
         """
         SELECT channels_per_day,
                delay_minutes,
+               default_days,
                join_start_hour,
                join_start_minute,
                join_end_hour,
-               join_end_minute
+               join_end_minute,
+               join_limit,
+               window_start,
+               window_end,
+               spans_midnight
         FROM warmup_settings
         WHERE id = 1
         """
@@ -551,10 +1198,15 @@ async def get_warmup_settings() -> Dict[str, int]:
     return {
         "channels_per_day": int(row["channels_per_day"]),
         "delay_minutes": int(row["delay_minutes"]),
+        "default_days": int(row["default_days"]),
         "join_start_hour": int(row["join_start_hour"]),
         "join_start_minute": int(row["join_start_minute"]),
         "join_end_hour": int(row["join_end_hour"]),
         "join_end_minute": int(row["join_end_minute"]),
+        "join_limit": int(row["join_limit"]),
+        "window_start": str(row["window_start"]),
+        "window_end": str(row["window_end"]),
+        "spans_midnight": bool(row["spans_midnight"]),
     }
 
 
@@ -566,6 +1218,11 @@ async def update_warmup_settings(
     join_start_minute: Optional[int] = None,
     join_end_hour: Optional[int] = None,
     join_end_minute: Optional[int] = None,
+    default_days: Optional[int] = None,
+    join_limit: Optional[int] = None,
+    window_start: Optional[str] = None,
+    window_end: Optional[str] = None,
+    spans_midnight: Optional[bool] = None,
 ) -> None:
     """Update warmup settings with the provided values."""
 
@@ -590,6 +1247,21 @@ async def update_warmup_settings(
     if join_end_minute is not None:
         updates.append("join_end_minute = ?")
         params.append(join_end_minute)
+    if default_days is not None:
+        updates.append("default_days = ?")
+        params.append(default_days)
+    if join_limit is not None:
+        updates.append("join_limit = ?")
+        params.append(join_limit)
+    if window_start is not None:
+        updates.append("window_start = ?")
+        params.append(window_start)
+    if window_end is not None:
+        updates.append("window_end = ?")
+        params.append(window_end)
+    if spans_midnight is not None:
+        updates.append("spans_midnight = ?")
+        params.append(adapt_bool(spans_midnight))
 
     if not updates:
         return
@@ -634,14 +1306,15 @@ async def ensure_account(user_id: int, phone: str, session_path: str) -> Optiona
 
     row = await _fetchone(
         """
-        INSERT INTO accounts (user_id, phone, session_path, status, mode)
-        VALUES (?, ?, ?, 'stopped', 'warmup')
+        INSERT INTO accounts (user_id, phone, session, session_path, status, mode)
+        VALUES (?, ?, ?, ?, 'stopped', 'warmup')
         ON CONFLICT(user_id, phone) DO UPDATE SET
+            session = excluded.session,
             session_path = excluded.session_path,
             updated_at = CURRENT_TIMESTAMP
         RETURNING id
         """,
-        (user_id, phone, session_path),
+        (user_id, phone, session_path, session_path),
     )
     return int(row["id"]) if row is not None else None
 
@@ -655,7 +1328,11 @@ def _convert_account_row(row: Any) -> Dict[str, Any]:
     data = dict(row)
     data["channels"] = _deserialize_list(data.get("channels"))
     data["warmup_channels"] = _deserialize_list(data.get("warmup_channels"))
+    data["regular_channels"] = _deserialize_list(data.get("regular_channels"))
     data["reaction_emojis"] = _deserialize_list(data.get("reaction_emojis"))
+    data["system_tags"] = _deserialize_list(data.get("system_tags"))
+    if "session_path" not in data or not data.get("session_path"):
+        data["session_path"] = data.get("session")
     reactions_enabled = data.get("reactions_enabled")
     if reactions_enabled is not None:
         data["reactions_enabled"] = bool(reactions_enabled)
@@ -770,7 +1447,7 @@ async def update_account_settings(
     if reaction_emojis is not _UNSET:
         if reaction_emojis is None:
             reaction_emojis = DEFAULT_REACTION_EMOJIS
-        updates.append("reaction_emojis = ?")
+        updates.append("reaction_emojis = ?::jsonb")
         values.append(_serialize_list(reaction_emojis))
     if reaction_limit_per_message is not _UNSET:
         updates.append("reaction_limit_per_message = ?")
@@ -782,7 +1459,7 @@ async def update_account_settings(
         else:
             values.append(last_reaction_at)
     if channels is not None:
-        updates.append("channels = ?")
+        updates.append("channels = ?::jsonb")
         values.append(_serialize_list(channels))
     if reactions_enabled is not _UNSET:
         updates.append("reactions_enabled = ?")
@@ -843,7 +1520,7 @@ async def bulk_update_reaction_settings(
         updates.append("reaction_sleep_max = ?")
         values.append(reaction_sleep_max)
     if reaction_emojis is not None:
-        updates.append("reaction_emojis = ?")
+        updates.append("reaction_emojis = ?::jsonb")
         values.append(_serialize_list(reaction_emojis))
     if reaction_limit_per_message is not _UNSET:
         updates.append("reaction_limit_per_message = ?")
@@ -962,7 +1639,7 @@ async def sync_warmup_channels(account_id: int, channels: List[str]) -> None:
     await _execute(
         """
         UPDATE accounts
-        SET warmup_channels = ?, updated_at = CURRENT_TIMESTAMP
+        SET warmup_channels = ?::jsonb, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
         (_serialize_list(unique_channels), account_id),

@@ -6,17 +6,18 @@ services:
     container_name: telegram_bot_postgres
     hostname: postgres
     environment:
-      - POSTGRES_DB=telegram_bot
-      - POSTGRES_USER=bot_user
-      - POSTGRES_PASSWORD=bot_password
+      POSTGRES_DB: ${DATABASE_NAME:-pgbot1010}
+      POSTGRES_USER: ${DATABASE_USER:-pgbot1010_user}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-pgbot1010_password}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init_database.sql:/docker-entrypoint-initdb.d/00_init_database.sql:ro
+      - ./backups:/backups
     ports:
       - "5432:5432"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bot_user -d telegram_bot"]
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-pgbot1010_user} -d ${DATABASE_NAME:-pgbot1010}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -25,15 +26,18 @@ services:
     build: .
     container_name: telegram_bot
     hostname: bot
-    environment:
-      - DATABASE_URL=postgresql://bot_user:bot_password@postgres:5432/telegram_bot
     env_file:
       - .env
+    environment:
+      DATABASE_BACKUP_DIR: /app/backups
+      DATABASE_URL: postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@${DATABASE_HOST}:${DATABASE_PORT}/${DATABASE_NAME}
+      DATABASE_ADMIN_URL: ${DATABASE_ADMIN_URL:-postgresql://postgres:postgres@postgres:5432/postgres}
     volumes:
       - ./sessions:/app/sessions
       - ./logs:/app/logs
       - ./schedule.json:/app/schedule.json
       - ./data:/app/data
+      - ./backups:/app/backups
     restart: unless-stopped
     user: "0:0"
     depends_on:
