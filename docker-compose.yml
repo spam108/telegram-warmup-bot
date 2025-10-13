@@ -16,7 +16,7 @@ services:
       - "5432:5432"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bot_user -d telegram_bot"]
+      test: ["CMD-SHELL", "pg_isready -U pgbot1010_user -d pgbot1010 || pg_isready -U postgres -d pgbot1010"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -28,7 +28,7 @@ services:
     container_name: telegram_bot
     hostname: bot
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/pgbot1010
+      - DATABASE_URL=postgresql://pgbot1010_user:pgbot1010_password@postgres:5432/pgbot1010
     env_file:
       - .env
     volumes:

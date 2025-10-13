@@ -14,9 +14,9 @@ source .env
 
 # Apply defaults if some variables are missing in .env
 PROJECT_NAME=${PROJECT_NAME:-telegram_bot}
-POSTGRES_DB=${POSTGRES_DB:-telegram_bot}
-POSTGRES_USER=${POSTGRES_USER:-bot_user}
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-bot_password}
+POSTGRES_DB=${POSTGRES_DB:-pgbot1010}
+POSTGRES_USER=${POSTGRES_USER:-pgbot1010_user}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-pgbot1010_password}
 POSTGRES_PORT=${POSTGRES_PORT:-5432}
 
 echo "📦 Project: $PROJECT_NAME"
