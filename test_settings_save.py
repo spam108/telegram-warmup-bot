@@ -111,6 +111,7 @@ async def test_reaction_settings_flow_saves_values(monkeypatch):
 
     captured_updates: list[tuple[int, dict[str, object]]] = []
     captured_bulk: list[tuple[int, dict[str, object]]] = []
+    captured_user_updates: list[tuple[int, dict[str, object]]] = []
     sent_messages: list[tuple[int, str]] = []
     main_message_called = False
 
@@ -123,6 +124,9 @@ async def test_reaction_settings_flow_saves_values(monkeypatch):
     async def fake_bulk_update(user: int, **kwargs):  # noqa: ANN001
         captured_bulk.append((user, kwargs))
 
+    async def fake_update_reaction_settings(user: int, **kwargs):  # noqa: ANN001
+        captured_user_updates.append((user, kwargs))
+
     async def fake_send_message(chat_id: int, text: str, **kwargs):  # noqa: ANN001
         sent_messages.append((chat_id, text))
         return types.SimpleNamespace(message_id=1)
@@ -134,6 +138,7 @@ async def test_reaction_settings_flow_saves_values(monkeypatch):
     monkeypatch.setattr(main, "_load_account_data", fake_load_account_data)
     monkeypatch.setattr(main, "update_account_settings", fake_update_account_settings)
     monkeypatch.setattr(main, "bulk_update_reaction_settings", fake_bulk_update)
+    monkeypatch.setattr(main, "update_reaction_settings", fake_update_reaction_settings)
     monkeypatch.setattr(main.bot, "send_message", fake_send_message)
     monkeypatch.setattr(main, "main_message", fake_main_message)
 
@@ -171,6 +176,17 @@ async def test_reaction_settings_flow_saves_values(monkeypatch):
     assert kwargs["reaction_sleep_max"] == 4
     assert kwargs["reaction_emojis"] == ["🔥", "👍"]
     assert not captured_bulk, "Применение ко всем аккаунтам не должно вызываться без кнопки"
+    assert captured_user_updates, "Должны обновляться глобальные настройки реакций"
+    user_id_saved, user_kwargs = captured_user_updates[-1]
+    assert user_id_saved == user_id
+    assert user_kwargs["reaction_chance"] == 70
+    assert user_kwargs["reaction_discussion_chance"] == 50
+    assert user_kwargs["discussion_reply_chance"] == 100
+    assert user_kwargs["discussion_reply_prompt"] == "Промт"
+    assert user_kwargs["reaction_sleep_min"] == 2
+    assert user_kwargs["reaction_sleep_max"] == 4
+    assert user_kwargs["reaction_emojis"] == ["🔥", "👍"]
+    assert user_kwargs["reaction_limit_per_message"] == 10
     assert state.cleared is False
     assert main_message_called is False
     assert sent_messages, "Пользователь должен получить подтверждение сохранения"
@@ -220,9 +236,13 @@ async def test_reaction_settings_apply_all_triggers_bulk(monkeypatch):
         nonlocal main_message_called
         main_message_called = True
 
+    async def fake_update_reaction_settings(*args, **kwargs):  # noqa: ANN001
+        return None
+
     monkeypatch.setattr(main, "_load_account_data", fake_load_account_data)
     monkeypatch.setattr(main, "update_account_settings", fake_update_account_settings)
     monkeypatch.setattr(main, "bulk_update_reaction_settings", fake_bulk_update)
+    monkeypatch.setattr(main, "update_reaction_settings", fake_update_reaction_settings)
     monkeypatch.setattr(main.bot, "send_message", fake_send_message)
     monkeypatch.setattr(main, "main_message", fake_main_message)
 
@@ -306,9 +326,13 @@ async def test_reaction_apply_all_notifies_user_from_bot_message(monkeypatch):
         nonlocal main_message_called
         main_message_called = True
 
+    async def fake_update_reaction_settings(*args, **kwargs):  # noqa: ANN001
+        return None
+
     monkeypatch.setattr(main, "_load_account_data", fake_load_account_data)
     monkeypatch.setattr(main, "update_account_settings", fake_update_account_settings)
     monkeypatch.setattr(main, "bulk_update_reaction_settings", fake_bulk_update)
+    monkeypatch.setattr(main, "update_reaction_settings", fake_update_reaction_settings)
     monkeypatch.setattr(main.bot, "send_message", fake_send_message)
     monkeypatch.setattr(main, "main_message", fake_main_message)
 
@@ -377,9 +401,13 @@ async def test_reaction_apply_all_returns_main_menu_to_real_user(monkeypatch):
     async def fake_main_message(message):  # noqa: ANN001
         captured_main_messages.append(message)
 
+    async def fake_update_reaction_settings(*args, **kwargs):  # noqa: ANN001
+        return None
+
     monkeypatch.setattr(main, "_load_account_data", fake_load_account_data)
     monkeypatch.setattr(main, "update_account_settings", fake_update_account_settings)
     monkeypatch.setattr(main, "bulk_update_reaction_settings", fake_bulk_update)
+    monkeypatch.setattr(main, "update_reaction_settings", fake_update_reaction_settings)
     monkeypatch.setattr(main.bot, "send_message", fake_send_message)
     monkeypatch.setattr(main, "main_message", fake_main_message)
 
@@ -438,9 +466,13 @@ async def test_reaction_settings_flow_with_defaults(monkeypatch):
     async def fake_main_message(message):  # noqa: ANN001
         return None
 
+    async def fake_update_reaction_settings(*args, **kwargs):  # noqa: ANN001
+        return None
+
     monkeypatch.setattr(main, "_load_account_data", fake_load_account_data)
     monkeypatch.setattr(main, "update_account_settings", fake_update_account_settings)
     monkeypatch.setattr(main, "bulk_update_reaction_settings", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main, "update_reaction_settings", fake_update_reaction_settings)
     monkeypatch.setattr(main.bot, "send_message", fake_send_message)
     monkeypatch.setattr(main, "main_message", fake_main_message)
 

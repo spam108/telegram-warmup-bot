@@ -48,6 +48,7 @@ from db import (
     get_global_statistics,
     get_running_standard_accounts,
     get_running_accounts,
+    get_reaction_settings_for_user,
     get_warmup_pending,
     get_warmup_settings,
     increment_warmup_joined,
@@ -65,6 +66,7 @@ from db import (
     update_account_settings,
     update_last_reaction_at,
     update_warmup_settings,
+    update_reaction_settings,
     _require_pool,
 )
 
@@ -1220,14 +1222,15 @@ async def process_account_reactions(account: Dict[str, Any]) -> None:
         )
         return
 
-    reactions_enabled_raw = account.get("reactions_enabled")
-    reactions_enabled = True if reactions_enabled_raw is None else bool(reactions_enabled_raw)
+    resolved_reaction_settings = await _resolve_account_reaction_settings(account)
+
+    reactions_enabled = resolved_reaction_settings.get("reactions_enabled", True)
 
     if not reactions_enabled:
         logging.debug("Reactions disabled for account %s", account_id)
         return
 
-    reaction_emojis_raw = account.get("reaction_emojis") or []
+    reaction_emojis_raw = resolved_reaction_settings.get("reaction_emojis", [])
     reaction_emojis = [
         emoji.strip()
         for emoji in reaction_emojis_raw
@@ -1263,8 +1266,12 @@ async def process_account_reactions(account: Dict[str, Any]) -> None:
     else:
         session_name = session_path
 
-    reaction_sleep_min = _coerce_int(account.get("reaction_sleep_min"), 0)
-    reaction_sleep_max = _coerce_int(account.get("reaction_sleep_max"), 0)
+    reaction_sleep_min = _coerce_int(
+        resolved_reaction_settings.get("reaction_sleep_min"), 0
+    )
+    reaction_sleep_max = _coerce_int(
+        resolved_reaction_settings.get("reaction_sleep_max"), 0
+    )
 
     if reaction_sleep_min <= 0 or reaction_sleep_max <= 0:
         sleep_min_fallback = _coerce_int(account.get("sleep_min"), 10)
@@ -1277,11 +1284,15 @@ async def process_account_reactions(account: Dict[str, Any]) -> None:
     if reaction_sleep_min > reaction_sleep_max:
         reaction_sleep_min, reaction_sleep_max = reaction_sleep_max, reaction_sleep_min
 
-    reaction_limit_per_message = account.get("reaction_limit_per_message")
+    reaction_limit_per_message = resolved_reaction_settings.get(
+        "reaction_limit_per_message"
+    )
     if reaction_limit_per_message is None:
         reaction_limit_per_message = DEFAULT_REACTION_LIMIT_PER_MESSAGE
 
-    reaction_chance = _coerce_int(account.get("reaction_chance"), 0)
+    reaction_chance = _coerce_int(
+        resolved_reaction_settings.get("reaction_chance"), 0
+    )
 
     last_reaction_at = _parse_warmup_datetime(account.get("last_reaction_at"))
 
@@ -2990,6 +3001,56 @@ async def _load_account_data(state: FSMContext) -> Tuple[Dict[str, Any], Optiona
     return data, account_id, account
 
 
+async def _resolve_account_reaction_settings(account: Dict[str, Any]) -> Dict[str, Any]:
+    """Combine account-level and user-level reaction settings."""
+
+    user_settings: Dict[str, Any] = {}
+    user_id = account.get("user_id")
+
+    if user_id is not None:
+        try:
+            user_settings = await get_reaction_settings_for_user(user_id)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logging.exception(
+                "Failed to load reaction settings for user %s: %s",
+                user_id,
+                exc,
+            )
+            user_settings = {}
+
+    def _coalesce(key: str) -> Any:
+        value = account.get(key)
+        if value is None:
+            return user_settings.get(key)
+        return value
+
+    reaction_emojis_value = account.get("reaction_emojis")
+    if reaction_emojis_value is None:
+        reaction_emojis_value = user_settings.get("reaction_emojis")
+    if reaction_emojis_value is None:
+        reaction_emojis: List[str] = []
+    else:
+        reaction_emojis = list(reaction_emojis_value)
+
+    reactions_enabled_value = account.get("reactions_enabled")
+    if reactions_enabled_value is None:
+        reactions_enabled_value = user_settings.get("reactions_enabled")
+    if reactions_enabled_value is None:
+        reactions_enabled_value = True
+
+    return {
+        "reaction_emojis": reaction_emojis,
+        "reaction_chance": _coalesce("reaction_chance"),
+        "reaction_discussion_chance": _coalesce("reaction_discussion_chance"),
+        "discussion_reply_prompt": _coalesce("discussion_reply_prompt"),
+        "discussion_reply_chance": _coalesce("discussion_reply_chance"),
+        "reaction_sleep_min": _coalesce("reaction_sleep_min"),
+        "reaction_sleep_max": _coalesce("reaction_sleep_max"),
+        "reaction_limit_per_message": _coalesce("reaction_limit_per_message"),
+        "reactions_enabled": bool(reactions_enabled_value),
+    }
+
+
 def _format_chance(value: Optional[Union[int, str]]) -> str:
     if value is None:
         return "не задан"
@@ -3690,6 +3751,24 @@ async def _save_reaction_settings(
 
     await update_account_settings(account_id, **update_kwargs)
 
+    if target_user_id is not None:
+        user_update_kwargs: Dict[str, Any] = {}
+        for key in (
+            "reaction_chance",
+            "reaction_discussion_chance",
+            "discussion_reply_chance",
+            "discussion_reply_prompt",
+            "reaction_sleep_min",
+            "reaction_sleep_max",
+            "reaction_emojis",
+            "reaction_limit_per_message",
+        ):
+            if key in update_kwargs:
+                user_update_kwargs[key] = update_kwargs[key]
+
+        if user_update_kwargs:
+            await update_reaction_settings(target_user_id, **user_update_kwargs)
+
     if data.get("apply_reactions_to_all"):
         bulk_kwargs = dict(update_kwargs)
         bulk_user_id = target_user_id if target_user_id is not None else chat_id
@@ -3981,14 +4060,24 @@ async def send_comments(userid, session, account_id):
         chance = account.get("chance") or 100
 
         xsleep, ysleep = sleep_min, sleep_max
-        reaction_emojis: List[str] = account.get("reaction_emojis") or []
-        reaction_chance = account.get("reaction_chance")
+        resolved_reaction_settings = await _resolve_account_reaction_settings(account)
+        reaction_emojis_raw = resolved_reaction_settings.get("reaction_emojis", [])
+        reaction_emojis: List[str] = [
+            emoji.strip()
+            for emoji in reaction_emojis_raw
+            if isinstance(emoji, str) and emoji.strip()
+        ]
+        reaction_chance = resolved_reaction_settings.get("reaction_chance")
         if reaction_chance is None:
             reaction_chance = 0
-        reaction_discussion_chance = account.get("reaction_discussion_chance")
-        reaction_sleep_min = account.get("reaction_sleep_min")
-        reaction_sleep_max = account.get("reaction_sleep_max")
-        reaction_limit_per_message = account.get("reaction_limit_per_message")
+        reaction_discussion_chance = resolved_reaction_settings.get(
+            "reaction_discussion_chance"
+        )
+        reaction_sleep_min = resolved_reaction_settings.get("reaction_sleep_min")
+        reaction_sleep_max = resolved_reaction_settings.get("reaction_sleep_max")
+        reaction_limit_per_message = resolved_reaction_settings.get(
+            "reaction_limit_per_message"
+        )
         if reaction_limit_per_message is None:
             reaction_limit_per_message = DEFAULT_REACTION_LIMIT_PER_MESSAGE
         if reaction_sleep_min is None:
@@ -3998,10 +4087,13 @@ async def send_comments(userid, session, account_id):
         if reaction_sleep_min > reaction_sleep_max:
             reaction_sleep_min, reaction_sleep_max = reaction_sleep_max, reaction_sleep_min
 
-        discussion_reply_prompt = account.get("discussion_reply_prompt")
-        discussion_reply_chance = account.get("discussion_reply_chance")
-        reactions_enabled_raw = account.get("reactions_enabled")
-        reactions_enabled = True if reactions_enabled_raw is None else bool(reactions_enabled_raw)
+        discussion_reply_prompt = resolved_reaction_settings.get(
+            "discussion_reply_prompt"
+        )
+        discussion_reply_chance = resolved_reaction_settings.get(
+            "discussion_reply_chance"
+        )
+        reactions_enabled = resolved_reaction_settings.get("reactions_enabled", True)
 
         last_reaction_at_str = account.get("last_reaction_at")
         last_reaction_at_dt: Optional[datetime] = None
