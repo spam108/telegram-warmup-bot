@@ -30,6 +30,7 @@ async def test_settings_save(tmp_path, monkeypatch):
     await db.ensure_warmup_settings(
         channels_per_day=15,
         delay_minutes=7,
+        default_days=7,
         join_start_hour=10,
         join_start_minute=0,
         join_end_hour=18,
