@@ -14,7 +14,12 @@ from types import SimpleNamespace
 import random
 import re
 from pyrogram import Client, filters
-from pyrogram.errors import ChatWriteForbidden, UserAlreadyParticipant
+from pyrogram.errors import (
+    ChatWriteForbidden,
+    PasswordHashInvalid,
+    SessionPasswordNeeded,
+    UserAlreadyParticipant,
+)
 from sqlite3 import OperationalError
 from threading import Lock
 from aiogram import Bot, Dispatcher, types
@@ -147,6 +152,7 @@ class AuthState(StatesGroup):
 class addsession(StatesGroup):
     number = State()
     code = State()
+    password = State()
     code_hash = State()
     client = State()
 
@@ -349,6 +355,7 @@ async def safe_session_operation(
     operation_name: Optional[str] = None,
     acquire_lock: bool = True,
     start_client: bool = True,
+    client_kwargs: Optional[Dict[str, Any]] = None,
 ):
     """Execute ``coro_func`` with exclusive access to a Pyrogram session."""
 
@@ -397,7 +404,13 @@ async def safe_session_operation(
             session_path,
         )
 
-        app = Client(session_path, API_ID, API_HASH)
+        client_options: Dict[str, Any] = dict(client_kwargs or {})
+        app = Client(
+            session_path,
+            api_id=API_ID,
+            api_hash=API_HASH,
+            **client_options,
+        )
         client_created_at = loop.time()
         logging.debug(
             "safe_session_operation[%s]: client object created in %.2fs",
@@ -426,7 +439,18 @@ async def safe_session_operation(
                     )
                     raise
             else:
-                await app.start()
+                try:
+                    if connect_timeout is not None:
+                        await asyncio.wait_for(app.connect(), timeout=connect_timeout)
+                    else:
+                        await app.connect()
+                except asyncio.TimeoutError:
+                    logging.error(
+                        "safe_session_operation[%s]: timeout while connecting after %.2fs",
+                        op_name,
+                        loop.time() - connect_started_at,
+                    )
+                    raise
 
             entered_context = True
             connected_at = loop.time()
@@ -475,7 +499,13 @@ async def safe_session_operation(
                         else:
                             await app.__aexit__(None, None, None)
                     else:
-                        await app.stop()
+                        if disconnect_timeout is not None:
+                            await asyncio.wait_for(
+                                app.disconnect(),
+                                timeout=disconnect_timeout,
+                            )
+                        else:
+                            await app.disconnect()
                 except asyncio.TimeoutError:
                     logging.error(
                         "safe_session_operation[%s]: timeout while closing client after %.2fs",
@@ -2171,6 +2201,8 @@ async def check_account(user_id, phone):
                     _ensure_identity,
                     lock_key=key,
                     acquire_lock=False,
+                    start_client=False,
+                    client_kwargs={"no_updates": True},
                     connect_timeout=CHECK_ACCOUNT_CONNECT_TIMEOUT,
                     operation_timeout=CHECK_ACCOUNT_OPERATION_TIMEOUT,
                     disconnect_timeout=CHECK_ACCOUNT_DISCONNECT_TIMEOUT,
@@ -4461,6 +4493,7 @@ async def add_number(message: Message, state: FSMContext) -> None:
                 _send_code,
                 lock_key=lock_key,
                 start_client=False,
+                client_kwargs={"no_updates": True},
             )
 
             await state.update_data({"code_hash": sent_code.phone_code_hash})
@@ -4509,10 +4542,15 @@ async def add_code(message: Message, state: FSMContext) -> None:
                 _sign_in,
                 lock_key=str(lock_key),
                 start_client=False,
+                client_kwargs={"no_updates": True},
             )
-
-            await message.answer("✅ Успешная авторизация!")
-            await ensure_account(message.from_user.id, number, session_path)
+        except SessionPasswordNeeded:
+            await state.update_data({"code": code})
+            await message.answer(
+                "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль:"
+            )
+            await state.set_state(addsession.password)
+            return
         except Exception as e:
             await message.answer(f"Ошибка: {str(e)}")
             await asyncio.sleep(1)
@@ -4520,12 +4558,70 @@ async def add_code(message: Message, state: FSMContext) -> None:
                 os.remove(session_path)
             except OSError:
                 pass
-        finally:
+            await state.update_data({"session_name": None, "session_lock_key": None})
+            await state.clear()
             await main_message(message)
+            return
 
+        await message.answer("✅ Успешная авторизация!")
+        await ensure_account(message.from_user.id, number, session_path)
         await state.update_data({"session_name": None, "session_lock_key": None})
+        await state.clear()
+        await main_message(message)
+        return
 
     await state.clear()
+
+
+@dp.message(addsession.password)
+async def add_password(message: Message, state: FSMContext) -> None:
+    password = message.text.strip()
+    state_data = await state.get_data()
+
+    number = state_data.get("number")
+    lock_key = state_data.get("session_lock_key")
+    session_name = state_data.get("session_name")
+
+    session_path = f'sessions/{message.from_user.id}/{number}.session'
+    session_name = session_name or f'sessions/{message.from_user.id}/{number}'
+
+    if lock_key is None:
+        if number is not None:
+            lock_key = make_session_key(message.from_user.id, str(number))
+        else:
+            lock_key = session_path
+
+    try:
+        async def _check_password(app: Client) -> None:
+            await app.check_password(password)
+
+        await with_retry(
+            session_name,
+            _check_password,
+            lock_key=str(lock_key),
+            start_client=False,
+            client_kwargs={"no_updates": True},
+        )
+    except PasswordHashInvalid:
+        await message.answer("❌ Неверный пароль. Попробуйте снова:")
+        return
+    except Exception as e:
+        await message.answer(f"Ошибка: {str(e)}")
+        await asyncio.sleep(1)
+        try:
+            os.remove(session_path)
+        except OSError:
+            pass
+        await state.update_data({"session_name": None, "session_lock_key": None})
+        await state.clear()
+        await main_message(message)
+        return
+
+    await message.answer("✅ Успешная авторизация с 2FA!")
+    await ensure_account(message.from_user.id, number, session_path)
+    await state.update_data({"session_name": None, "session_lock_key": None})
+    await state.clear()
+    await main_message(message)
 
 
 @dp.message(startaccount.regular_channels)
