@@ -4509,58 +4509,73 @@ async def add_number(message: Message, state: FSMContext) -> None:
             await main_message(message)
 
 
+
 @dp.message(addsession.code)
 async def add_code(message: Message, state: FSMContext) -> None:
+    """Упрощенная быстрая аутентификация - исправление PHONE_CODE_EXPIRED"""
     code = str(message.text).replace(' ', '')
+    
+    if not code.isdigit():
+        await message.answer("Код должен содержать только цифры")
+        await state.clear()
+        await main_message(message)
+        return
 
-    if code.isdigit():
-        state_data = await state.get_data()
-        code_hash = state_data.get("code_hash")
-        number = state_data.get("number")
-        lock_key = state_data.get("session_lock_key")
-        session_name = state_data.get("session_name")
+    state_data = await state.get_data()
+    code_hash = state_data.get("code_hash")
+    number = state_data.get("number")
+    
+    if not all([code_hash, number]):
+        await message.answer("Ошибка сессии. Начните заново.")
+        await state.clear()
+        await main_message(message)
+        return
 
-        session_path = f'sessions/{message.from_user.id}/{number}.session'
-        session_name = session_name or f'sessions/{message.from_user.id}/{number}'
-
-        if lock_key is None:
-            if number is not None:
-                lock_key = make_session_key(message.from_user.id, str(number))
-            else:
-                lock_key = session_path
-
+    session_path = f'sessions/{message.from_user.id}/{number}.session'
+    client = None
+    
+    try:
+        # ⚡ МИНИМАЛЬНАЯ БЫСТРАЯ АУТЕНТИФИКАЦИЯ
+        # Создаем клиент БЕЗ фоновых задач
+        client = Client(
+            f"sessions/{message.from_user.id}/{number}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            no_updates=True  # ⚡ ОТКЛЮЧАЕМ PingTask/NetworkTask
+        )
+        
+        # ⚡ БЫСТРЫЙ connect (вместо медленного start)
+        await client.connect()
+        
+        # ⚡ БЫСТРАЯ операция аутентификации
+        await client.sign_in(
+            phone_number=number,
+            phone_code_hash=code_hash, 
+            phone_code=code
+        )
+        
+        await message.answer("✅ Успешная авторизация!")
+        await ensure_account(message.from_user.id, number, session_path)
+        
+    except SessionPasswordNeeded:
+        await state.update_data({"code": code})
+        await message.answer("🔐 Требуется пароль двухфакторной аутентификации. Введите пароль:")
+        await state.set_state(addsession.password)
+        return
+    except Exception as e:
+        await message.answer(f"Ошибка: {str(e)}")
         try:
-            async def _sign_in(app: Client) -> None:
-                await app.sign_in(
-                    phone_number=number,
-                    phone_code_hash=code_hash,
-                    phone_code=code,
-                )
+            os.remove(session_path)
+        except OSError:
+            pass
+    finally:
+        # ⚡ БЫСТРЫЙ disconnect (вместо медленного stop)
+        if client:
+            await client.disconnect()
+    
+    await state.clear()
+    await main_message(message)
 
-            await with_retry(
-                session_name,
-                _sign_in,
-                lock_key=str(lock_key),
-                start_client=False,
-                client_kwargs={"no_updates": True},
-            )
-        except SessionPasswordNeeded:
-            await state.update_data({"code": code})
-            await message.answer(
-                "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль:"
-            )
-            await state.set_state(addsession.password)
-            return
-        except Exception as e:
-            await message.answer(f"Ошибка: {str(e)}")
-            await asyncio.sleep(1)
-            try:
-                os.remove(session_path)
-            except OSError:
-                pass
-            await state.update_data({"session_name": None, "session_lock_key": None})
-            await state.clear()
-            await main_message(message)
             return
 
         await message.answer("✅ Успешная авторизация!")
