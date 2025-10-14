@@ -17,6 +17,8 @@ from pyrogram import Client, filters
 from pyrogram.errors import (
     ChatWriteForbidden,
     PasswordHashInvalid,
+    PhoneCodeExpired,
+    PhoneCodeInvalid,
     SessionPasswordNeeded,
     UserAlreadyParticipant,
 )
@@ -4460,13 +4462,49 @@ async def process_warmup_accounts():
 
         await asyncio.sleep(_get_human_delay_seconds(current_settings))
 
+async def _disconnect_client_safely(client: Optional[Client]) -> None:
+    if not client:
+        return
+
+    try:
+        await client.disconnect()
+    except Exception:
+        logging.exception("Failed to disconnect temporary auth client")
+
+
+async def cleanup_auth(client: Optional[Client], state: FSMContext) -> None:
+    await _disconnect_client_safely(client)
+    await state.clear()
+
+
+async def save_session_and_cleanup(
+    message: Message,
+    state: FSMContext,
+    client: Optional[Client],
+    phone: str,
+) -> None:
+    session_path = f"sessions/{message.from_user.id}/{phone}.session"
+    try:
+        os.makedirs(os.path.dirname(session_path), exist_ok=True)
+        await ensure_account(message.from_user.id, phone, session_path)
+    except Exception as exc:
+        logging.exception("Failed to persist session for %s", phone)
+        await message.answer(f"Не удалось сохранить аккаунт: {exc}")
+    finally:
+        await cleanup_auth(client, state)
+
+    await main_message(message)
+
+
 @dp.message(addsession.number)
 async def add_number(message: Message, state: FSMContext) -> None:
-    if str(message.text).isdigit():
+    raw_number = (message.text or "").strip()
+
+    if raw_number.isdigit():
         warmup_only = (await state.get_data()).get("warmup_only")
 
         if warmup_only:
-            account_row = await get_account_by_session(message.from_user.id, message.text)
+            account_row = await get_account_by_session(message.from_user.id, raw_number)
             if not account_row:
                 await message.answer("Аккаунт не найден. Сначала добавьте аккаунт через 'Добавить аккаунт'.")
                 await state.clear()
@@ -4474,170 +4512,121 @@ async def add_number(message: Message, state: FSMContext) -> None:
                 return
 
             await state.update_data({
-                "account": message.text,
+                "account": raw_number,
                 "account_id": account_row["id"],
             })
-            await message.answer("Пришлите каналы для прогрева (каждый канал с новой строки). Для отмены отправьте '-'.")
+            await message.answer(
+                "Пришлите каналы для прогрева (каждый канал с новой строки). Для отмены отправьте '-'."
+            )
             await state.set_state(startaccount.warmup_channels)
             return
 
-        session_name = f"sessions/{message.from_user.id}/{message.text}"
-        lock_key = make_session_key(message.from_user.id, str(message.text))
-
-        async def _send_code(app: Client):
-            return await app.send_code(str(message.text))
-
+        client: Optional[Client] = None
         try:
-            sent_code = await with_retry(
+            session_name = f"sessions/{message.from_user.id}/{raw_number}"
+            os.makedirs(os.path.dirname(session_name), exist_ok=True)
+
+            client = Client(
                 session_name,
-                _send_code,
-                lock_key=lock_key,
-                start_client=False,
-                client_kwargs={"no_updates": True},
+                api_id=API_ID,
+                api_hash=API_HASH,
+                no_updates=True,
             )
 
-            await state.update_data({"code_hash": sent_code.phone_code_hash})
-            await state.update_data({"number": message.text})
-            await state.update_data({"session_lock_key": lock_key})
-            await state.update_data({"session_name": session_name})
+            await client.connect()
+            sent_code = await client.send_code(raw_number)
+
+            await state.update_data({
+                "code_hash": sent_code.phone_code_hash,
+                "number": raw_number,
+                "client": client,
+            })
 
             await message.answer("Код подтверждения отправлен.\nВведите код в формате 6 7 4 3 9")
             await state.set_state(addsession.code)
-        except Exception as e:
-            await message.answer(f"Ошибка: {str(e)}")
-            await state.clear()
+        except Exception as exc:
+            await message.answer(f"Ошибка: {exc}")
+            await cleanup_auth(client, state)
             await main_message(message)
-
-
+    else:
+        await message.answer(
+            "Пришлите код из SMS, состоящий только из цифр. Для отмены отправьте '-'."
+        )
 
 @dp.message(addsession.code)
 async def add_code(message: Message, state: FSMContext) -> None:
-    """Упрощенная быстрая аутентификация - исправление PHONE_CODE_EXPIRED"""
-    code = str(message.text).replace(' ', '')
-    
+    code = (message.text or "").replace(' ', '')
+
     if not code.isdigit():
         await message.answer("Код должен содержать только цифры")
-        await state.clear()
-        await main_message(message)
         return
 
     state_data = await state.get_data()
+    client: Optional[Client] = state_data.get("client")
     code_hash = state_data.get("code_hash")
     number = state_data.get("number")
-    
-    if not all([code_hash, number]):
+
+    if not all([client, code_hash, number]):
         await message.answer("Ошибка сессии. Начните заново.")
-        await state.clear()
+        await cleanup_auth(client, state)
         await main_message(message)
         return
 
-    session_path = f'sessions/{message.from_user.id}/{number}.session'
-    client = None
-    
     try:
-        # ⚡ МИНИМАЛЬНАЯ БЫСТРАЯ АУТЕНТИФИКАЦИЯ
-        # Создаем клиент БЕЗ фоновых задач
-        client = Client(
-            f"sessions/{message.from_user.id}/{number}",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            no_updates=True  # ⚡ ОТКЛЮЧАЕМ PingTask/NetworkTask
-        )
-        
-        # ⚡ БЫСТРЫЙ connect (вместо медленного start)
-        await client.connect()
-        
-        # ⚡ БЫСТРАЯ операция аутентификации
         await client.sign_in(
             phone_number=number,
-            phone_code_hash=code_hash, 
-            phone_code=code
+            phone_code_hash=code_hash,
+            phone_code=code,
         )
-        
-        await message.answer("✅ Успешная авторизация!")
-        await ensure_account(message.from_user.id, number, session_path)
-        
     except SessionPasswordNeeded:
         await state.update_data({"code": code})
         await message.answer("🔐 Требуется пароль двухфакторной аутентификации. Введите пароль:")
         await state.set_state(addsession.password)
         return
-    except Exception as e:
-        await message.answer(f"Ошибка: {str(e)}")
-        try:
-            os.remove(session_path)
-        except OSError:
-            pass
-    finally:
-        # ⚡ БЫСТРЫЙ disconnect (вместо медленного stop)
-        if client:
-            await client.disconnect()
-    
-    await state.clear()
-    await main_message(message)
-
-            return
-
-        await message.answer("✅ Успешная авторизация!")
-        await ensure_account(message.from_user.id, number, session_path)
-        await state.update_data({"session_name": None, "session_lock_key": None})
-        await state.clear()
+    except PhoneCodeInvalid:
+        await message.answer("❌ Неверный код. Попробуйте снова:")
+        return
+    except PhoneCodeExpired:
+        await message.answer("⏳ Срок действия кода истек. Пожалуйста, запросите новый код.")
+        await cleanup_auth(client, state)
+        await main_message(message)
+        return
+    except Exception as exc:
+        await message.answer(f"Ошибка: {exc}")
+        await cleanup_auth(client, state)
         await main_message(message)
         return
 
-    await state.clear()
-
+    await message.answer("✅ Успешная авторизация!")
+    await save_session_and_cleanup(message, state, client, number)
 
 @dp.message(addsession.password)
 async def add_password(message: Message, state: FSMContext) -> None:
-    password = message.text.strip()
+    password = (message.text or "").strip()
     state_data = await state.get_data()
 
+    client: Optional[Client] = state_data.get("client")
     number = state_data.get("number")
-    lock_key = state_data.get("session_lock_key")
-    session_name = state_data.get("session_name")
 
-    session_path = f'sessions/{message.from_user.id}/{number}.session'
-    session_name = session_name or f'sessions/{message.from_user.id}/{number}'
-
-    if lock_key is None:
-        if number is not None:
-            lock_key = make_session_key(message.from_user.id, str(number))
-        else:
-            lock_key = session_path
+    if not all([client, number]):
+        await message.answer("Ошибка сессии. Начните заново.")
+        await cleanup_auth(client, state)
+        await main_message(message)
+        return
 
     try:
-        async def _check_password(app: Client) -> None:
-            await app.check_password(password)
-
-        await with_retry(
-            session_name,
-            _check_password,
-            lock_key=str(lock_key),
-            start_client=False,
-            client_kwargs={"no_updates": True},
-        )
+        await client.check_password(password)
     except PasswordHashInvalid:
         await message.answer("❌ Неверный пароль. Попробуйте снова:")
         return
-    except Exception as e:
-        await message.answer(f"Ошибка: {str(e)}")
-        await asyncio.sleep(1)
-        try:
-            os.remove(session_path)
-        except OSError:
-            pass
-        await state.update_data({"session_name": None, "session_lock_key": None})
-        await state.clear()
+    except Exception as exc:
+        await message.answer(f"Ошибка: {exc}")
+        await cleanup_auth(client, state)
         await main_message(message)
         return
 
     await message.answer("✅ Успешная авторизация с 2FA!")
-    await ensure_account(message.from_user.id, number, session_path)
-    await state.update_data({"session_name": None, "session_lock_key": None})
-    await state.clear()
-    await main_message(message)
-
+    await save_session_and_cleanup(message, state, client, number)
 
 @dp.message(startaccount.regular_channels)
 async def add_regular_channels(message: Message, state: FSMContext) -> None:
