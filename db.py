@@ -341,6 +341,20 @@ async def _init_postgres_schema() -> None:
 
         await connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS reaction_settings (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                setting_key TEXT NOT NULL,
+                setting_value TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (account_id, setting_key)
+            )
+            """
+        )
+
+        await connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS posts (
                 id BIGSERIAL PRIMARY KEY,
                 account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -429,6 +443,19 @@ async def _init_postgres_schema() -> None:
 
         await connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS warmup_logs (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                channel TEXT,
+                status TEXT NOT NULL,
+                details TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        await connection.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_account_settings_account_id
             ON account_settings (account_id)
             """
@@ -484,6 +511,31 @@ async def _init_postgres_schema() -> None:
             ADD COLUMN IF NOT EXISTS reactions_enabled BOOLEAN NOT NULL DEFAULT TRUE
             """
         )
+
+        required_tables = {
+            "users",
+            "accounts",
+            "comment_logs",
+            "reaction_settings",
+            "warmup_channels",
+            "warmup_logs",
+            "posts",
+        }
+        existing = await connection.fetch(
+            """
+            SELECT tablename
+            FROM pg_catalog.pg_tables
+            WHERE schemaname = 'public' AND tablename = ANY($1::text[])
+            """,
+            list(required_tables),
+        )
+        present_tables = {row["tablename"] for row in existing}
+        missing_tables = required_tables - present_tables
+        if missing_tables:
+            raise RuntimeError(
+                f"Missing required database tables: {', '.join(sorted(missing_tables))}"
+            )
+        logger.info("Verified required database tables: %s", sorted(present_tables))
 
 
 async def close_db() -> None:
