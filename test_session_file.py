@@ -5,10 +5,13 @@ from pyrogram import Client
 
 logging.basicConfig(level=logging.DEBUG)
 
+SESSIONS_BASE_DIR = os.getenv("SESSIONS_DIR", "/app/sessions")
+
+
 async def test_session_file():
     user_id = 291299155
     phone = "79639791823"
-    session_path = f"/app/sessions/{user_id}/{phone}"
+    session_path = os.path.join(SESSIONS_BASE_DIR, str(user_id), phone)
     
     print(f"=== ДИАГНОСТИКА ФАЙЛА СЕССИИ {phone} ===")
     

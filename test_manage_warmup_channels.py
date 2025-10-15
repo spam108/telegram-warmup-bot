@@ -8,6 +8,8 @@ os.environ.setdefault("API_ID", "1")
 os.environ.setdefault("API_HASH", "test")
 os.environ.setdefault("BOT_TOKEN", "123456:TESTTOKEN")
 
+SESSIONS_BASE_DIR = os.getenv("SESSIONS_DIR", "sessions")
+
 import main
 import db
 
@@ -223,7 +225,7 @@ def test_add_sleeps_syncs_subscriptions(monkeypatch, tmp_path):
 
     user_id = 100
     phone = "71234567890"
-    session_path = f"sessions/{user_id}/{phone}.session"
+    session_path = os.path.join(SESSIONS_BASE_DIR, str(user_id), f"{phone}.session")
 
     asyncio.run(db.ensure_user(user_id))
     account_id = asyncio.run(db.ensure_account(user_id, phone, session_path))

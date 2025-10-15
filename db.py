@@ -39,6 +39,15 @@ _POOL: Optional[AsyncpgPool] = None
 _BACKEND: str = "postgres"
 _UNSET = object()
 
+REQUIRED_TABLES = {
+    "users",
+    "accounts",
+    "comment_logs",
+    "warmup_channels",
+    "warmup_logs",
+    "posts",
+}
+
 DEFAULT_REACTION_EMOJIS = ['❤️', '👍', '🔥', '🎉', '👏']
 
 
@@ -429,6 +438,19 @@ async def _init_postgres_schema() -> None:
 
         await connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS warmup_logs (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                channel TEXT,
+                status TEXT NOT NULL,
+                details TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        await connection.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_account_settings_account_id
             ON account_settings (account_id)
             """
@@ -484,6 +506,26 @@ async def _init_postgres_schema() -> None:
             ADD COLUMN IF NOT EXISTS reactions_enabled BOOLEAN NOT NULL DEFAULT TRUE
             """
         )
+
+        await _verify_required_tables(connection)
+
+
+async def _verify_required_tables(connection: "asyncpg.connection.Connection") -> None:
+    existing_rows = await connection.fetch(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name = ANY($1::text[])
+        """,
+        list(REQUIRED_TABLES),
+    )
+    present_tables = {row["table_name"] for row in existing_rows}
+    missing = REQUIRED_TABLES - present_tables
+    if missing:
+        raise RuntimeError(
+            "Missing required database tables: " + ", ".join(sorted(missing))
+        )
+    logger.info("Verified required database tables: %s", sorted(present_tables))
 
 
 async def close_db() -> None:

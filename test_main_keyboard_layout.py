@@ -8,6 +8,8 @@ os.environ.setdefault("API_ID", "1")
 os.environ.setdefault("API_HASH", "hash")
 os.environ.setdefault("BOT_TOKEN", "123456:TESTTOKEN")
 
+SESSIONS_BASE_DIR = os.getenv("SESSIONS_DIR", "sessions")
+
 import main  # noqa: E402  pylint: disable=wrong-import-position
 
 
@@ -105,7 +107,7 @@ async def test_main_menu_keyboard_layout_no_accounts(monkeypatch):
 @pytest.mark.anyio
 async def test_main_menu_keyboard_layout_with_account_shows_reaction_button(monkeypatch):
     user_id = 123
-    session_file = os.path.normpath(f"sessions/{user_id}/79990000000.session")
+    session_file = os.path.normpath(os.path.join(SESSIONS_BASE_DIR, str(user_id), "79990000000.session"))
     existing_dirs: set[str] = set()
     existing_files: set[str] = {session_file}
 
@@ -127,7 +129,7 @@ async def test_main_menu_keyboard_layout_with_account_shows_reaction_button(monk
 
     def fake_listdir(path: str) -> list[str]:  # noqa: ARG001
         norm_path = _norm(path)
-        user_dir = _norm(f"sessions/{user_id}")
+        user_dir = _norm(os.path.join(SESSIONS_BASE_DIR, str(user_id)))
         if norm_path == user_dir:
             return ["79990000000.session"]
         return []
