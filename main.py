@@ -80,6 +80,35 @@ logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
 
 
+# Глобальные переменные для реакций
+REACTION_MIN_INTERVAL_SECONDS = 10  # ⚡ default fallback value, can be overridden via config
+
+
+# Вспомогательные функции
+
+
+def _record_skip_log_event(session: str, event_type: str, reason: str) -> None:
+    """Adds skip statistics for delayed aggregated reporting."""
+
+    counters = skip_log_counters[session]
+    counters[event_type] += 1
+    skip_log_last_reasons[session][event_type] = reason
+
+
+def enqueue_skip_log(session: str, action: str, reason: str) -> None:
+    """Логирование пропущенных действий - УПРОЩЕННАЯ ВЕРСИЯ"""
+
+    logging.info(f"SKIP {action.upper()} for {session}: {reason}")
+    _record_skip_log_event(session, action, reason)
+
+
+async def update_last_reaction_at_with_logging(account_id: int, timestamp: datetime) -> None:
+    """Обновление времени последней реакции с логированием"""
+
+    logging.info(f"Last reaction updated for account {account_id} at {timestamp}")
+    await update_last_reaction_at(account_id, timestamp)
+
+
 # Конфигурация
 # Загрузка переменных окружения
 def load_env_file():
@@ -137,7 +166,9 @@ WARMUP_VERBOSE_LOGS = _get_bool_env("WARMUP_VERBOSE_LOGS", default=False)
 WARMUP_VERBOSE_NOTIFICATIONS = _get_bool_env("WARMUP_VERBOSE_NOTIFICATIONS", default=False)
 
 DEFAULT_REACTION_LIMIT_PER_MESSAGE = _get_int_env("REACTION_LIMIT_PER_MESSAGE")
-REACTION_MIN_INTERVAL_SECONDS = _get_int_env("REACTION_MIN_INTERVAL_SECONDS") or 0
+REACTION_MIN_INTERVAL_SECONDS = (
+    _get_int_env("REACTION_MIN_INTERVAL_SECONDS") or REACTION_MIN_INTERVAL_SECONDS
+)
 
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN)
@@ -890,41 +921,73 @@ async def _maybe_send_reaction(
     if effective_chance <= 0:
         return current_last_reaction_at, False
 
-    if not force:
-        reaction_roll = random.randint(1, 100)
-        if reaction_roll > effective_chance:
-            await add_comment_log(
-                account_id,
-                channel=str(getattr(getattr(message, 'chat', None), 'id', '')),
-                message_id=getattr(message, 'id', None),
-                status=f'reaction_skipped{status_suffix}',
-                error=f'random {reaction_roll} > chance {effective_chance}',
-            )
-            return current_last_reaction_at, False
-
     channel_for_reactions = str(getattr(getattr(message, "chat", None), "id", ""))
     message_identifier = getattr(message, "id", None)
 
+    if (
+        not force
+        and not ignore_cooldown
+        and REACTION_MIN_INTERVAL_SECONDS > 0
+        and current_last_reaction_at is not None
+    ):
+        last_ts = current_last_reaction_at
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - last_ts).total_seconds()
+        if elapsed < REACTION_MIN_INTERVAL_SECONDS:
+            cooldown_reason = (
+                f"cooldown {elapsed:.1f}s < min {REACTION_MIN_INTERVAL_SECONDS}s"
+            )
+            enqueue_skip_log(session, "reaction", cooldown_reason)
+            await add_comment_log(
+                account_id,
+                channel=channel_for_reactions,
+                message_id=message_identifier,
+                status=f"reaction_skipped{status_suffix}",
+                error=cooldown_reason,
+            )
+            return current_last_reaction_at, False
+
+    if not force:
+        reaction_roll = random.randint(1, 100)
+        if reaction_roll > effective_chance:
+            skip_reason = f"random {reaction_roll} > chance {effective_chance}"
+            enqueue_skip_log(session, "reaction", skip_reason)
+            await add_comment_log(
+                account_id,
+                channel=channel_for_reactions,
+                message_id=message_identifier,
+                status=f"reaction_skipped{status_suffix}",
+                error=skip_reason,
+            )
+            return current_last_reaction_at, False
+
     if reaction_limit_per_message is not None:
         if reaction_limit_per_message <= 0:
+            limit_reason = f"reaction limit {reaction_limit_per_message} reached"
+            enqueue_skip_log(session, "reaction", limit_reason)
             await add_comment_log(
                 account_id,
                 channel=channel_for_reactions,
                 message_id=message_identifier,
                 status=f'reaction_skipped{status_suffix}',
-                error=f'reaction limit {reaction_limit_per_message} reached',
+                error=limit_reason,
             )
             return current_last_reaction_at, True
 
         if channel_for_reactions and message_identifier is not None:
             reaction_count = await count_reactions_for_message(channel_for_reactions, message_identifier)
             if reaction_count >= reaction_limit_per_message:
+                limit_reason = (
+                    f"reaction limit {reaction_count}/{reaction_limit_per_message}"
+                )
+                enqueue_skip_log(session, "reaction", limit_reason)
                 await add_comment_log(
                     account_id,
                     channel=channel_for_reactions,
                     message_id=message_identifier,
                     status=f'reaction_skipped{status_suffix}',
-                    error=f'reaction limit {reaction_count}/{reaction_limit_per_message}',
+                    error=limit_reason,
                 )
                 return current_last_reaction_at, True
 
@@ -945,6 +1008,7 @@ async def _maybe_send_reaction(
             await client.send_reaction(message.chat.id, message.id, emoji)
 
             now = datetime.now(timezone.utc)
+            await update_last_reaction_at_with_logging(account_id, now)
             await add_comment_log(
                 account_id,
                 channel=str(message.chat.id),
@@ -1040,16 +1104,6 @@ def _build_post_link(sent_message: Any, original_message: Any) -> str:
     chat = getattr(original_message, "chat", None)
     chat_id = getattr(chat, "id", "")
     return f'https://t.me/c/{str(chat_id).replace("-", "")}/{getattr(original_message, "id", "")}'
-
-
-def enqueue_skip_log(session: str, event_type: str, reason: str) -> None:
-    """Adds skip statistics for delayed aggregated reporting."""
-
-    counters = skip_log_counters[session]
-    counters[event_type] += 1
-    skip_log_last_reasons[session][event_type] = reason
-
-
 async def flush_skip_logs() -> None:
     """Sends an aggregated skip report and resets collected data."""
 
