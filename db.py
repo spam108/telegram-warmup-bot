@@ -39,6 +39,15 @@ _POOL: Optional[AsyncpgPool] = None
 _BACKEND: str = "postgres"
 _UNSET = object()
 
+REQUIRED_TABLES = {
+    "users",
+    "accounts",
+    "comment_logs",
+    "warmup_channels",
+    "warmup_logs",
+    "posts",
+}
+
 DEFAULT_REACTION_EMOJIS = ['❤️', '👍', '🔥', '🎉', '👏']
 
 
