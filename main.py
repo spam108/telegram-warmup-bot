@@ -79,6 +79,8 @@ from db import (
 logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
 
+load_dotenv()
+
 
 # Глобальные переменные для реакций
 REACTION_MIN_INTERVAL_SECONDS = 10  # ⚡ default fallback value, can be overridden via config
@@ -129,6 +131,15 @@ def load_env_file():
 env_vars = load_env_file()
 
 
+def _get_env(name: str, default: Optional[str] = None) -> Optional[str]:
+    value = env_vars.get(name)
+    if value is None:
+        value = os.getenv(name)
+    if value is None:
+        return default
+    return value
+
+
 def _get_bool_env(name: str, default: bool = False) -> bool:
     value = env_vars.get(name)
     if value is None:
@@ -151,14 +162,35 @@ def _get_int_env(name: str) -> Optional[int]:
         return None
 
 
-BOT_TOKEN = env_vars.get("BOT_TOKEN") or os.getenv("BOT_TOKEN")
+BOT_NAME = _get_env("BOT_NAME", "DefaultBot")
+SESSIONS_BASE_DIR = _get_env("SESSIONS_DIR", "sessions") or "sessions"
+LOGS_BASE_DIR = _get_env("LOGS_DIR", "logs") or "logs"
+DATA_BASE_DIR = _get_env("DATA_DIR", "data") or "data"
+
+for directory in (SESSIONS_BASE_DIR, LOGS_BASE_DIR, DATA_BASE_DIR):
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+DB_NAME = _get_env("DB_NAME", "pgbot1010")
+DB_USER = _get_env("DB_USER", "postgres")
+DB_PASSWORD = _get_env("DB_PASSWORD", "postgres")
+DB_HOST = _get_env("DB_HOST", "postgres")
+DB_PORT = _get_env("DB_PORT", "5432")
+
+DATABASE_URL = _get_env("DATABASE_URL")
+if not DATABASE_URL:
+    DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+os.environ.setdefault("DATABASE_URL", DATABASE_URL)
+
+BOT_TOKEN = _get_env("BOT_TOKEN")
 print(f"BOT_TOKEN loaded: {BOT_TOKEN}")
 #APCDXBOT0310 @AP_comment_bot
 log_channel = -1003123025616 # cloveend #-1002711973256 #-1002678984799
 
-API_ID = int(env_vars.get("API_ID") or os.getenv("API_ID"))
+API_ID = int(_get_env("API_ID", "0"))
 print(f"API_ID loaded: {API_ID}")
-API_HASH = env_vars.get("API_HASH") or os.getenv("API_HASH")
+API_HASH = _get_env("API_HASH")
 print(f"API_HASH loaded: {API_HASH}")
 #1823
 
@@ -170,11 +202,30 @@ REACTION_MIN_INTERVAL_SECONDS = (
     _get_int_env("REACTION_MIN_INTERVAL_SECONDS") or REACTION_MIN_INTERVAL_SECONDS
 )
 
+
+def validate_configuration():
+    """Проверяет что все необходимые переменные окружения заданы"""
+
+    required_vars = ["BOT_TOKEN", "API_ID", "API_HASH"]
+    missing = [var for var in required_vars if not _get_env(var)]
+
+    if missing:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+
+    logging.info(f"Bot instance: {BOT_NAME}")
+    logging.info(f"Sessions directory: {SESSIONS_BASE_DIR}")
+    logging.info(f"Database: {_get_env('DB_NAME', 'pgbot1010')}")
+
 # Инициализация бота
+logging.basicConfig(
+    level=logging.DEBUG if WARMUP_VERBOSE_LOGS else logging.INFO,
+    format=f"[{BOT_NAME}] %(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+validate_configuration()
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-logging.basicConfig(level=logging.DEBUG if WARMUP_VERBOSE_LOGS else logging.INFO)
+logger.info("Starting bot instance: %s", BOT_NAME)
 
 
 
@@ -2178,7 +2229,7 @@ async def check_account(user_id, phone):
                 _release_session_lock(key)
                 existing_client = None
 
-        session_base = f"sessions/{user_id}/{phone}"
+        session_base = os.path.join(SESSIONS_BASE_DIR, str(user_id), str(phone))
 
         async def _ensure_identity(app: Client) -> bool:
             identity_loop = asyncio.get_running_loop()
@@ -2328,9 +2379,9 @@ async def check_account(user_id, phone):
 async def main_message(message):
     user_id = message.from_user.id
     await ensure_user(user_id)
-    if not os.path.isdir("sessions"):
-        os.makedirs("sessions", exist_ok=True)
-    user_sessions_dir = os.path.join("sessions", str(user_id))
+    if not os.path.isdir(SESSIONS_BASE_DIR):
+        os.makedirs(SESSIONS_BASE_DIR, exist_ok=True)
+    user_sessions_dir = os.path.join(SESSIONS_BASE_DIR, str(user_id))
     if not os.path.isdir(user_sessions_dir):
         os.makedirs(user_sessions_dir, exist_ok=True)
 
@@ -2571,7 +2622,7 @@ async def clean_sessions_command(message: Message) -> None:
     """Команда для удаления .session.session файлов"""
     try:
         user_id = message.from_user.id
-        user_sessions_dir = os.path.join("sessions", str(user_id))
+        user_sessions_dir = os.path.join(SESSIONS_BASE_DIR, str(user_id))
         
         if not os.path.isdir(user_sessions_dir):
             await message.answer("❌ Директория сессий не найдена")
@@ -2863,8 +2914,8 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
         try:
             await delete_account(account_row["id"], account_row["phone"])
 
-            session_file = f"sessions/{user_id}/{session}.session"
-            session_file_alt = f"sessions/{user_id}/{session}.session.session"
+            session_file = os.path.join(SESSIONS_BASE_DIR, str(user_id), f"{session}.session")
+            session_file_alt = os.path.join(SESSIONS_BASE_DIR, str(user_id), f"{session}.session.session")
 
             deleted_files = []
             if os.path.exists(session_file):
@@ -3404,7 +3455,7 @@ async def _prepare_regular_channels_prompt(message: Message, state: FSMContext) 
     channels: List[str] = []
     seen_channels: Set[str] = set()
 
-    session_name = f"sessions/{message.from_user.id}/{session}"
+    session_name = os.path.join(SESSIONS_BASE_DIR, str(message.from_user.id), str(session))
     key = make_session_key(message.from_user.id, str(session))
 
     async def _collect_channels(app: Client) -> List[str]:
@@ -3975,7 +4026,7 @@ async def add_channels(message: Message, state: FSMContext) -> None:
     if str(message.text) != '-':
         channels = str(message.text).splitlines()
 
-        session_name = f"sessions/{message.from_user.id}/{session}"
+        session_name = os.path.join(SESSIONS_BASE_DIR, str(message.from_user.id), str(session))
         key = make_session_key(message.from_user.id, str(session))
 
         async def _manage_channels(app: Client) -> None:
@@ -4054,7 +4105,7 @@ async def add_channels(message: Message, state: FSMContext) -> None:
 async def send_comments(userid, session, account_id):
     async with account_semaphore:
         key = make_session_key(userid, session)
-        session_name = f"sessions/{userid}/{session}"
+        session_name = os.path.join(SESSIONS_BASE_DIR, str(userid), str(session))
 
         account = await get_account_by_id(account_id)
         if not account:
@@ -4193,7 +4244,7 @@ async def join_channel(
     """
     try:
         # Создаем клиент
-        session_dir = os.path.join("sessions", str(user_id))
+        session_dir = os.path.join(SESSIONS_BASE_DIR, str(user_id))
         session_name = os.path.join(session_dir, session_key)
         session_file = f"{session_name}.session"
 
@@ -4440,7 +4491,7 @@ async def process_warmup_accounts():
                 channel = channel_entry["channel"]
 
                 # Проверяем существование файла сессии
-                session_file = os.path.join("sessions", str(user_id), f"{session_key}.session")
+                session_file = os.path.join(SESSIONS_BASE_DIR, str(user_id), f"{session_key}.session")
                 if not os.path.exists(session_file):
                     warning_message = (
                         f"Аккаунт {session_key} (прогрев) - файл сессии не найден: {session_file}"
@@ -4537,7 +4588,7 @@ async def save_session_and_cleanup(
     client: Optional[Client],
     phone: str,
 ) -> None:
-    session_path = f"sessions/{message.from_user.id}/{phone}.session"
+    session_path = os.path.join(SESSIONS_BASE_DIR, str(message.from_user.id), f"{phone}.session")
     try:
         os.makedirs(os.path.dirname(session_path), exist_ok=True)
         await ensure_account(message.from_user.id, phone, session_path)
@@ -4577,7 +4628,7 @@ async def add_number(message: Message, state: FSMContext) -> None:
 
         client: Optional[Client] = None
         try:
-            session_name = f"sessions/{message.from_user.id}/{raw_number}"
+            session_name = os.path.join(SESSIONS_BASE_DIR, str(message.from_user.id), str(raw_number))
             os.makedirs(os.path.dirname(session_name), exist_ok=True)
 
             client = Client(
@@ -5420,7 +5471,7 @@ async def main():
                 user_id = account["user_id"]
                 phone = account["phone"]
                 key = make_session_key(user_id, phone)
-                session_file = os.path.join("sessions", str(user_id), f"{phone}.session")
+                session_file = os.path.join(SESSIONS_BASE_DIR, str(user_id), f"{phone}.session")
 
                 if os.path.exists(session_file):
                     # Перед повторным запуском очищаем прошлые записи, чтобы избежать дублирования

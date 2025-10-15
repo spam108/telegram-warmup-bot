@@ -28,7 +28,8 @@ from db import (
 
 DEFAULT_USER_ID = 291299155
 DEFAULT_PHONE = "+79999999999"
-DEFAULT_SESSION_PATH = "sessions/test.session"
+SESSIONS_BASE_DIR = os.getenv("SESSIONS_DIR", "sessions")
+DEFAULT_SESSION_PATH = os.path.join(SESSIONS_BASE_DIR, "test.session")
 
 async def test_settings_save():
     """Тестирует сохранение настроек аккаунта"""

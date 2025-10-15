@@ -1,6 +1,10 @@
 import asyncio
 import logging
+import os
+
 logging.basicConfig(level=logging.DEBUG)
+
+SESSIONS_BASE_DIR = os.getenv("SESSIONS_DIR", "sessions")
 
 async def test_account_start():
     print("=== ТЕСТ ЗАПУСКА АККАУНТА ===")
@@ -33,8 +37,7 @@ async def test_account_start():
                     break
                     
             print("3. Проверяем файл сессии...")
-            import os
-            session_path = f"sessions/{user_id}/{test_account['phone']}.session"
+            session_path = os.path.join(SESSIONS_BASE_DIR, str(user_id), f"{test_account['phone']}.session")
             if os.path.exists(session_path):
                 print(f"   ✅ Файл сессии существует: {session_path}")
             else:

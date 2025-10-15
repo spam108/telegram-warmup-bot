@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+SESSIONS_BASE_DIR = os.getenv("SESSIONS_DIR", "sessions")
+
 # Test environment variables
 bot_token = os.getenv("BOT_TOKEN")
 api_id = os.getenv("API_ID")
@@ -49,9 +51,21 @@ async def test_get_global_statistics_and_report(tmp_path, monkeypatch):
     await db_module.init_db()
 
     await db_module.ensure_user(1)
-    account1_id = await db_module.ensure_account(1, "+100", "sessions/1/+100.session")
-    account2_id = await db_module.ensure_account(1, "+101", "sessions/1/+101.session")
-    account3_id = await db_module.ensure_account(1, "+102", "sessions/1/+102.session")
+    account1_id = await db_module.ensure_account(
+        1,
+        "+100",
+        os.path.join(SESSIONS_BASE_DIR, "1", "+100.session"),
+    )
+    account2_id = await db_module.ensure_account(
+        1,
+        "+101",
+        os.path.join(SESSIONS_BASE_DIR, "1", "+101.session"),
+    )
+    account3_id = await db_module.ensure_account(
+        1,
+        "+102",
+        os.path.join(SESSIONS_BASE_DIR, "1", "+102.session"),
+    )
 
     assert account1_id is not None
     assert account2_id is not None
