@@ -83,6 +83,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+# Глобальный кэш для доступных реакций
+_chat_available_reactions_cache: Dict[int, Set[str]] = {}
+
+
 # Глобальные переменные для реакций
 REACTION_MIN_INTERVAL_SECONDS = 10  # ⚡ default fallback value, can be overridden via config
 
