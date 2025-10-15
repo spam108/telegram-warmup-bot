@@ -39,6 +39,20 @@ _POOL: Optional[AsyncpgPool] = None
 _BACKEND: str = "postgres"
 _UNSET = object()
 
+REQUIRED_TABLES = {
+    "users",
+    "accounts",
+    "comment_logs",
+    "reaction_settings",
+    "warmup_channels",
+    "warmup_logs",
+    "posts",
+}
+
+_ACCOUNT_SESSION_COLUMN = "session_path"
+_HAS_ACCOUNT_SESSION_PATH_COLUMN = True
+_HAS_ACCOUNT_NAME_COLUMN = False
+
 DEFAULT_REACTION_EMOJIS = ['❤️', '👍', '🔥', '🎉', '👏']
 
 
@@ -276,6 +290,8 @@ async def _init_postgres_schema() -> None:
             """
         )
 
+        await _synchronise_account_session_columns(connection)
+
         await connection.execute(
             """
             CREATE TABLE IF NOT EXISTS account_settings (
@@ -335,6 +351,20 @@ async def _init_postgres_schema() -> None:
                 status TEXT NOT NULL,
                 error TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reaction_settings (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                setting_key TEXT NOT NULL,
+                setting_value TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (account_id, setting_key)
             )
             """
         )
@@ -429,6 +459,19 @@ async def _init_postgres_schema() -> None:
 
         await connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS warmup_logs (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                channel TEXT,
+                status TEXT NOT NULL,
+                details TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        await connection.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_account_settings_account_id
             ON account_settings (account_id)
             """
@@ -484,6 +527,63 @@ async def _init_postgres_schema() -> None:
             ADD COLUMN IF NOT EXISTS reactions_enabled BOOLEAN NOT NULL DEFAULT TRUE
             """
         )
+
+        await _verify_required_tables(connection)
+
+
+async def _synchronise_account_session_columns(connection: "asyncpg.connection.Connection") -> None:
+    """Ensure both legacy and new session columns exist and remain in sync."""
+
+    global _ACCOUNT_SESSION_COLUMN, _HAS_ACCOUNT_NAME_COLUMN, _HAS_ACCOUNT_SESSION_PATH_COLUMN
+
+    column_rows = await connection.fetch(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'accounts'
+        """
+    )
+    column_names = {row["column_name"] for row in column_rows}
+
+    has_session_path = "session_path" in column_names
+    has_name = "name" in column_names
+
+    if not has_session_path:
+        await connection.execute("ALTER TABLE accounts ADD COLUMN session_path TEXT")
+        has_session_path = True
+
+    if not has_name:
+        await connection.execute("ALTER TABLE accounts ADD COLUMN name TEXT")
+        has_name = True
+
+    await connection.execute(
+        "UPDATE accounts SET session_path = name WHERE session_path IS NULL AND name IS NOT NULL"
+    )
+    await connection.execute(
+        "UPDATE accounts SET name = session_path WHERE name IS NULL AND session_path IS NOT NULL"
+    )
+
+    _ACCOUNT_SESSION_COLUMN = "session_path" if has_session_path else "name"
+    _HAS_ACCOUNT_SESSION_PATH_COLUMN = has_session_path
+    _HAS_ACCOUNT_NAME_COLUMN = has_name
+
+
+async def _verify_required_tables(connection: "asyncpg.connection.Connection") -> None:
+    existing_rows = await connection.fetch(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name = ANY($1::text[])
+        """,
+        list(REQUIRED_TABLES),
+    )
+    present_tables = {row["table_name"] for row in existing_rows}
+    missing = REQUIRED_TABLES - present_tables
+    if missing:
+        raise RuntimeError(
+            "Missing required database tables: " + ", ".join(sorted(missing))
+        )
+    logger.info("Verified required database tables: %s", sorted(present_tables))
 
 
 async def close_db() -> None:
@@ -634,17 +734,35 @@ async def is_user_authenticated(user_id: int) -> bool:
 async def ensure_account(user_id: int, phone: str, session_path: str) -> Optional[int]:
     """Create or update an account and return its database identifier."""
 
-    row = await _fetchone(
-        """
-        INSERT INTO accounts (user_id, phone, session_path, status, mode)
-        VALUES (?, ?, ?, 'stopped', 'warmup')
+    insert_columns: List[str] = ["user_id", "phone"]
+    insert_values: List[Any] = [user_id, phone]
+    update_clauses: List[str] = []
+
+    if _HAS_ACCOUNT_SESSION_PATH_COLUMN:
+        insert_columns.append("session_path")
+        insert_values.append(session_path)
+        update_clauses.append("session_path = excluded.session_path")
+
+    if _HAS_ACCOUNT_NAME_COLUMN:
+        insert_columns.append("name")
+        insert_values.append(session_path)
+        update_clauses.append("name = excluded.name")
+
+    insert_columns.extend(["status", "mode"])
+    insert_values.extend(["stopped", "warmup"])
+
+    placeholders = ", ".join("?" for _ in insert_values)
+    update_sql = ", ".join(update_clauses + ["updated_at = CURRENT_TIMESTAMP"])
+
+    query = f"""
+        INSERT INTO accounts ({', '.join(insert_columns)})
+        VALUES ({placeholders})
         ON CONFLICT(user_id, phone) DO UPDATE SET
-            session_path = excluded.session_path,
-            updated_at = CURRENT_TIMESTAMP
+            {update_sql}
         RETURNING id
-        """,
-        (user_id, phone, session_path),
-    )
+    """
+
+    row = await _fetchone(query, tuple(insert_values))
     return int(row["id"]) if row is not None else None
 
 
@@ -655,6 +773,11 @@ async def _fetch_accounts(query: str, params: Iterable[Any]) -> List[Dict[str, A
 
 def _convert_account_row(row: Any) -> Dict[str, Any]:
     data = dict(row)
+    session_path = data.get("session_path") or data.get("name") or data.get("session")
+    if session_path is not None:
+        data["session_path"] = session_path
+        if _HAS_ACCOUNT_NAME_COLUMN:
+            data.setdefault("name", session_path)
     data["channels"] = _deserialize_list(data.get("channels"))
     data["warmup_channels"] = _deserialize_list(data.get("warmup_channels"))
     data["reaction_emojis"] = _deserialize_list(data.get("reaction_emojis"))
