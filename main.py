@@ -58,6 +58,7 @@ from db import (
     get_accounts_for_user,
     get_global_statistics,
     get_running_standard_accounts,
+    get_running_warmup_accounts,
     get_running_accounts,
     get_warmup_pending,
     get_warmup_settings,
@@ -1730,26 +1731,52 @@ async def process_account_comments(account: Dict[str, Any]) -> None:
     _schedule_safe_send_comments(user_id, phone, account_id)
 
 
+async def process_single_standard_account(account: Dict[str, Any]) -> None:
+    account_id = account.get("id")
+    phone = account.get("phone")
+    logging.debug("Processing standard account %s (%s)", account_id, phone)
+
+    try:
+        await process_account_reactions(account)
+    except asyncio.CancelledError:
+        raise
+    except Exception as reaction_error:
+        logging.warning(
+            "Failed to process reactions for account %s (phone %s): %s",
+            account_id,
+            phone,
+            reaction_error,
+        )
+
+    try:
+        await process_account_comments(account)
+    except asyncio.CancelledError:
+        raise
+    except Exception as comment_error:
+        logging.warning(
+            "Failed to process comments for account %s (phone %s): %s",
+            account_id,
+            phone,
+            comment_error,
+        )
+
+
 async def process_standard_accounts() -> None:
     logging.info("✅ Processing standard accounts...")
     while True:
         try:
             accounts = await get_running_standard_accounts()
-            logging.debug(
-                "Standard accounts worker fetched %d accounts",
-                len(accounts),
-            )
+            logging.info("Found %d running standard accounts", len(accounts))
             for account in accounts:
-                account_id = account.get("id")
                 try:
-                    await process_account_reactions(account)
-                    await process_account_comments(account)
+                    await process_single_standard_account(account)
                 except asyncio.CancelledError:
                     raise
                 except Exception as account_error:
+                    account_id = account.get("id")
                     phone = account.get("phone")
                     logging.warning(
-                        "Failed to process account %s (phone %s): %s",
+                        "Unhandled error while processing account %s (phone %s): %s",
                         account_id,
                         phone,
                         account_error,
@@ -2281,7 +2308,8 @@ async def ensure_latest_warmup_settings(force: bool = False) -> WarmupSettingsDa
 
 # Ограничение одновременных подключений
 MAX_CONCURRENT_ACCOUNTS = 5
-ACCOUNT_CHECK_INTERVAL = 60
+ACCOUNT_CHECK_INTERVAL = 300  # 5 минут для стандартных аккаунтов
+WARMUP_CHECK_INTERVAL = 600   # 10 минут для warmup аккаунтов
 ACCOUNT_LAUNCH_STAGGER_SECONDS = 3
 ACCOUNT_LAUNCH_JITTER_SECONDS = 2
 COMMENT_TO_REACTION_PAUSE_SECONDS = 1.5
@@ -4709,8 +4737,168 @@ async def join_channel(
             return False, error_msg
 
 
+
+async def process_single_warmup_account(
+    account: Dict[str, Any],
+    *,
+    now: datetime,
+    current_settings: Any,
+    daily_limit: int,
+    add_summary: Any,
+) -> None:
+    """Обрабатывает отдельный аккаунт прогрева: комментарии, реакции и вступление в каналы."""
+
+    await process_single_standard_account(account)
+
+    account_id = account.get("id")
+    if account_id is None:
+        return
+
+    session_key_raw = account.get("phone")
+    user_id_raw = account.get("user_id")
+
+    if session_key_raw is None or user_id_raw is None:
+        return
+
+    session_key = str(session_key_raw)
+
+    try:
+        user_id = int(user_id_raw)
+    except (TypeError, ValueError):
+        logging.debug("Warmup: invalid user id for account %s", account_id)
+        return
+
+    key = make_session_key(user_id, session_key)
+
+    logging.debug("Warmup: Processing account %s, active: %s", session_key, active_sessions.get(key))
+    add_summary("debug", f"Processing account {session_key}, active={active_sessions.get(key)}")
+
+    warmup_end = _parse_warmup_datetime(account.get("warmup_end_at"))
+    if warmup_end:
+        account["warmup_end_at"] = warmup_end
+        if warmup_end <= now:
+            await set_account_mode(account_id, "standard", warmup_days=None)
+            return
+
+    warmup_last_join_at = _parse_warmup_datetime(account.get("warmup_last_join_at"))
+    if warmup_last_join_at:
+        account["warmup_last_join_at"] = warmup_last_join_at
+
+    if warmup_last_join_at and warmup_last_join_at.date() < now.date():
+        await reset_warmup_daily_state(account_id)
+        account["warmup_joined_today"] = 0
+
+    next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
+    if next_join_at:
+        account["warmup_next_join_at"] = next_join_at
+    if next_join_at and next_join_at > now:
+        return
+
+    joined_today = account.get("warmup_joined_today", 0)
+    logging.debug("Warmup: Account %s joined today: %s/%s", session_key, joined_today, daily_limit)
+    add_summary("debug", f"{session_key}: {joined_today}/{daily_limit} joins")
+
+    if joined_today >= daily_limit:
+        message = f"Account {session_key} reached daily limit, skipping"
+        logging.info("Warmup: %s", message)
+        add_summary("info", message)
+        next_window_start = _next_join_window_start(now, current_settings)
+        next_time = plan_next_warmup_join(next_window_start, current_settings)
+        await db_update_warmup_schedule(account_id, next_join=next_time)
+        logging.info(
+            "Warmup schedule: account %s (%s) next join at %s",
+            account_id,
+            session_key,
+            next_time.isoformat(),
+        )
+        account["warmup_next_join_at"] = next_time
+        return
+
+    pending_channels = await get_warmup_pending(account_id, limit=1, reset_if_empty=True)
+    logging.debug("Warmup: Account %s pending channels: %s", session_key, len(pending_channels))
+    add_summary("debug", f"{session_key}: pending channels {len(pending_channels)}")
+
+    if not pending_channels:
+        message = f"Account {session_key} has no pending channels, skipping"
+        logging.info("Warmup: %s", message)
+        add_summary("info", message)
+        next_time = _get_next_warmup_join(now, current_settings)
+        await db_update_warmup_schedule(account_id, next_join=next_time)
+        logging.info(
+            "Warmup schedule: account %s (%s) next join at %s",
+            account_id,
+            session_key,
+            next_time.isoformat(),
+        )
+        account["warmup_next_join_at"] = next_time
+        return
+
+    channel_entry = pending_channels[0]
+    channel = channel_entry["channel"]
+
+    session_file = os.path.join(SESSIONS_BASE_DIR, str(user_id), f"{session_key}.session")
+    if not os.path.exists(session_file):
+        warning_message = (
+            f"Аккаунт {session_key} (прогрев) - файл сессии не найден: {session_file}"
+        )
+        logging.warning("Warmup: %s", warning_message)
+        add_summary("warning", warning_message)
+        await set_account_mode(account_id, "standard", warmup_days=None)
+        return
+
+    try:
+        success, error_reason = await join_channel(
+            channel, account_id, session_key, user_id, is_warmup=True
+        )
+    except TransientJoinError as transient_error:
+        transient_message = (
+            transient_error.message if hasattr(transient_error, "message") else str(transient_error)
+        )
+        warning_message = (
+            f"Account {session_key} временная ошибка вступления в {channel}: {transient_message}. Повторим позже."
+        )
+        logging.warning("Warmup: %s", warning_message)
+        add_summary("warning", warning_message)
+        backoff_seconds = random.uniform(15, 45)
+        retry_time = datetime.now(timezone.utc) + timedelta(seconds=backoff_seconds)
+        await db_update_warmup_schedule(account_id, next_join=retry_time)
+        account["warmup_next_join_at"] = retry_time
+        await asyncio.sleep(min(backoff_seconds, 5))
+        return
+
+    if not success:
+        if error_reason and any(
+            phrase in error_reason.lower()
+            for phrase in ("занят", "запускается")
+        ):
+            info_message = f"Account {session_key} занят ({error_reason}), повторим позже"
+            logging.info("Warmup: %s", info_message)
+            add_summary("info", info_message)
+            return
+        await set_account_mode(account_id, "standard", warmup_days=None)
+        return
+
+    success_message = f"Account {session_key} joined {channel}"
+    logging.info("Warmup: %s", success_message)
+    add_summary("info", success_message)
+
+    post_join_now = datetime.now(timezone.utc)
+    next_time = _get_next_warmup_join(post_join_now, current_settings)
+    await db_update_warmup_schedule(account_id, next_join=next_time)
+    logging.info(
+        "Warmup schedule: account %s (%s) next join at %s",
+        account_id,
+        session_key,
+        next_time.isoformat(),
+    )
+    account["warmup_next_join_at"] = next_time
+
+
 async def process_warmup_accounts():
     """Фоновая задача для добавления каналов в режиме прогрева (во время сна)"""
+
+    logging.info("✅ Processing warmup accounts...")
+
     while True:
         current_settings = get_current_warmup_settings()
         iteration_notifications: List[Tuple[str, str]] = []
@@ -4724,8 +4912,7 @@ async def process_warmup_accounts():
             now = datetime.now(timezone.utc)
             is_warmup_join_time = is_warmup_join_period(now)
             daily_limit = current_settings.channels_per_day
-            
-            # Логируем каждые 10 минут для отладки
+
             if now.minute % 10 == 0:
                 message = (
                     f"Warmup check: {now.strftime('%H:%M')} UTC, "
@@ -4733,167 +4920,55 @@ async def process_warmup_accounts():
                 )
                 logging.debug(message)
                 add_summary("debug", message)
-            
-            # Проверяем, находимся ли мы в периоде для вступления в каналы (во время сна)
+
             if not is_warmup_join_time:
                 await asyncio.sleep(WARMUP_SCAN_INTERVAL_SECONDS)
                 continue
-            
+
+            warmup_accounts = await get_running_warmup_accounts()
             all_accounts = await get_running_accounts()
-            accounts = [acc for acc in all_accounts if acc.get("mode") == "warmup"]
-            random.shuffle(accounts)
-            
-            logging.debug(
-                "Warmup: Found %s running accounts, %s in warmup mode",
-                len(all_accounts),
-                len(accounts),
+
+            logging.info("Found %d running warmup accounts", len(warmup_accounts))
+            add_summary(
+                "info",
+                f"Running accounts: {len(all_accounts)}, warmup: {len(warmup_accounts)}",
             )
-            add_summary("info", f"Running accounts: {len(all_accounts)}, warmup: {len(accounts)}")
+
+            random.shuffle(warmup_accounts)
+
             logging.debug("Warmup: Active sessions: %s", list(active_sessions.keys()))
             add_summary("debug", f"Active sessions: {list(active_sessions.keys())}")
 
-            for account in accounts:
-                if account.get("mode") != "warmup":
-                    continue
-
-                # Аккаунты в режиме прогрева комментируют как обычно,
-                # но дополнительно вступают в каналы во время сна
-                session_key = account["phone"]
-                user_id = account["user_id"]
-                key = make_session_key(user_id, session_key)
-                
-                logging.debug("Warmup: Processing account %s, active: %s", session_key, active_sessions.get(key))
-                add_summary("debug", f"Processing account {session_key}, active={active_sessions.get(key)}")
-
-                # Проверяем, не истек ли период прогрева
-                warmup_end = _parse_warmup_datetime(account.get("warmup_end_at"))
-                if warmup_end:
-                    account["warmup_end_at"] = warmup_end
-                    if warmup_end <= now:
-                        await set_account_mode(account["id"], "standard", warmup_days=None)
-                        continue
-
-                # Сбрасываем дневной счетчик если новый день
-                warmup_last_join_at = _parse_warmup_datetime(account.get("warmup_last_join_at"))
-                if warmup_last_join_at:
-                    account["warmup_last_join_at"] = warmup_last_join_at
-
-                if warmup_last_join_at and warmup_last_join_at.date() < now.date():
-                    await reset_warmup_daily_state(account["id"])
-                    account["warmup_joined_today"] = 0
-
-                next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
-                if next_join_at and next_join_at > now:
-                    continue
-
-                # Проверяем, не достигли ли дневного лимита
-                joined_today = account.get("warmup_joined_today", 0)
-                logging.debug("Warmup: Account %s joined today: %s/%s", session_key, joined_today, daily_limit)
-                add_summary("debug", f"{session_key}: {joined_today}/{daily_limit} joins")
-
-                if joined_today >= daily_limit:
-                    message = f"Account {session_key} reached daily limit, skipping"
-                    logging.info("Warmup: %s", message)
-                    add_summary("info", message)
-                    next_window_start = _next_join_window_start(now, current_settings)
-                    next_time = plan_next_warmup_join(next_window_start, current_settings)
-                    await db_update_warmup_schedule(account["id"], next_join=next_time)
-                    logging.info(
-                        "Warmup schedule: account %s (%s) next join at %s",
-                        account["id"],
-                        session_key,
-                        next_time.isoformat(),
-                    )
-                    account["warmup_next_join_at"] = next_time
-                    continue
-
-                # Получаем следующий канал для добавления
-                pending_channels = await get_warmup_pending(account["id"], limit=1, reset_if_empty=True)
-                logging.debug("Warmup: Account %s pending channels: %s", session_key, len(pending_channels))
-                add_summary("debug", f"{session_key}: pending channels {len(pending_channels)}")
-
-                if not pending_channels:
-                    message = f"Account {session_key} has no pending channels, skipping"
-                    logging.info("Warmup: %s", message)
-                    add_summary("info", message)
-                    next_time = _get_next_warmup_join(now, current_settings)
-                    await db_update_warmup_schedule(account["id"], next_join=next_time)
-                    logging.info(
-                        "Warmup schedule: account %s (%s) next join at %s",
-                        account["id"],
-                        session_key,
-                        next_time.isoformat(),
-                    )
-                    account["warmup_next_join_at"] = next_time
-                    continue
-
-                channel_entry = pending_channels[0]
-                channel = channel_entry["channel"]
-
-                # Проверяем существование файла сессии
-                session_file = os.path.join(SESSIONS_BASE_DIR, str(user_id), f"{session_key}.session")
-                if not os.path.exists(session_file):
-                    warning_message = (
-                        f"Аккаунт {session_key} (прогрев) - файл сессии не найден: {session_file}"
-                    )
-                    logging.warning("Warmup: %s", warning_message)
-                    add_summary("warning", warning_message)
-                    # Переключаем в стандартный режим если нет сессии
-                    await set_account_mode(account["id"], "standard", warmup_days=None)
-                    continue
-
-                # Используем единую функцию для вступления в канал прогрева
+            for account in warmup_accounts:
                 try:
-                    success, error_reason = await join_channel(
-                        channel, account["id"], session_key, user_id, is_warmup=True
+                    await process_single_warmup_account(
+                        account,
+                        now=now,
+                        current_settings=current_settings,
+                        daily_limit=daily_limit,
+                        add_summary=add_summary,
                     )
-                except TransientJoinError as transient_error:
-                    transient_message = transient_error.message if hasattr(transient_error, "message") else str(transient_error)
-                    warning_message = (
-                        f"Account {session_key} временная ошибка вступления в {channel}: {transient_message}. Повторим позже."
+                except asyncio.CancelledError:
+                    raise
+                except Exception as account_error:
+                    phone = account.get("phone")
+                    logging.warning(
+                        "Failed to process warmup account %s (phone %s): %s",
+                        account.get("id"),
+                        phone,
+                        account_error,
                     )
-                    logging.warning("Warmup: %s", warning_message)
-                    add_summary("warning", warning_message)
-                    backoff_seconds = random.uniform(15, 45)
-                    retry_time = datetime.now(timezone.utc) + timedelta(seconds=backoff_seconds)
-                    await db_update_warmup_schedule(account["id"], next_join=retry_time)
-                    account["warmup_next_join_at"] = retry_time
-                    await asyncio.sleep(min(backoff_seconds, 5))
-                    continue
+                    add_summary(
+                        "warning",
+                        f"Failed to process warmup account {phone}: {account_error}",
+                    )
 
-                if not success:
-                    if error_reason and any(
-                        phrase in error_reason.lower()
-                        for phrase in ("занят", "запускается")
-                    ):
-                        info_message = f"Account {session_key} занят ({error_reason}), повторим позже"
-                        logging.info("Warmup: %s", info_message)
-                        add_summary("info", info_message)
-                        continue
-                    # Если сессия истекла - переключаем в стандартный режим
-                    await set_account_mode(account["id"], "standard", warmup_days=None)
-                    continue
-
-                success_message = f"Account {session_key} joined {channel}"
-                logging.info("Warmup: %s", success_message)
-                add_summary("info", success_message)
-
-                post_join_now = datetime.now(timezone.utc)
-                next_time = _get_next_warmup_join(post_join_now, current_settings)
-                await db_update_warmup_schedule(account["id"], next_join=next_time)
-                logging.info(
-                    "Warmup schedule: account %s (%s) next join at %s",
-                    account["id"],
-                    session_key,
-                    next_time.isoformat(),
-                )
-                account["warmup_next_join_at"] = next_time
-
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logging.exception("Warmup loop error: %s", e)
             add_summary("error", f"Warmup loop error: {e}")
 
-        # Ждем случайный интервал до следующей попытки, чтобы имитировать живое поведение
         if iteration_notifications:
             summary_lines = [f"{level.upper()}: {message}" for level, message in iteration_notifications]
             timestamp = datetime.now(timezone.utc).strftime('%H:%M:%S')
@@ -4905,7 +4980,9 @@ async def process_warmup_accounts():
             except Exception:
                 logging.exception("Failed to send warmup summary notification")
 
-        await asyncio.sleep(_get_human_delay_seconds(current_settings))
+        delay_seconds = max(WARMUP_CHECK_INTERVAL, _get_human_delay_seconds(current_settings))
+        await asyncio.sleep(delay_seconds)
+
 
 async def _disconnect_client_safely(client: Optional[Client]) -> None:
     if not client:
