@@ -16,12 +16,14 @@ import re
 from pyrogram import Client, filters
 from pyrogram.errors import (
     ChatWriteForbidden,
+    MessageIdInvalid,
     PasswordHashInvalid,
     PhoneCodeExpired,
     PhoneCodeInvalid,
     ReactionInvalid,
     SessionPasswordNeeded,
     UserAlreadyParticipant,
+    UserBannedInChannel,
 )
 from sqlite3 import OperationalError
 from threading import Lock
@@ -41,6 +43,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from comment_engine import generate_comment
 from db import (
     add_comment_log,
+    add_to_channel_blacklist,
     bulk_update_reaction_settings,
     count_reactions_for_message,
     db_update_warmup_schedule,
@@ -61,6 +64,7 @@ from db import (
     increment_warmup_joined,
     init_db,
     is_user_authenticated,
+    is_channel_blacklisted,
     mark_account_running,
     mark_account_stopped,
     mark_warmup_channel_joined,
@@ -1208,61 +1212,41 @@ async def _maybe_send_reaction(
             )
             reaction_sent = True
             break
-        except ReactionInvalid as reaction_error:
-            last_reaction_error = reaction_error
-            refreshed_allowed = await _get_chat_available_quick_reactions(
-                client,
-                chat_id_for_reactions,
-                force_refresh=True,
-            )
-            if refreshed_allowed is not None:
-                allowed_reaction_emojis = refreshed_allowed
-            invalid_emojis: Set[str] = {reaction_emoji}
-            if refreshed_allowed is not None:
-                invalid_emojis.update(
-                    {
-                        emoji
-                        for emoji in working_reaction_emojis
-                        if emoji not in refreshed_allowed
-                    }
-                )
-                working_reaction_emojis = [
-                    emoji
-                    for emoji in working_reaction_emojis
-                    if emoji in refreshed_allowed
-                ]
-            else:
-                invalid_emojis.update(working_reaction_emojis)
-                working_reaction_emojis = []
-
-            invalid_text = " ".join(sorted(invalid_emojis)) if invalid_emojis else str(reaction_emoji)
-            reason = (
-                f"reaction invalid for emoji {reaction_emoji}: "
-                f"unsupported emojis {invalid_text}"
-            )
-            last_reaction_error_text = reason
+        except UserBannedInChannel as ban_error:
+            if channel_for_reactions:
+                try:
+                    await add_to_channel_blacklist(
+                        account_id,
+                        channel_for_reactions,
+                        "USER_BANNED_IN_CHANNEL",
+                    )
+                except Exception:
+                    logging.exception(
+                        "Failed to add channel %s to blacklist",
+                        channel_for_reactions,
+                    )
             logging.warning(
-                "Reaction invalid for chat %s with emojis %s: %s",
-                chat_id_for_reactions,
-                invalid_text,
+                "Account %s banned in channel %s while sending reaction: %s",
+                account_id,
+                channel_for_reactions,
+                ban_error,
+            )
+            return current_last_reaction_at, False
+        except MessageIdInvalid as invalid_error:
+            logging.warning(
+                "Invalid message ID for account %s while sending reaction: %s",
+                account_id,
+                invalid_error,
+            )
+            return current_last_reaction_at, False
+        except ReactionInvalid as reaction_error:
+            logging.warning(
+                "Invalid reaction for account %s in channel %s: %s",
+                account_id,
+                channel_for_reactions,
                 reaction_error,
             )
-            if working_reaction_emojis:
-                continue
-
-            enqueue_skip_log(
-                session,
-                "reaction",
-                f"{reason}{reaction_comment_context}",
-            )
-            await asyncio.sleep(0.2)
-            await add_comment_log(
-                account_id,
-                channel=str(getattr(getattr(message, "chat", None), "id", "")),
-                message_id=message.id,
-                status=f'reaction_skipped{status_suffix}',
-                error=reason,
-            )
+            return current_last_reaction_at, False
         except Exception as reaction_error:
             last_reaction_error = reaction_error
             last_reaction_error_text = str(reaction_error)
@@ -1463,16 +1447,51 @@ async def process_channel_reactions(
     else:
         channel_name = channel
 
+    candidate_identifier = str(channel_name)
+    if candidate_identifier and await is_channel_blacklisted(account_id, candidate_identifier):
+        logging.debug(
+            "Skipping blacklisted channel %s for account %s before reaction fetch",
+            candidate_identifier,
+            account_id,
+        )
+        return last_reaction_at
+
     try:
         chat = await client.get_chat(channel_name)
     except asyncio.CancelledError:
         raise
+    except UserBannedInChannel as exc:
+        identifier = str(channel_name)
+        try:
+            await add_to_channel_blacklist(account_id, identifier, "USER_BANNED_IN_CHANNEL")
+        except Exception:
+            logging.exception(
+                "Failed to add channel %s to blacklist for account %s",
+                identifier,
+                account_id,
+            )
+        logging.warning(
+            "Account %s banned in channel %s during reaction scan: %s",
+            account_id,
+            identifier,
+            exc,
+        )
+        return last_reaction_at
     except Exception as exc:
         logging.error(
             "Error loading channel %s for account %s: %s",
             channel_name,
             account_id,
             exc,
+        )
+        return last_reaction_at
+
+    channel_identifier = str(getattr(chat, "id", channel_name))
+    if channel_identifier and await is_channel_blacklisted(account_id, channel_identifier):
+        logging.debug(
+            "Skipping blacklisted channel %s for account %s during reaction scan",
+            channel_identifier,
+            account_id,
         )
         return last_reaction_at
 
@@ -1728,17 +1747,19 @@ async def process_standard_accounts() -> None:
                 except asyncio.CancelledError:
                     raise
                 except Exception as account_error:
-                    logging.error(
-                        "Error processing account %s in standard worker: %s",
+                    phone = account.get("phone")
+                    logging.warning(
+                        "Failed to process account %s (phone %s): %s",
                         account_id,
+                        phone,
                         account_error,
                     )
-            await asyncio.sleep(60)
+            await asyncio.sleep(ACCOUNT_CHECK_INTERVAL)
         except asyncio.CancelledError:
             raise
         except Exception as loop_error:
             logging.error("Standard accounts loop error: %s", loop_error)
-            await asyncio.sleep(30)
+            await asyncio.sleep(60)
 
 
 async def _handle_linked_channel_message(
@@ -1830,6 +1851,14 @@ async def _handle_linked_channel_message(
     except (TypeError, ValueError):
         numeric_message_id = None
 
+    if channel_identifier and await is_channel_blacklisted(account_id, channel_identifier):
+        logging.debug(
+            "Skipping blacklisted channel %s for account %s in linked handler",
+            channel_identifier,
+            account_id,
+        )
+        return current_last_reaction_at
+
     if channel_identifier and numeric_message_id is not None:
         try:
             await record_post(
@@ -1915,7 +1944,57 @@ async def _handle_linked_channel_message(
                 )
                 return current_last_reaction_at
             else:
-                msg = await client.send_message(message.chat.id, comment, reply_to_message_id=message.id)
+                try:
+                    msg = await client.send_message(
+                        message.chat.id,
+                        comment,
+                        reply_to_message_id=message.id,
+                    )
+                except UserBannedInChannel as ban_error:
+                    if channel_identifier:
+                        try:
+                            await add_to_channel_blacklist(
+                                account_id,
+                                channel_identifier,
+                                "USER_BANNED_IN_CHANNEL",
+                            )
+                        except Exception:
+                            logging.exception(
+                                "Failed to add channel %s to blacklist for account %s",
+                                channel_identifier,
+                                account_id,
+                            )
+                    logging.warning(
+                        "Account %s banned in channel %s while commenting: %s",
+                        account_id,
+                        channel_identifier,
+                        ban_error,
+                    )
+                    await asyncio.sleep(0.2)
+                    await add_comment_log(
+                        account_id,
+                        channel=channel_identifier,
+                        message_id=numeric_message_id,
+                        status='channel_blacklisted',
+                        error='USER_BANNED_IN_CHANNEL',
+                    )
+                    return current_last_reaction_at
+                except MessageIdInvalid as invalid_error:
+                    logging.warning(
+                        "Invalid message ID for account %s in channel %s: %s",
+                        account_id,
+                        channel_identifier,
+                        invalid_error,
+                    )
+                    await asyncio.sleep(0.2)
+                    await add_comment_log(
+                        account_id,
+                        channel=channel_identifier,
+                        message_id=numeric_message_id,
+                        status='comment_skipped',
+                        error='message id invalid',
+                    )
+                    return current_last_reaction_at
 
                 post_base_link = _build_post_link(msg, message)
                 comment_link = f"{post_base_link}?comment={msg.id}"
@@ -2202,6 +2281,7 @@ async def ensure_latest_warmup_settings(force: bool = False) -> WarmupSettingsDa
 
 # Ограничение одновременных подключений
 MAX_CONCURRENT_ACCOUNTS = 5
+ACCOUNT_CHECK_INTERVAL = 60
 ACCOUNT_LAUNCH_STAGGER_SECONDS = 3
 ACCOUNT_LAUNCH_JITTER_SECONDS = 2
 COMMENT_TO_REACTION_PAUSE_SECONDS = 1.5
@@ -4384,6 +4464,15 @@ async def send_comments(userid, session, account_id):
                 if channel_id is None or message_id is None:
                     return
 
+                channel_identifier = str(channel_id)
+                if await is_channel_blacklisted(account_id, channel_identifier):
+                    logging.debug(
+                        "Skipping blacklisted channel %s for account %s in channel handler",
+                        channel_identifier,
+                        account_id,
+                    )
+                    return
+
                 try:
                     await record_post(
                         account_id,
@@ -5322,25 +5411,33 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
 
 
 async def safe_send_comments(user_id, phone, account_id):
-    """Безопасная обертка для send_comments с обработкой исключений"""
+    """Запускает send_comments и различает критические и некритические ошибки."""
     try:
         await send_comments(user_id, phone, account_id)
     except Exception as e:
-        logging.exception("Error in send_comments for account %s: %s", account_id, e)
-        # Останавливаем аккаунт при критической ошибке
-        try:
-            await mark_account_stopped(account_id)
-        except sqlite3.OperationalError as db_exc:
-            logging.error(
-                "Failed to mark account %s stopped after retries: %s",
-                account_id,
-                db_exc,
-            )
+        error_text = str(e)
+        lowered = error_text.lower()
         key = make_session_key(user_id, phone)
-        active_sessions.pop(key, None)
-        active_account_ids.pop(key, None)
-        active_pyrogram_clients.pop(key, None)
-        _release_session_lock(key)
+        critical_keywords = ("auth", "session", "phone", "flood", "ban", "deleted")
+
+        if any(keyword in lowered for keyword in critical_keywords):
+            logging.error("CRITICAL error for account %s: %s", account_id, e)
+            try:
+                await mark_account_stopped(account_id)
+            except OperationalError as db_exc:
+                logging.error(
+                    "Failed to mark account %s stopped after retries: %s",
+                    account_id,
+                    db_exc,
+                )
+            active_sessions.pop(key, None)
+            active_account_ids.pop(key, None)
+            active_pyrogram_clients.pop(key, None)
+            quiet_sessions_notified.discard(key)
+            _release_session_lock(key)
+        else:
+            logging.warning("Non-critical error for account %s: %s", account_id, e)
+            # Аккаунт продолжит работу в основном цикле без очистки ресурсов
 
 
 async def format_channels_display(
