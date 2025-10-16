@@ -57,6 +57,7 @@ from db import (
     get_account_by_session,
     get_accounts_for_user,
     get_global_statistics,
+    auto_start_warmup_accounts,
     get_running_standard_accounts,
     get_running_warmup_accounts,
     get_running_accounts,
@@ -1012,6 +1013,34 @@ async def _get_chat_available_quick_reactions(
     return allowed
 
 
+async def safe_get_chat_history(
+    client: Client,
+    chat_id: Union[int, str],
+    *,
+    limit: int = 1,
+) -> Optional[Any]:
+    """Fetch chat history safely across Pyrogram versions that return async generators."""
+
+    try:
+        history_iter = client.get_chat_history(chat_id, limit=limit)
+        first_message: Optional[Any] = None
+        async for candidate in history_iter:
+            first_message = candidate
+            break
+        return first_message
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logging.error("Error in safe_get_chat_history for %s: %s", chat_id, exc)
+        return None
+
+
+async def safe_get_message_for_reactions(client: Client, chat_id: Union[int, str]) -> Optional[Any]:
+    """Return the most recent message for reaction processing."""
+
+    return await safe_get_chat_history(client, chat_id, limit=1)
+
+
 async def _maybe_send_reaction(
     *,
     client: Client,
@@ -1496,28 +1525,15 @@ async def process_channel_reactions(
         )
         return last_reaction_at
 
-    try:
-        history = await client.get_chat_history(chat.id, limit=1)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        logging.error(
-            "Error loading history for channel %s (account %s): %s",
-            channel_name,
-            account_id,
-            exc,
-        )
-        return last_reaction_at
+    message = await safe_get_message_for_reactions(client, chat.id)
 
-    if not history:
+    if message is None:
         logging.debug(
             "No recent messages in channel %s for account %s",
             channel_name,
             account_id,
         )
         return last_reaction_at
-
-    message = history[0]
     post_base_link = _build_post_link(message, message)
 
     try:
@@ -2137,9 +2153,9 @@ def load_schedule_config():
 
     default_config = {
         "quiet_period": {"start_hour": 8, "start_minute": 0, "end_hour": 20, "end_minute": 0},
-        "warmup_period": {"start_hour": 12, "start_minute": 0, "end_hour": 19, "end_minute": 0},
+        "warmup_period": {"start_hour": 9, "start_minute": 0, "end_hour": 23, "end_minute": 0},
         # Значения по умолчанию используются как резерв, реальные настройки читаются из БД
-        "warmup_settings": {"channels_per_day": 15, "delay_minutes": 7, "default_days": 7},
+        "warmup_settings": {"channels_per_day": 10, "delay_minutes": 30, "default_days": 7},
     }
 
     try:
@@ -2173,6 +2189,7 @@ QUIET_END_HOUR = SCHEDULE_CONFIG["quiet_period"]["end_hour"]
 QUIET_END_MINUTE = SCHEDULE_CONFIG["quiet_period"]["end_minute"]
 
 MOSCOW_UTC_OFFSET_MINUTES = 3 * 60
+MOSCOW_TZ = timezone(timedelta(hours=3))
 
 
 def _format_time_with_offset(hour: int, minute: int, offset_minutes: int = 0) -> str:
@@ -2259,6 +2276,25 @@ def format_warmup_settings(settings: WarmupSettingsData) -> str:
         f"• Окно вступлений: {settings.format_window()}\n"
         f"• Интервал между вступлениями (мин): {settings.delay_minutes}"
     )
+
+
+def get_moscow_time() -> datetime:
+    """Возвращает текущее время в московском часовом поясе."""
+
+    utc_now = datetime.now(timezone.utc)
+    return utc_now.astimezone(MOSCOW_TZ)
+
+
+def _to_moscow_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(MOSCOW_TZ)
+
+
+def _ensure_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _get_delay_bounds(settings: WarmupSettingsData) -> tuple[int, int]:
@@ -2389,29 +2425,35 @@ def _get_human_delay_seconds(settings: Optional[WarmupSettingsData] = None) -> i
 
 def _next_join_window_start(reference: datetime, settings: Optional[WarmupSettingsData] = None) -> datetime:
     settings = settings or get_current_warmup_settings()
-    start_time = settings.window_start
-    start = datetime.combine(reference.date(), start_time).replace(tzinfo=timezone.utc)
+    reference_utc = _ensure_utc_datetime(reference)
+    reference_moscow = reference_utc.astimezone(MOSCOW_TZ)
+
+    start_today = datetime.combine(
+        reference_moscow.date(),
+        settings.window_start,
+        tzinfo=MOSCOW_TZ,
+    )
 
     if settings.spans_midnight:
-        # Для окон через полночь следующий старт — сегодняшний вечер,
-        # если мы еще не достигли его, иначе +1 день
-        if reference.time() < settings.window_end and reference < start:
-            return start
-        if reference >= start:
-            return start + timedelta(days=1)
-        return start
+        if reference_moscow.time() < settings.window_end:
+            next_start = start_today
+        elif reference_moscow >= start_today:
+            next_start = start_today + timedelta(days=1)
+        else:
+            next_start = start_today
+    else:
+        if reference_moscow < start_today:
+            next_start = start_today
+        else:
+            next_start = start_today + timedelta(days=1)
 
-    if start <= reference:
-        start = datetime.combine(
-            reference.date() + timedelta(days=1),
-            start_time,
-        ).replace(tzinfo=timezone.utc)
-    return start
+    return next_start.astimezone(timezone.utc)
 
 
 def _warmup_window_duration(settings: WarmupSettingsData) -> timedelta:
-    start_dt = datetime.combine(datetime.now(timezone.utc).date(), settings.window_start)
-    end_dt = datetime.combine(datetime.now(timezone.utc).date(), settings.window_end)
+    today = get_moscow_time().date()
+    start_dt = datetime.combine(today, settings.window_start, tzinfo=MOSCOW_TZ)
+    end_dt = datetime.combine(today, settings.window_end, tzinfo=MOSCOW_TZ)
     duration = end_dt - start_dt
     if duration <= timedelta(0):
         duration += timedelta(days=1)
@@ -2419,22 +2461,35 @@ def _warmup_window_duration(settings: WarmupSettingsData) -> timedelta:
 
 
 def _resolve_window_start(reference: datetime, settings: WarmupSettingsData) -> datetime:
-    start_time = settings.window_start
-    base_start = datetime.combine(reference.date(), start_time).replace(tzinfo=timezone.utc)
+    reference_utc = _ensure_utc_datetime(reference)
+    reference_moscow = reference_utc.astimezone(MOSCOW_TZ)
+    start_today = datetime.combine(
+        reference_moscow.date(),
+        settings.window_start,
+        tzinfo=MOSCOW_TZ,
+    )
 
     if settings.spans_midnight:
-        if reference.time() < settings.window_end:
-            return base_start - timedelta(days=1)
-        if reference >= base_start:
-            return base_start
-        return base_start
+        if reference_moscow.time() < settings.window_end:
+            target_start = start_today - timedelta(days=1)
+        elif reference_moscow >= start_today:
+            target_start = start_today
+        else:
+            target_start = start_today
+    else:
+        end_today = datetime.combine(
+            reference_moscow.date(),
+            settings.window_end,
+            tzinfo=MOSCOW_TZ,
+        )
+        if reference_moscow < start_today:
+            target_start = start_today
+        elif reference_moscow >= end_today:
+            target_start = start_today + timedelta(days=1)
+        else:
+            target_start = start_today
 
-    end_dt = datetime.combine(reference.date(), settings.window_end).replace(tzinfo=timezone.utc)
-    if reference < base_start:
-        return base_start
-    if reference >= end_dt:
-        return base_start + timedelta(days=1)
-    return base_start
+    return target_start.astimezone(timezone.utc)
 
 
 def plan_next_warmup_join(earliest: datetime, settings: Optional[WarmupSettingsData] = None) -> datetime:
@@ -2485,9 +2540,14 @@ def is_quiet_period(now: datetime | None = None) -> bool:
 
 
 def is_warmup_sleep_period(now: datetime | None = None) -> bool:
-    """Проверяет, находимся ли мы в периоде сна для прогрева (настраивается через env)"""
-    now = now or datetime.now(timezone.utc)
-    current_time = now.time()
+    """Проверяет, находимся ли мы в периоде сна для прогрева (по времени МСК)."""
+
+    if now is None:
+        now_moscow = get_moscow_time()
+    else:
+        now_moscow = _to_moscow_datetime(now)
+
+    current_time = now_moscow.time()
     settings = get_current_warmup_settings()
     start = settings.window_start
     end = settings.window_end
@@ -2497,11 +2557,30 @@ def is_warmup_sleep_period(now: datetime | None = None) -> bool:
 
     return start <= current_time < end
 
+
 def is_warmup_join_period(now: datetime | None = None) -> bool:
-    """Проверяет, находимся ли мы в периоде для вступления в каналы прогрева (во время сна)"""
-    now = now or datetime.now(timezone.utc)
-    # Вступаем в каналы в период прогрева (12:00-19:00 UTC)
-    return is_warmup_sleep_period(now)
+    """Проверяет, находимся ли мы в периоде для вступления в каналы прогрева (по МСК)."""
+
+    if now is None:
+        now_moscow = get_moscow_time()
+    else:
+        now_moscow = _to_moscow_datetime(now)
+
+    current_settings = get_current_warmup_settings()
+    current_time = now_moscow.time()
+    start_time = time(
+        current_settings.join_start_hour,
+        current_settings.join_start_minute,
+    )
+    end_time = time(
+        current_settings.join_end_hour,
+        current_settings.join_end_minute,
+    )
+
+    if current_settings.spans_midnight:
+        return current_time >= start_time or current_time <= end_time
+
+    return start_time <= current_time <= end_time
 
 async def check_account(user_id, phone):
     key = make_session_key(user_id, phone)
@@ -4389,7 +4468,11 @@ async def add_channels(message: Message, state: FSMContext) -> None:
                 else:
                     try:
                         await join_channel(
-                            chl, account_id, session, message.from_user.id, is_warmup=False
+                            chl,
+                            account_id,
+                            session,
+                            message.from_user.id,
+                            is_warmup=False,
                         )
                     except TransientJoinError as transient_error:
                         await bot.send_message(
@@ -4621,6 +4704,9 @@ async def join_channel(
     session_key: str,
     user_id: int,
     is_warmup: bool = False,
+    *,
+    acquire_lock: bool = True,
+    join_target: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
     """Единая функция для вступления в канал (обычный или прогрев).
 
@@ -4654,9 +4740,11 @@ async def join_channel(
 
         key = make_session_key(user_id, session_key)
 
+        target_for_join = join_target or channel
+
         async def _join_with_client(client_obj: Client) -> Tuple[bool, Optional[str]]:
             try:
-                await client_obj.join_chat(channel)
+                await client_obj.join_chat(target_for_join)
 
                 if is_warmup:
                     # Для каналов прогрева - обновляем БД
@@ -4733,6 +4821,7 @@ async def join_channel(
             session_name,
             _join_runner,
             lock_key=key,
+            acquire_lock=acquire_lock,
         )
 
     except TransientJoinError:
@@ -4745,13 +4834,87 @@ async def join_channel(
                 f"Аккаунт {session_key} временная ошибка подключения: {error_msg}",
             )
             raise TransientJoinError(error_msg)
-        if any(keyword in error_msg.lower() for keyword in ["phone number", "auth", "eof when reading", "session", "unauthorized"]):
-            await bot.send_message(log_channel, f"Аккаунт {session_key} - сессия истекла или повреждена: {error_msg}")
+        if any(
+            keyword in error_msg.lower()
+            for keyword in ["phone number", "auth", "eof when reading", "session", "unauthorized"]
+        ):
+            await bot.send_message(
+                log_channel,
+                f"Аккаунт {session_key} - сессия истекла или повреждена: {error_msg}",
+            )
             return False, error_msg
         else:
             await bot.send_message(log_channel, f"Аккаунт {session_key} ошибка подключения: {e}")
             return False, error_msg
 
+
+async def warmup_with_retry(
+    session_key: str,
+    coro_func: Callable[[], Awaitable[Any]],
+    *,
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+) -> Any:
+    """Retry helper for warmup operations that require session locks."""
+
+    from main import get_session_lock
+
+    lock = get_session_lock(session_key)
+    last_error: Optional[BaseException] = None
+
+    for attempt in range(max_retries):
+        try:
+            async with lock:
+                return await coro_func()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            error_text = str(exc).lower()
+            if "database is locked" in error_text and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                logging.warning(
+                    "Database locked during warmup (key=%s). Retry %d/%d in %.1fs",
+                    session_key,
+                    attempt + 1,
+                    max_retries,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+            raise
+
+    if last_error is not None:
+        raise last_error
+
+    raise RuntimeError("Warmup retry helper exhausted without executing coroutine")
+
+
+async def safe_join_channel_warmup(
+    *,
+    account_id: int,
+    session_key: str,
+    user_id: int,
+    channel: str,
+    channel_username: Optional[str],
+) -> Tuple[bool, Optional[str]]:
+    """Join a warmup channel using retry-aware locking."""
+
+    lock_key = make_session_key(user_id, session_key)
+    target_channel = channel_username or channel
+
+    async def _runner() -> Tuple[bool, Optional[str]]:
+        return await join_channel(
+            channel,
+            account_id,
+            session_key,
+            user_id,
+            is_warmup=True,
+            acquire_lock=False,
+            join_target=target_channel,
+        )
+
+    return await warmup_with_retry(lock_key, _runner)
 
 
 async def process_single_warmup_account(
@@ -4789,168 +4952,194 @@ async def process_single_warmup_account(
     logging.debug("Warmup: Processing account %s, active: %s", session_key, active_sessions.get(key))
     add_summary("debug", f"Processing account {session_key}, active={active_sessions.get(key)}")
 
-    now_utc = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    try:
+        if now.tzinfo is None:
+            now_moscow = now.replace(tzinfo=MOSCOW_TZ)
+        else:
+            now_moscow = now.astimezone(MOSCOW_TZ)
+        now_utc = now_moscow.astimezone(timezone.utc)
+        now_moscow_date = now_moscow.date()
 
-    warmup_end = _parse_warmup_datetime(account.get("warmup_end_at"))
-    if warmup_end and warmup_end.tzinfo is None:
-        warmup_end = warmup_end.replace(tzinfo=timezone.utc)
-    if not warmup_end:
-        warmup_end = now_utc + timedelta(days=7)
-        account["warmup_end_at"] = warmup_end
-        try:
-            await db_update_warmup_schedule(account_id, warmup_end=warmup_end)
-        except Exception:
-            logging.exception(
-                "Warmup: Failed to persist default warmup end timestamp for account %s",
+        warmup_end = _parse_warmup_datetime(account.get("warmup_end_at"))
+        if warmup_end and warmup_end.tzinfo is None:
+            warmup_end = warmup_end.replace(tzinfo=timezone.utc)
+        if not warmup_end:
+            warmup_end = now_utc + timedelta(days=7)
+            account["warmup_end_at"] = warmup_end
+            try:
+                await db_update_warmup_schedule(account_id, warmup_end=warmup_end)
+            except Exception:
+                logging.exception(
+                    "Warmup: Failed to persist default warmup end timestamp for account %s",
+                    account_id,
+                )
+        else:
+            account["warmup_end_at"] = warmup_end
+            if warmup_end <= now_utc:
+                await set_account_mode(account_id, "standard", warmup_days=None)
+                return
+
+        warmup_last_join_at = _parse_warmup_datetime(account.get("warmup_last_join_at"))
+        if warmup_last_join_at and warmup_last_join_at.tzinfo is None:
+            warmup_last_join_at = warmup_last_join_at.replace(tzinfo=timezone.utc)
+        if not warmup_last_join_at:
+            warmup_last_join_at = now_utc
+            account["warmup_last_join_at"] = warmup_last_join_at
+            try:
+                await db_update_warmup_schedule(account_id, last_join=warmup_last_join_at)
+            except Exception:
+                logging.exception(
+                    "Warmup: Failed to persist default last join timestamp for account %s",
+                    account_id,
+                )
+        else:
+            account["warmup_last_join_at"] = warmup_last_join_at
+
+        if warmup_last_join_at:
+            last_join_moscow = warmup_last_join_at.astimezone(MOSCOW_TZ)
+            if last_join_moscow.date() < now_moscow_date:
+                await reset_warmup_daily_state(account_id)
+                account["warmup_joined_today"] = 0
+
+        next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
+        if next_join_at and next_join_at.tzinfo is None:
+            next_join_at = next_join_at.replace(tzinfo=timezone.utc)
+        if not next_join_at:
+            next_join_at = now_utc + timedelta(hours=1)
+            account["warmup_next_join_at"] = next_join_at
+            try:
+                await db_update_warmup_schedule(account_id, next_join=next_join_at)
+            except Exception:
+                logging.exception(
+                    "Warmup: Failed to persist default next join timestamp for account %s",
+                    account_id,
+                )
+            add_summary("debug", f"{session_key}: default next join set to {next_join_at}")
+        else:
+            account["warmup_next_join_at"] = next_join_at
+        if next_join_at and next_join_at > now_utc:
+            return
+
+        joined_today = account.get("warmup_joined_today", 0)
+        logging.debug("Warmup: Account %s joined today: %s/%s", session_key, joined_today, daily_limit)
+        add_summary("debug", f"{session_key}: {joined_today}/{daily_limit} joins")
+
+        if joined_today >= daily_limit:
+            message = f"Account {session_key} reached daily limit, skipping"
+            logging.info("Warmup: %s", message)
+            add_summary("info", message)
+            next_window_start = _next_join_window_start(now_moscow, current_settings)
+            next_time = plan_next_warmup_join(next_window_start, current_settings)
+            await db_update_warmup_schedule(account_id, next_join=next_time)
+            logging.info(
+                "Warmup schedule: account %s (%s) next join at %s",
                 account_id,
+                session_key,
+                next_time.isoformat(),
             )
-    else:
-        account["warmup_end_at"] = warmup_end
-        if warmup_end <= now_utc:
+            account["warmup_next_join_at"] = next_time
+            return
+
+        pending_channels = await get_warmup_pending(account_id, limit=1, reset_if_empty=True)
+        logging.debug("Warmup: Account %s pending channels: %s", session_key, len(pending_channels))
+        add_summary("debug", f"{session_key}: pending channels {len(pending_channels)}")
+
+        if not pending_channels:
+            message = f"Account {session_key} has no pending channels, skipping"
+            logging.info("Warmup: %s", message)
+            add_summary("info", message)
+            next_time = _get_next_warmup_join(now_moscow, current_settings)
+            await db_update_warmup_schedule(account_id, next_join=next_time)
+            logging.info(
+                "Warmup schedule: account %s (%s) next join at %s",
+                account_id,
+                session_key,
+                next_time.isoformat(),
+            )
+            account["warmup_next_join_at"] = next_time
+            return
+
+        channel_entry = pending_channels[0]
+        channel = channel_entry["channel"]
+
+        session_file = os.path.join(SESSIONS_BASE_DIR, str(user_id), f"{session_key}.session")
+        if not os.path.exists(session_file):
+            warning_message = (
+                f"Аккаунт {session_key} (прогрев) - файл сессии не найден: {session_file}"
+            )
+            logging.warning("Warmup: %s", warning_message)
+            add_summary("warning", warning_message)
             await set_account_mode(account_id, "standard", warmup_days=None)
             return
 
-    warmup_last_join_at = _parse_warmup_datetime(account.get("warmup_last_join_at"))
-    if warmup_last_join_at and warmup_last_join_at.tzinfo is None:
-        warmup_last_join_at = warmup_last_join_at.replace(tzinfo=timezone.utc)
-    if not warmup_last_join_at:
-        warmup_last_join_at = now_utc
-        account["warmup_last_join_at"] = warmup_last_join_at
         try:
-            await db_update_warmup_schedule(account_id, last_join=warmup_last_join_at)
-        except Exception:
-            logging.exception(
-                "Warmup: Failed to persist default last join timestamp for account %s",
-                account_id,
+            success, error_reason = await safe_join_channel_warmup(
+                account_id=account_id,
+                session_key=session_key,
+                user_id=user_id,
+                channel=channel,
+                channel_username=channel_entry.get("channel_username"),
             )
-    else:
-        account["warmup_last_join_at"] = warmup_last_join_at
-
-    if warmup_last_join_at and warmup_last_join_at.date() < now_utc.date():
-        await reset_warmup_daily_state(account_id)
-        account["warmup_joined_today"] = 0
-
-    next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
-    if next_join_at and next_join_at.tzinfo is None:
-        next_join_at = next_join_at.replace(tzinfo=timezone.utc)
-    if not next_join_at:
-        next_join_at = now_utc + timedelta(hours=1)
-        account["warmup_next_join_at"] = next_join_at
-        try:
-            await db_update_warmup_schedule(account_id, next_join=next_join_at)
-        except Exception:
-            logging.exception(
-                "Warmup: Failed to persist default next join timestamp for account %s",
-                account_id,
+        except TransientJoinError as transient_error:
+            transient_message = (
+                transient_error.message if hasattr(transient_error, "message") else str(transient_error)
             )
-        add_summary("debug", f"{session_key}: default next join set to {next_join_at}")
-    else:
-        account["warmup_next_join_at"] = next_join_at
-    if next_join_at and next_join_at > now_utc:
-        return
-
-    joined_today = account.get("warmup_joined_today", 0)
-    logging.debug("Warmup: Account %s joined today: %s/%s", session_key, joined_today, daily_limit)
-    add_summary("debug", f"{session_key}: {joined_today}/{daily_limit} joins")
-
-    if joined_today >= daily_limit:
-        message = f"Account {session_key} reached daily limit, skipping"
-        logging.info("Warmup: %s", message)
-        add_summary("info", message)
-        next_window_start = _next_join_window_start(now_utc, current_settings)
-        next_time = plan_next_warmup_join(next_window_start, current_settings)
-        await db_update_warmup_schedule(account_id, next_join=next_time)
-        logging.info(
-            "Warmup schedule: account %s (%s) next join at %s",
-            account_id,
-            session_key,
-            next_time.isoformat(),
-        )
-        account["warmup_next_join_at"] = next_time
-        return
-
-    pending_channels = await get_warmup_pending(account_id, limit=1, reset_if_empty=True)
-    logging.debug("Warmup: Account %s pending channels: %s", session_key, len(pending_channels))
-    add_summary("debug", f"{session_key}: pending channels {len(pending_channels)}")
-
-    if not pending_channels:
-        message = f"Account {session_key} has no pending channels, skipping"
-        logging.info("Warmup: %s", message)
-        add_summary("info", message)
-        next_time = _get_next_warmup_join(now_utc, current_settings)
-        await db_update_warmup_schedule(account_id, next_join=next_time)
-        logging.info(
-            "Warmup schedule: account %s (%s) next join at %s",
-            account_id,
-            session_key,
-            next_time.isoformat(),
-        )
-        account["warmup_next_join_at"] = next_time
-        return
-
-    channel_entry = pending_channels[0]
-    channel = channel_entry["channel"]
-
-    session_file = os.path.join(SESSIONS_BASE_DIR, str(user_id), f"{session_key}.session")
-    if not os.path.exists(session_file):
-        warning_message = (
-            f"Аккаунт {session_key} (прогрев) - файл сессии не найден: {session_file}"
-        )
-        logging.warning("Warmup: %s", warning_message)
-        add_summary("warning", warning_message)
-        await set_account_mode(account_id, "standard", warmup_days=None)
-        return
-
-    try:
-        success, error_reason = await join_channel(
-            channel, account_id, session_key, user_id, is_warmup=True
-        )
-    except TransientJoinError as transient_error:
-        transient_message = (
-            transient_error.message if hasattr(transient_error, "message") else str(transient_error)
-        )
-        warning_message = (
-            f"Account {session_key} временная ошибка вступления в {channel}: {transient_message}. Повторим позже."
-        )
-        logging.warning("Warmup: %s", warning_message)
-        add_summary("warning", warning_message)
-        backoff_seconds = random.uniform(15, 45)
-        retry_time = datetime.now(timezone.utc) + timedelta(seconds=backoff_seconds)
-        await db_update_warmup_schedule(account_id, next_join=retry_time)
-        account["warmup_next_join_at"] = retry_time
-        await asyncio.sleep(min(backoff_seconds, 5))
-        return
-
-    if not success:
-        if error_reason and any(
-            phrase in error_reason.lower()
-            for phrase in ("занят", "запускается")
-        ):
-            info_message = f"Account {session_key} занят ({error_reason}), повторим позже"
-            logging.info("Warmup: %s", info_message)
-            add_summary("info", info_message)
+            warning_message = (
+                f"Account {session_key} временная ошибка вступления в {channel}: {transient_message}. Повторим позже."
+            )
+            logging.warning("Warmup: %s", warning_message)
+            add_summary("warning", warning_message)
+            backoff_seconds = random.uniform(15, 45)
+            retry_time = datetime.now(timezone.utc) + timedelta(seconds=backoff_seconds)
+            await db_update_warmup_schedule(account_id, next_join=retry_time)
+            account["warmup_next_join_at"] = retry_time
+            await asyncio.sleep(min(backoff_seconds, 5))
             return
-        await set_account_mode(account_id, "standard", warmup_days=None)
-        return
 
-    success_message = f"Account {session_key} joined {channel}"
-    logging.info("Warmup: %s", success_message)
-    add_summary("info", success_message)
+        if not success:
+            if error_reason and any(
+                phrase in error_reason.lower()
+                for phrase in ("занят", "запускается")
+            ):
+                info_message = f"Account {session_key} занят ({error_reason}), повторим позже"
+                logging.info("Warmup: %s", info_message)
+                add_summary("info", info_message)
+                return
+            await set_account_mode(account_id, "standard", warmup_days=None)
+            return
 
-    post_join_now = datetime.now(timezone.utc)
-    next_time = _get_next_warmup_join(post_join_now, current_settings)
-    await db_update_warmup_schedule(account_id, next_join=next_time)
-    logging.info(
-        "Warmup schedule: account %s (%s) next join at %s",
-        account_id,
-        session_key,
-        next_time.isoformat(),
-    )
-    account["warmup_next_join_at"] = next_time
+        success_message = f"Account {session_key} joined {channel}"
+        logging.info("Warmup: %s", success_message)
+        add_summary("info", success_message)
+
+        post_join_now = datetime.now(timezone.utc)
+        next_time = _get_next_warmup_join(post_join_now, current_settings)
+        await db_update_warmup_schedule(account_id, next_join=next_time)
+        logging.info(
+            "Warmup schedule: account %s (%s) next join at %s",
+            account_id,
+            session_key,
+            next_time.isoformat(),
+        )
+        account["warmup_next_join_at"] = next_time
+
+    finally:
+        _release_session_lock(key)
 
 
 async def process_warmup_accounts():
     """Фоновая задача для добавления каналов в режиме прогрева (во время сна)"""
+
+    try:
+        try:
+            from db import _require_pool as _ensure_pool_ready
+        except ImportError:
+            _ensure_pool_ready = _require_pool
+        _ensure_pool_ready()
+    except Exception as db_error:
+        logging.error("Database not ready for warmup: %s", db_error)
+        await asyncio.sleep(30)
+        return
 
     logging.info("✅ Processing warmup accounts...")
 
@@ -4964,19 +5153,22 @@ async def process_warmup_accounts():
 
         try:
             current_settings = await ensure_latest_warmup_settings()
-            now = datetime.now(timezone.utc)
-            is_warmup_join_time = is_warmup_join_period(now)
+            now_moscow = get_moscow_time()
+            is_warmup_join_time = is_warmup_join_period(now_moscow)
             daily_limit = current_settings.channels_per_day
 
-            if now.minute % 10 == 0:
-                message = (
-                    f"Warmup check: {now.strftime('%H:%M')} UTC, "
-                    f"is_warmup_join_time: {is_warmup_join_time}"
-                )
-                logging.debug(message)
-                add_summary("debug", message)
+            warmup_check_message = (
+                f"Warmup check: {now_moscow.strftime('%H:%M')} МСК, "
+                f"is_warmup_join_time: {is_warmup_join_time}"
+            )
+            logging.info(warmup_check_message)
+            add_summary("info", warmup_check_message)
 
             if not is_warmup_join_time:
+                logging.debug(
+                    "Warmup: Outside join window (%s МСК)",
+                    now_moscow.strftime("%H:%M"),
+                )
                 await asyncio.sleep(WARMUP_SCAN_INTERVAL_SECONDS)
                 continue
 
@@ -4998,7 +5190,7 @@ async def process_warmup_accounts():
                 try:
                     await process_single_warmup_account(
                         account,
-                        now=now,
+                        now=now_moscow,
                         current_settings=current_settings,
                         daily_limit=daily_limit,
                         add_summary=add_summary,
@@ -5264,7 +5456,11 @@ async def add_regular_channels(message: Message, state: FSMContext) -> None:
         for channel in channels:
             try:
                 success, error_reason = await join_channel(
-                    channel, account_id, session, message.from_user.id, is_warmup=False
+                    channel,
+                    account_id,
+                    session,
+                    message.from_user.id,
+                    is_warmup=False,
                 )
             except TransientJoinError as transient_error:
                 reason_text = transient_error.message if hasattr(transient_error, "message") else str(transient_error)
@@ -5941,6 +6137,10 @@ async def main():
             await ensure_latest_warmup_settings(force=True)
             logging.info("✅ Database initialized successfully")
             log_file.write("Database initialized successfully\n")
+            log_file.flush()
+
+            await auto_start_warmup_accounts()
+            log_file.write("Ensured warmup accounts are running\n")
             log_file.flush()
 
             deleted_logs = await cleanup_comment_logs(COMMENT_LOG_RETENTION_DAYS)
