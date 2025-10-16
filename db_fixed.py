@@ -1097,6 +1097,7 @@ async def db_update_warmup_schedule(
     *,
     next_join: Optional[datetime] = None,
     last_join: Optional[datetime] = None,
+    warmup_end: Optional[datetime] = None,
 ) -> None:
     updates: List[str] = []
     params: List[Any] = []
@@ -1111,6 +1112,10 @@ async def db_update_warmup_schedule(
         params.append(iso)
         updates.append("warmup_last_join = ?")
         params.append(last_join.date().isoformat())
+
+    if warmup_end is not None:
+        updates.append("warmup_end_at = ?")
+        params.append(warmup_end.isoformat())
 
     if not updates:
         return
