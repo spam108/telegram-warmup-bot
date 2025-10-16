@@ -4952,32 +4952,12 @@ async def process_single_warmup_account(
     logging.debug("Warmup: Processing account %s, active: %s", session_key, active_sessions.get(key))
     add_summary("debug", f"Processing account {session_key}, active={active_sessions.get(key)}")
 
-    try:
-        if now.tzinfo is None:
-            now_moscow = now.replace(tzinfo=MOSCOW_TZ)
-        else:
-            now_moscow = now.astimezone(MOSCOW_TZ)
-        now_utc = now_moscow.astimezone(timezone.utc)
-        now_moscow_date = now_moscow.date()
-
-        warmup_end = _parse_warmup_datetime(account.get("warmup_end_at"))
-        if warmup_end and warmup_end.tzinfo is None:
-            warmup_end = warmup_end.replace(tzinfo=timezone.utc)
-        if not warmup_end:
-            warmup_end = now_utc + timedelta(days=7)
-            account["warmup_end_at"] = warmup_end
-            try:
-                await db_update_warmup_schedule(account_id, warmup_end=warmup_end)
-            except Exception:
-                logging.exception(
-                    "Warmup: Failed to persist default warmup end timestamp for account %s",
-                    account_id,
-                )
-        else:
-            account["warmup_end_at"] = warmup_end
-            if warmup_end <= now_utc:
-                await set_account_mode(account_id, "standard", warmup_days=None)
-                return
+    if now.tzinfo is None:
+        now_moscow = now.replace(tzinfo=MOSCOW_TZ)
+    else:
+        now_moscow = now.astimezone(MOSCOW_TZ)
+    now_utc = now_moscow.astimezone(timezone.utc)
+    now_moscow_date = now_moscow.date()
 
         warmup_last_join_at = _parse_warmup_datetime(account.get("warmup_last_join_at"))
         if warmup_last_join_at and warmup_last_join_at.tzinfo is None:
@@ -5056,16 +5036,27 @@ async def process_single_warmup_account(
                 session_key,
                 next_time.isoformat(),
             )
-            account["warmup_next_join_at"] = next_time
-            return
+    else:
+        account["warmup_last_join_at"] = warmup_last_join_at
 
-        channel_entry = pending_channels[0]
-        channel = channel_entry["channel"]
+    if warmup_last_join_at:
+        last_join_moscow = warmup_last_join_at.astimezone(MOSCOW_TZ)
+        if last_join_moscow.date() < now_moscow_date:
+            await reset_warmup_daily_state(account_id)
+            account["warmup_joined_today"] = 0
 
-        session_file = os.path.join(SESSIONS_BASE_DIR, str(user_id), f"{session_key}.session")
-        if not os.path.exists(session_file):
-            warning_message = (
-                f"Аккаунт {session_key} (прогрев) - файл сессии не найден: {session_file}"
+    next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
+    if next_join_at and next_join_at.tzinfo is None:
+        next_join_at = next_join_at.replace(tzinfo=timezone.utc)
+    if not next_join_at:
+        next_join_at = now_utc + timedelta(hours=1)
+        account["warmup_next_join_at"] = next_join_at
+        try:
+            await db_update_warmup_schedule(account_id, next_join=next_join_at)
+        except Exception:
+            logging.exception(
+                "Warmup: Failed to persist default next join timestamp for account %s",
+                account_id,
             )
             logging.warning("Warmup: %s", warning_message)
             add_summary("warning", warning_message)
@@ -5096,24 +5087,31 @@ async def process_single_warmup_account(
             await asyncio.sleep(min(backoff_seconds, 5))
             return
 
-        if not success:
-            if error_reason and any(
-                phrase in error_reason.lower()
-                for phrase in ("занят", "запускается")
-            ):
-                info_message = f"Account {session_key} занят ({error_reason}), повторим позже"
-                logging.info("Warmup: %s", info_message)
-                add_summary("info", info_message)
-                return
-            await set_account_mode(account_id, "standard", warmup_days=None)
-            return
+    if joined_today >= daily_limit:
+        message = f"Account {session_key} reached daily limit, skipping"
+        logging.info("Warmup: %s", message)
+        add_summary("info", message)
+        next_window_start = _next_join_window_start(now_moscow, current_settings)
+        next_time = plan_next_warmup_join(next_window_start, current_settings)
+        await db_update_warmup_schedule(account_id, next_join=next_time)
+        logging.info(
+            "Warmup schedule: account %s (%s) next join at %s",
+            account_id,
+            session_key,
+            next_time.isoformat(),
+        )
+        account["warmup_next_join_at"] = next_time
+        return
 
         success_message = f"Account {session_key} joined {channel}"
         logging.info("Warmup: %s", success_message)
         add_summary("info", success_message)
 
-        post_join_now = datetime.now(timezone.utc)
-        next_time = _get_next_warmup_join(post_join_now, current_settings)
+    if not pending_channels:
+        message = f"Account {session_key} has no pending channels, skipping"
+        logging.info("Warmup: %s", message)
+        add_summary("info", message)
+        next_time = _get_next_warmup_join(now_moscow, current_settings)
         await db_update_warmup_schedule(account_id, next_join=next_time)
         logging.info(
             "Warmup schedule: account %s (%s) next join at %s",
