@@ -1773,6 +1773,13 @@ async def process_standard_accounts() -> None:
                 except asyncio.CancelledError:
                     raise
                 except Exception as account_error:
+                    if "fromisoformat" in str(account_error):
+                        logging.warning(
+                            "Datetime parsing error for standard account %s: %s. Skipping...",
+                            account.get("id"),
+                            account_error,
+                        )
+                        continue
                     account_id = account.get("id")
                     phone = account.get("phone")
                     logging.warning(
@@ -2347,14 +2354,18 @@ def make_session_key(user_id: int, phone: str) -> str:
 
 
 def _parse_warmup_datetime(value: Any) -> Optional[datetime]:
-    if not value:
+    if value is None:
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     if isinstance(value, str):
+        cleaned_value = value.strip()
+        if not cleaned_value:
+            return None
+        cleaned_value = cleaned_value.replace("Z", "+00:00").replace(" ", "T")
         try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError:
+            parsed = datetime.fromisoformat(cleaned_value)
+        except (TypeError, ValueError, AttributeError):
             return None
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     return None
@@ -4781,7 +4792,17 @@ async def process_single_warmup_account(
             return
 
     warmup_last_join_at = _parse_warmup_datetime(account.get("warmup_last_join_at"))
-    if warmup_last_join_at:
+    if warmup_last_join_at is None:
+        warmup_last_join_at = now
+        account["warmup_last_join_at"] = warmup_last_join_at
+        try:
+            await db_update_warmup_schedule(account_id, last_join=warmup_last_join_at)
+        except Exception:
+            logging.exception(
+                "Warmup: Failed to persist default last join timestamp for account %s",
+                account_id,
+            )
+    else:
         account["warmup_last_join_at"] = warmup_last_join_at
 
     if warmup_last_join_at and warmup_last_join_at.date() < now.date():
@@ -4789,7 +4810,18 @@ async def process_single_warmup_account(
         account["warmup_joined_today"] = 0
 
     next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
-    if next_join_at:
+    if next_join_at is None:
+        next_join_at = now + timedelta(minutes=30)
+        account["warmup_next_join_at"] = next_join_at
+        try:
+            await db_update_warmup_schedule(account_id, next_join=next_join_at)
+        except Exception:
+            logging.exception(
+                "Warmup: Failed to persist default next join timestamp for account %s",
+                account_id,
+            )
+        add_summary("debug", f"{session_key}: default next join set to {next_join_at}")
+    else:
         account["warmup_next_join_at"] = next_join_at
     if next_join_at and next_join_at > now:
         return
@@ -4951,6 +4983,17 @@ async def process_warmup_accounts():
                 except asyncio.CancelledError:
                     raise
                 except Exception as account_error:
+                    if "fromisoformat" in str(account_error):
+                        logging.warning(
+                            "Warmup datetime parsing error for account %s: %s. Skipping...",
+                            account.get("id"),
+                            account_error,
+                        )
+                        add_summary(
+                            "warning",
+                            f"Datetime parsing error for warmup account {account.get('phone')}: {account_error}",
+                        )
+                        continue
                     phone = account.get("phone")
                     logging.warning(
                         "Failed to process warmup account %s (phone %s): %s",
