@@ -1643,6 +1643,10 @@ async def process_account_reactions(account: Dict[str, Any]) -> None:
     reaction_chance = _coerce_int(account.get("reaction_chance"), 0)
 
     last_reaction_at = _parse_warmup_datetime(account.get("last_reaction_at"))
+    if last_reaction_at is None:
+        last_reaction_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    elif last_reaction_at.tzinfo is None:
+        last_reaction_at = last_reaction_at.replace(tzinfo=timezone.utc)
 
     async def _runner(client: Client) -> None:
         nonlocal last_reaction_at
@@ -1773,11 +1777,12 @@ async def process_standard_accounts() -> None:
                 except asyncio.CancelledError:
                     raise
                 except Exception as account_error:
-                    if "fromisoformat" in str(account_error):
+                    error_str = str(account_error)
+                    if "fromisoformat" in error_str:
                         logging.warning(
-                            "Datetime parsing error for standard account %s: %s. Skipping...",
+                            "Datetime parsing error for account %s (%s). Setting default values and continuing...",
                             account.get("id"),
-                            account_error,
+                            account.get("phone"),
                         )
                         continue
                     account_id = account.get("id")
@@ -2354,20 +2359,25 @@ def make_session_key(user_id: int, phone: str) -> str:
 
 
 def _parse_warmup_datetime(value: Any) -> Optional[datetime]:
+    """
+    Безопасно парсит datetime из разных форматов.
+    Обрабатывает строки, datetime объекты, None и другие типы.
+    """
     if value is None:
         return None
+
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return value
+
     if isinstance(value, str):
-        cleaned_value = value.strip()
-        if not cleaned_value:
-            return None
-        cleaned_value = cleaned_value.replace("Z", "+00:00").replace(" ", "T")
         try:
-            parsed = datetime.fromisoformat(cleaned_value)
-        except (TypeError, ValueError, AttributeError):
+            cleaned_value = value.replace("Z", "+00:00").replace(" ", "T")
+            return datetime.fromisoformat(cleaned_value)
+        except (ValueError, AttributeError) as e:
+            logging.debug("Failed to parse datetime from string '%s': %s", value, e)
             return None
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    logging.debug("Unsupported datetime type: %s for value: %s", type(value), value)
     return None
 
 
@@ -4463,16 +4473,11 @@ async def send_comments(userid, session, account_id):
         reactions_enabled_raw = account.get("reactions_enabled")
         reactions_enabled = True if reactions_enabled_raw is None else bool(reactions_enabled_raw)
 
-        last_reaction_at_str = account.get("last_reaction_at")
-        last_reaction_at_dt: Optional[datetime] = None
-        if last_reaction_at_str:
-            try:
-                parsed = datetime.fromisoformat(last_reaction_at_str)
-            except ValueError:
-                parsed = None
-            if parsed is not None and parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            last_reaction_at_dt = parsed
+        last_reaction_at_dt = _parse_warmup_datetime(account.get("last_reaction_at"))
+        if last_reaction_at_dt is None:
+            last_reaction_at_dt = datetime.now(timezone.utc) - timedelta(hours=1)
+        elif last_reaction_at_dt.tzinfo is None:
+            last_reaction_at_dt = last_reaction_at_dt.replace(tzinfo=timezone.utc)
 
         async def _run_session(app: Client) -> None:
             nonlocal last_reaction_at_dt
@@ -4784,16 +4789,32 @@ async def process_single_warmup_account(
     logging.debug("Warmup: Processing account %s, active: %s", session_key, active_sessions.get(key))
     add_summary("debug", f"Processing account {session_key}, active={active_sessions.get(key)}")
 
+    now_utc = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+
     warmup_end = _parse_warmup_datetime(account.get("warmup_end_at"))
-    if warmup_end:
+    if warmup_end and warmup_end.tzinfo is None:
+        warmup_end = warmup_end.replace(tzinfo=timezone.utc)
+    if not warmup_end:
+        warmup_end = now_utc + timedelta(days=7)
         account["warmup_end_at"] = warmup_end
-        if warmup_end <= now:
+        try:
+            await db_update_warmup_schedule(account_id, warmup_end=warmup_end)
+        except Exception:
+            logging.exception(
+                "Warmup: Failed to persist default warmup end timestamp for account %s",
+                account_id,
+            )
+    else:
+        account["warmup_end_at"] = warmup_end
+        if warmup_end <= now_utc:
             await set_account_mode(account_id, "standard", warmup_days=None)
             return
 
     warmup_last_join_at = _parse_warmup_datetime(account.get("warmup_last_join_at"))
-    if warmup_last_join_at is None:
-        warmup_last_join_at = now
+    if warmup_last_join_at and warmup_last_join_at.tzinfo is None:
+        warmup_last_join_at = warmup_last_join_at.replace(tzinfo=timezone.utc)
+    if not warmup_last_join_at:
+        warmup_last_join_at = now_utc
         account["warmup_last_join_at"] = warmup_last_join_at
         try:
             await db_update_warmup_schedule(account_id, last_join=warmup_last_join_at)
@@ -4805,13 +4826,15 @@ async def process_single_warmup_account(
     else:
         account["warmup_last_join_at"] = warmup_last_join_at
 
-    if warmup_last_join_at and warmup_last_join_at.date() < now.date():
+    if warmup_last_join_at and warmup_last_join_at.date() < now_utc.date():
         await reset_warmup_daily_state(account_id)
         account["warmup_joined_today"] = 0
 
     next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
-    if next_join_at is None:
-        next_join_at = now + timedelta(minutes=30)
+    if next_join_at and next_join_at.tzinfo is None:
+        next_join_at = next_join_at.replace(tzinfo=timezone.utc)
+    if not next_join_at:
+        next_join_at = now_utc + timedelta(hours=1)
         account["warmup_next_join_at"] = next_join_at
         try:
             await db_update_warmup_schedule(account_id, next_join=next_join_at)
@@ -4823,7 +4846,7 @@ async def process_single_warmup_account(
         add_summary("debug", f"{session_key}: default next join set to {next_join_at}")
     else:
         account["warmup_next_join_at"] = next_join_at
-    if next_join_at and next_join_at > now:
+    if next_join_at and next_join_at > now_utc:
         return
 
     joined_today = account.get("warmup_joined_today", 0)
@@ -4834,7 +4857,7 @@ async def process_single_warmup_account(
         message = f"Account {session_key} reached daily limit, skipping"
         logging.info("Warmup: %s", message)
         add_summary("info", message)
-        next_window_start = _next_join_window_start(now, current_settings)
+        next_window_start = _next_join_window_start(now_utc, current_settings)
         next_time = plan_next_warmup_join(next_window_start, current_settings)
         await db_update_warmup_schedule(account_id, next_join=next_time)
         logging.info(
@@ -4854,7 +4877,7 @@ async def process_single_warmup_account(
         message = f"Account {session_key} has no pending channels, skipping"
         logging.info("Warmup: %s", message)
         add_summary("info", message)
-        next_time = _get_next_warmup_join(now, current_settings)
+        next_time = _get_next_warmup_join(now_utc, current_settings)
         await db_update_warmup_schedule(account_id, next_join=next_time)
         logging.info(
             "Warmup schedule: account %s (%s) next join at %s",
