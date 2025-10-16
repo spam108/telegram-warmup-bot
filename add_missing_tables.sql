@@ -8,6 +8,15 @@ CREATE TABLE IF NOT EXISTS warmup_channels (
     UNIQUE(account_id, channel_id)
 );
 
+-- Channel blacklist table
+CREATE TABLE IF NOT EXISTS channel_blacklist (
+    account_id BIGINT REFERENCES accounts(id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id, channel_id)
+);
+
 -- Comment logs table
 CREATE TABLE IF NOT EXISTS comment_logs (
     id BIGSERIAL PRIMARY KEY,

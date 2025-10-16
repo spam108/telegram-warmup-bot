@@ -46,6 +46,7 @@ REQUIRED_TABLES = {
     "warmup_channels",
     "warmup_logs",
     "posts",
+    "channel_blacklist",
 }
 
 DEFAULT_REACTION_EMOJIS = ['❤️', '👍', '🔥', '🎉', '👏']
@@ -315,6 +316,18 @@ async def _init_postgres_schema() -> None:
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE (account_id, channel),
                 CHECK (status IN ('pending', 'joined', 'error'))
+            )
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS channel_blacklist (
+                account_id BIGINT REFERENCES accounts(id) ON DELETE CASCADE,
+                channel_id TEXT NOT NULL,
+                reason TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (account_id, channel_id)
             )
             """
         )
@@ -1286,6 +1299,32 @@ async def record_post(
             adapt_bool(has_media),
         ),
     )
+
+
+async def add_to_channel_blacklist(
+    account_id: int, channel_id: str, reason: Optional[str] = None
+) -> None:
+    await _execute(
+        """
+        INSERT INTO channel_blacklist (account_id, channel_id, reason)
+        VALUES (?, ?, ?)
+        ON CONFLICT (account_id, channel_id) DO UPDATE SET
+            reason = EXCLUDED.reason
+        """,
+        (account_id, channel_id, reason),
+    )
+
+
+async def is_channel_blacklisted(account_id: int, channel_id: str) -> bool:
+    row = await _fetchone(
+        """
+        SELECT 1
+        FROM channel_blacklist
+        WHERE account_id = ? AND channel_id = ?
+        """,
+        (account_id, channel_id),
+    )
+    return row is not None
 
 
 async def add_reaction_log(
