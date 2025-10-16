@@ -1643,6 +1643,10 @@ async def process_account_reactions(account: Dict[str, Any]) -> None:
     reaction_chance = _coerce_int(account.get("reaction_chance"), 0)
 
     last_reaction_at = _parse_warmup_datetime(account.get("last_reaction_at"))
+    if last_reaction_at is None:
+        last_reaction_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    elif last_reaction_at.tzinfo is None:
+        last_reaction_at = last_reaction_at.replace(tzinfo=timezone.utc)
 
     async def _runner(client: Client) -> None:
         nonlocal last_reaction_at
@@ -4469,16 +4473,11 @@ async def send_comments(userid, session, account_id):
         reactions_enabled_raw = account.get("reactions_enabled")
         reactions_enabled = True if reactions_enabled_raw is None else bool(reactions_enabled_raw)
 
-        last_reaction_at_str = account.get("last_reaction_at")
-        last_reaction_at_dt: Optional[datetime] = None
-        if last_reaction_at_str:
-            try:
-                parsed = datetime.fromisoformat(last_reaction_at_str)
-            except ValueError:
-                parsed = None
-            if parsed is not None and parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            last_reaction_at_dt = parsed
+        last_reaction_at_dt = _parse_warmup_datetime(account.get("last_reaction_at"))
+        if last_reaction_at_dt is None:
+            last_reaction_at_dt = datetime.now(timezone.utc) - timedelta(hours=1)
+        elif last_reaction_at_dt.tzinfo is None:
+            last_reaction_at_dt = last_reaction_at_dt.replace(tzinfo=timezone.utc)
 
         async def _run_session(app: Client) -> None:
             nonlocal last_reaction_at_dt
