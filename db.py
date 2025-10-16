@@ -47,6 +47,7 @@ REQUIRED_TABLES = {
     "warmup_logs",
     "posts",
     "channel_blacklist",
+    "warmup_settings",
 }
 
 DEFAULT_REACTION_EMOJIS = ['❤️', '👍', '🔥', '🎉', '👏']
@@ -542,6 +543,7 @@ async def _init_postgres_schema() -> None:
             "warmup_channels",
             "warmup_logs",
             "posts",
+            "warmup_settings",
         }
         existing = await connection.fetch(
             """
@@ -569,14 +571,24 @@ async def close_db() -> None:
 
 async def ensure_warmup_settings(
     *,
-    channels_per_day: int,
-    delay_minutes: int,
-    join_start_hour: int,
-    join_start_minute: int,
-    join_end_hour: int,
-    join_end_minute: int,
+    channels_per_day: int = 10,
+    delay_minutes: int = 30,
+    join_start_hour: int = 9,
+    join_start_minute: int = 0,
+    join_end_hour: int = 23,
+    join_end_minute: int = 0,
 ) -> None:
     """Ensure that a single warmup settings row exists in the database."""
+
+    logger.info(
+        "Ensuring warmup settings: %d channels/day, delay %d min, window %02d:%02d-%02d:%02d MSK",
+        channels_per_day,
+        delay_minutes,
+        join_start_hour,
+        join_start_minute,
+        join_end_hour,
+        join_end_minute,
+    )
 
     await _execute(
         """
