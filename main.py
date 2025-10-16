@@ -57,6 +57,7 @@ from db import (
     get_account_by_session,
     get_accounts_for_user,
     get_global_statistics,
+    auto_start_warmup_accounts,
     get_running_standard_accounts,
     get_running_warmup_accounts,
     get_running_accounts,
@@ -6021,6 +6022,10 @@ async def main():
             await ensure_latest_warmup_settings(force=True)
             logging.info("✅ Database initialized successfully")
             log_file.write("Database initialized successfully\n")
+            log_file.flush()
+
+            await auto_start_warmup_accounts()
+            log_file.write("Ensured warmup accounts are running\n")
             log_file.flush()
 
             deleted_logs = await cleanup_comment_logs(COMMENT_LOG_RETENTION_DAYS)

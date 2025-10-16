@@ -307,7 +307,7 @@ async def _init_postgres_schema() -> None:
                 id BIGSERIAL PRIMARY KEY,
                 account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
                 channel TEXT NOT NULL,
-                position INTEGER NOT NULL,
+                channel_username TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 error TEXT,
                 attempts INTEGER NOT NULL DEFAULT 0,
@@ -487,7 +487,56 @@ async def _init_postgres_schema() -> None:
         await connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_warmup_channels_pending
-            ON warmup_channels (account_id, status, position)
+            ON warmup_channels (account_id, status, created_at)
+            """
+        )
+
+        await connection.execute(
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'warmup_channels' AND column_name = 'channel_id'
+                ) THEN
+                    ALTER TABLE warmup_channels RENAME COLUMN channel_id TO channel;
+                END IF;
+
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'warmup_channels' AND column_name = 'channel'
+                ) THEN
+                    ALTER TABLE warmup_channels ADD COLUMN channel TEXT;
+                END IF;
+
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'warmup_channels' AND column_name = 'channel' AND is_nullable = 'YES'
+                ) THEN
+                    UPDATE warmup_channels
+                    SET channel = COALESCE(channel, channel_username)
+                    WHERE channel IS NULL;
+                    UPDATE warmup_channels
+                    SET channel = ''
+                    WHERE channel IS NULL;
+                    ALTER TABLE warmup_channels ALTER COLUMN channel SET NOT NULL;
+                END IF;
+
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'warmup_channels' AND column_name = 'channel_username'
+                ) THEN
+                    ALTER TABLE warmup_channels ADD COLUMN channel_username TEXT;
+                END IF;
+
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'warmup_channels' AND column_name = 'position'
+                ) THEN
+                    ALTER TABLE warmup_channels DROP COLUMN position;
+                END IF;
+            END
+            $$;
             """
         )
 
@@ -1035,14 +1084,22 @@ async def sync_warmup_channels(account_id: int, channels: List[str]) -> None:
 
     await _execute("DELETE FROM warmup_channels WHERE account_id = ?", (account_id,))
 
-    for idx, channel in enumerate(unique_channels, start=1):
+    for raw_channel in unique_channels:
+        channel = (raw_channel or "").strip()
+        if not channel:
+            continue
+        username: Optional[str]
+        if channel.startswith("https://t.me/"):
+            username = channel.rsplit("/", 1)[-1] or None
+        else:
+            username = channel.lstrip("@") if channel.startswith("@") else channel or None
         try:
             await _execute(
                 """
-                INSERT INTO warmup_channels (account_id, channel, position)
+                INSERT INTO warmup_channels (account_id, channel, channel_username)
                 VALUES (?, ?, ?)
                 """,
-                (account_id, channel, idx),
+                (account_id, channel, username),
             )
         except AsyncpgUniqueViolationError:  # pragma: no cover - PostgreSQL duplicate guard
             continue
@@ -1063,10 +1120,20 @@ async def get_warmup_pending(
 ) -> List[Dict[str, Any]]:
     records = await _fetchall(
         """
-        SELECT *
+        SELECT id,
+               account_id,
+               channel,
+               channel_username,
+               status,
+               error,
+               attempts,
+               last_attempt_at,
+               joined_at,
+               created_at,
+               updated_at
         FROM warmup_channels
         WHERE account_id = ? AND status = 'pending'
-        ORDER BY position
+        ORDER BY created_at, id
         LIMIT ?
         """,
         (account_id, limit),
@@ -1082,10 +1149,20 @@ async def get_warmup_pending(
                 await sync_warmup_channels(account_id, queue)
                 records = await _fetchall(
                     """
-                    SELECT *
+                    SELECT id,
+                           account_id,
+                           channel,
+                           channel_username,
+                           status,
+                           error,
+                           attempts,
+                           last_attempt_at,
+                           joined_at,
+                           created_at,
+                           updated_at
                     FROM warmup_channels
                     WHERE account_id = ? AND status = 'pending'
-                    ORDER BY position
+                    ORDER BY created_at, id
                     LIMIT ?
                     """,
                     (account_id, limit),
@@ -1258,9 +1335,19 @@ async def get_running_warmup_accounts() -> List[Dict[str, Any]]:
 
 async def get_accounts_in_warmup() -> List[Dict[str, Any]]:
     return await _fetch_accounts(
-        "SELECT * FROM accounts WHERE mode = 'warmup' AND status = 'running'",
+        "SELECT * FROM accounts WHERE mode = 'warmup'",
         (),
     )
+
+
+async def auto_start_warmup_accounts() -> None:
+    """Ensure all warmup accounts are marked as running before scheduling joins."""
+
+    warmup_accounts = await get_accounts_in_warmup()
+    for account in warmup_accounts:
+        if account.get("status") != "running":
+            await mark_account_running(account["id"])
+            logger.info("Auto-started warmup account %s", account.get("phone", account["id"]))
 
 
 async def add_comment_log(
