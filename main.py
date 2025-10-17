@@ -5,6 +5,10 @@ import logging
 import shutil
 import sqlite3
 import atexit
+try:
+    import fcntl  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - platform specific fallback
+    fcntl = None  # type: ignore[assignment]
 from collections import Counter, defaultdict
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -340,6 +344,31 @@ def _release_session_lock(key: str) -> None:
     session_locks.pop(key, None)
 
 
+@asynccontextmanager
+async def session_file_lock(session_path: str):
+    """Блокировка файла сессии для предотвращения конфликтов."""
+
+    if fcntl is None or os.name == "nt":  # pragma: no cover - fallback for non-POSIX
+        yield
+        return
+
+    lock_path = session_path + ".lock"
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
+
+
 def _acquire_process_lock(lock_path: Optional[str] = None) -> None:
     """Ensure only a single bot process is running at a time."""
 
@@ -469,160 +498,163 @@ async def safe_session_operation(
         )
         lock_context = _NOOP_ASYNC_CONTEXT
 
-    async with lock_context:
-        lock_acquired_at = loop.time()
-        if acquire_lock:
+    session_file_path = f"{session_path}.session"
+
+    async with session_file_lock(session_file_path):
+        async with lock_context:
+            lock_acquired_at = loop.time()
+            if acquire_lock:
+                logging.debug(
+                    "safe_session_operation[%s]: lock acquired in %.2fs",
+                    op_name,
+                    lock_acquired_at - wait_started_at,
+                )
+            else:
+                logging.debug(
+                    "safe_session_operation[%s]: lock acquisition skipped in %.2fs",
+                    op_name,
+                    lock_acquired_at - wait_started_at,
+                )
+
+            ensure_session_file_permissions(session_file_path)
+            permissions_ready_at = loop.time()
             logging.debug(
-                "safe_session_operation[%s]: lock acquired in %.2fs",
+                "safe_session_operation[%s]: session file prepared in %.2fs",
                 op_name,
-                lock_acquired_at - wait_started_at,
+                permissions_ready_at - lock_acquired_at,
             )
-        else:
+
             logging.debug(
-                "safe_session_operation[%s]: lock acquisition skipped in %.2fs",
+                "safe_session_operation[%s]: instantiating Client(api_id=%s, session_path=%s)",
                 op_name,
-                lock_acquired_at - wait_started_at,
+                API_ID,
+                session_path,
             )
 
-        ensure_session_file_permissions(f"{session_path}.session")
-        permissions_ready_at = loop.time()
-        logging.debug(
-            "safe_session_operation[%s]: session file prepared in %.2fs",
-            op_name,
-            permissions_ready_at - lock_acquired_at,
-        )
-
-        logging.debug(
-            "safe_session_operation[%s]: instantiating Client(api_id=%s, session_path=%s)",
-            op_name,
-            API_ID,
-            session_path,
-        )
-
-        client_options: Dict[str, Any] = dict(client_kwargs or {})
-        app = Client(
-            session_path,
-            api_id=API_ID,
-            api_hash=API_HASH,
-            **client_options,
-        )
-        client_created_at = loop.time()
-        logging.debug(
-            "safe_session_operation[%s]: client object created in %.2fs",
-            op_name,
-            client_created_at - permissions_ready_at,
-        )
-
-        entered_context = False
-        connect_started_at = loop.time()
-
-        try:
-            if start_client:
+            client_options: Dict[str, Any] = dict(client_kwargs or {})
+            app = Client(
+                session_path,
+                api_id=API_ID,
+                api_hash=API_HASH,
+                **client_options,
+            )
+            client_created_at = loop.time()
+            logging.debug(
+                "safe_session_operation[%s]: client object created in %.2fs",
+                op_name,
+                client_created_at - permissions_ready_at,
+            )
+    
+            entered_context = False
+            connect_started_at = loop.time()
+    
+            try:
+                if start_client:
+                    try:
+                        if connect_timeout is not None:
+                            await asyncio.wait_for(
+                                app.__aenter__(),
+                                timeout=connect_timeout,
+                            )
+                        else:
+                            await app.__aenter__()
+                    except asyncio.TimeoutError:
+                        logging.error(
+                            "safe_session_operation[%s]: timeout while connecting after %.2fs",
+                            op_name,
+                            loop.time() - connect_started_at,
+                        )
+                        raise
+                else:
+                    try:
+                        if connect_timeout is not None:
+                            await asyncio.wait_for(app.connect(), timeout=connect_timeout)
+                        else:
+                            await app.connect()
+                    except asyncio.TimeoutError:
+                        logging.error(
+                            "safe_session_operation[%s]: timeout while connecting after %.2fs",
+                            op_name,
+                            loop.time() - connect_started_at,
+                        )
+                        raise
+    
+                entered_context = True
+                connected_at = loop.time()
+                logging.debug(
+                    "safe_session_operation[%s]: client %s in %.2fs",
+                    op_name,
+                    "started" if start_client else "connected",
+                    connected_at - connect_started_at,
+                )
+    
+                operation_started_at = connected_at
                 try:
-                    if connect_timeout is not None:
-                        await asyncio.wait_for(
-                            app.__aenter__(),
-                            timeout=connect_timeout,
+                    if operation_timeout is not None:
+                        result = await asyncio.wait_for(
+                            coro_func(app),
+                            timeout=operation_timeout,
                         )
                     else:
-                        await app.__aenter__()
+                        result = await coro_func(app)
                 except asyncio.TimeoutError:
                     logging.error(
-                        "safe_session_operation[%s]: timeout while connecting after %.2fs",
+                        "safe_session_operation[%s]: timeout while running operation after %.2fs",
                         op_name,
-                        loop.time() - connect_started_at,
+                        loop.time() - operation_started_at,
                     )
                     raise
-            else:
-                try:
-                    if connect_timeout is not None:
-                        await asyncio.wait_for(app.connect(), timeout=connect_timeout)
-                    else:
-                        await app.connect()
-                except asyncio.TimeoutError:
-                    logging.error(
-                        "safe_session_operation[%s]: timeout while connecting after %.2fs",
-                        op_name,
-                        loop.time() - connect_started_at,
-                    )
-                    raise
-
-            entered_context = True
-            connected_at = loop.time()
-            logging.debug(
-                "safe_session_operation[%s]: client %s in %.2fs",
-                op_name,
-                "started" if start_client else "connected",
-                connected_at - connect_started_at,
-            )
-
-            operation_started_at = connected_at
-            try:
-                if operation_timeout is not None:
-                    result = await asyncio.wait_for(
-                        coro_func(app),
-                        timeout=operation_timeout,
-                    )
-                else:
-                    result = await coro_func(app)
-            except asyncio.TimeoutError:
-                logging.error(
-                    "safe_session_operation[%s]: timeout while running operation after %.2fs",
+    
+                finished_at = loop.time()
+                logging.debug(
+                    "safe_session_operation[%s]: coroutine completed in %.2fs",
                     op_name,
-                    loop.time() - operation_started_at,
+                    finished_at - operation_started_at,
                 )
-                raise
-
-            finished_at = loop.time()
-            logging.debug(
-                "safe_session_operation[%s]: coroutine completed in %.2fs",
-                op_name,
-                finished_at - operation_started_at,
-            )
-
-            return result
-        finally:
-            if entered_context:
-                disconnect_started_at = loop.time()
-                try:
-                    if start_client:
-                        if disconnect_timeout is not None:
-                            await asyncio.wait_for(
-                                app.__aexit__(None, None, None),
-                                timeout=disconnect_timeout,
-                            )
+    
+                return result
+            finally:
+                if entered_context:
+                    disconnect_started_at = loop.time()
+                    try:
+                        if start_client:
+                            if disconnect_timeout is not None:
+                                await asyncio.wait_for(
+                                    app.__aexit__(None, None, None),
+                                    timeout=disconnect_timeout,
+                                )
+                            else:
+                                await app.__aexit__(None, None, None)
                         else:
-                            await app.__aexit__(None, None, None)
+                            if disconnect_timeout is not None:
+                                await asyncio.wait_for(
+                                    app.disconnect(),
+                                    timeout=disconnect_timeout,
+                                )
+                            else:
+                                await app.disconnect()
+                    except asyncio.TimeoutError:
+                        logging.error(
+                            "safe_session_operation[%s]: timeout while closing client after %.2fs",
+                            op_name,
+                            loop.time() - disconnect_started_at,
+                        )
+                        raise
+                    except Exception:
+                        logging.exception(
+                            "safe_session_operation[%s]: unexpected error while closing client",
+                            op_name,
+                        )
+                        raise
                     else:
-                        if disconnect_timeout is not None:
-                            await asyncio.wait_for(
-                                app.disconnect(),
-                                timeout=disconnect_timeout,
-                            )
-                        else:
-                            await app.disconnect()
-                except asyncio.TimeoutError:
-                    logging.error(
-                        "safe_session_operation[%s]: timeout while closing client after %.2fs",
-                        op_name,
-                        loop.time() - disconnect_started_at,
-                    )
-                    raise
-                except Exception:
-                    logging.exception(
-                        "safe_session_operation[%s]: unexpected error while closing client",
-                        op_name,
-                    )
-                    raise
-                else:
-                    disconnected_at = loop.time()
-                    logging.debug(
-                        "safe_session_operation[%s]: client closed in %.2fs",
-                        op_name,
-                        disconnected_at - disconnect_started_at,
-                    )
-
-
+                        disconnected_at = loop.time()
+                        logging.debug(
+                            "safe_session_operation[%s]: client closed in %.2fs",
+                            op_name,
+                            disconnected_at - disconnect_started_at,
+                        )
+    
+    
 async def with_retry(
     session_path: str,
     coro_func: Callable[[Client], Awaitable[Any]],
@@ -666,37 +698,61 @@ SKIP_SUMMARY_BUTTON_TEXT = "🕒 Сводка пропусков (лог-кан�
 def ensure_session_file_permissions(session_file: str) -> None:
     """Ensure session file is writable with SQLite optimizations"""
 
-    try:
-        directory = os.path.dirname(session_file)
-        if directory and not os.path.isdir(directory):
-            os.makedirs(directory, exist_ok=True)
+    def _configure() -> None:
+        try:
+            directory = os.path.dirname(session_file)
+            if directory and not os.path.isdir(directory):
+                os.makedirs(directory, exist_ok=True)
 
-        if directory and not os.access(directory, os.W_OK):
-            try:
-                os.chmod(directory, 0o700)
-            except PermissionError:
-                logging.warning("Не удалось изменить права доступа каталога сессий: %s", directory)
+            if directory and not os.access(directory, os.W_OK):
+                try:
+                    os.chmod(directory, 0o700)
+                except PermissionError:
+                    logging.warning(
+                        "Не удалось изменить права доступа каталога сессий: %s",
+                        directory,
+                    )
 
-        if os.path.exists(session_file):
-            desired_mode = 0o666 if os.name == "nt" else 0o600
-            try:
-                os.chmod(session_file, desired_mode)
-            except PermissionError:
-                logging.warning(
-                    "Не удалось изменить права доступа к файлу сессии: %s", session_file
-                )
+            if os.path.exists(session_file):
+                desired_mode = 0o666 if os.name == "nt" else 0o600
+                try:
+                    os.chmod(session_file, desired_mode)
+                except PermissionError:
+                    logging.warning(
+                        "Не удалось изменить права доступа к файлу сессии: %s",
+                        session_file,
+                    )
 
+                try:
+                    conn = sqlite3.connect(session_file, timeout=30.0)
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute("PRAGMA busy_timeout=30000")
+                    conn.execute("PRAGMA synchronous=NORMAL")
+                    conn.execute("PRAGMA cache_size=10000")
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception:
+            logging.exception(
+                "Ошибка при настройке прав доступа для файла сессии: %s",
+                session_file,
+            )
+
+    if fcntl is not None and os.name != "nt":
+        lock_path = session_file + ".lock"
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            _configure()
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
             try:
-                conn = sqlite3.connect(session_file, timeout=30.0)
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA busy_timeout=30000")
-                conn.execute("PRAGMA synchronous=NORMAL")
-                conn.execute("PRAGMA cache_size=10000")
-                conn.close()
-            except Exception:
+                os.remove(lock_path)
+            except OSError:
                 pass
-    except Exception:
-        logging.exception("Ошибка при настройке прав доступа для файла сессии: %s", session_file)
+    else:
+        _configure()
 
 
 COMMENT_LOG_RETENTION_DAYS = 2
@@ -4723,6 +4779,7 @@ async def join_channel(
             if os.path.exists(session_file_alt):
                 try:
                     shutil.copy2(session_file_alt, session_file)
+                    ensure_session_file_permissions(session_file)
                 except Exception as copy_error:
                     error_message = (
                         f"Аккаунт {session_key} - не удалось подготовить файл сессии: "
@@ -4730,7 +4787,6 @@ async def join_channel(
                     )
                     await bot.send_message(log_channel, error_message)
                     return False, error_message
-                ensure_session_file_permissions(session_file)
             else:
                 error_message = f"Аккаунт {session_key} - файл сессии не найден: {session_file}"
                 await bot.send_message(log_channel, error_message)
@@ -4846,8 +4902,8 @@ async def join_channel(
         else:
             await bot.send_message(log_channel, f"Аккаунт {session_key} ошибка подключения: {e}")
             return False, error_msg
-
-
+    
+    
 async def warmup_with_retry(
     session_key: str,
     coro_func: Callable[[], Awaitable[Any]],
