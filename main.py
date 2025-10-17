@@ -5,6 +5,7 @@ import logging
 import shutil
 import sqlite3
 import atexit
+import inspect
 from collections import Counter, defaultdict
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -684,7 +685,7 @@ SKIP_SUMMARY_BUTTON_TEXT = "🕒 Сводка пропусков (лог-кан�
 
 
 def ensure_session_file_permissions(session_file: str) -> None:
-    """Ensure session file is writable with SQLite optimizations"""
+    """Ensure session file is writable with SQLite optimizations."""
 
     try:
         directory = os.path.dirname(session_file)
@@ -695,28 +696,74 @@ def ensure_session_file_permissions(session_file: str) -> None:
             try:
                 os.chmod(directory, 0o700)
             except PermissionError:
-                logging.warning("Не удалось изменить права доступа каталога сессий: %s", directory)
-
-        if os.path.exists(session_file):
-            desired_mode = 0o666 if os.name == "nt" else 0o600
-            try:
-                os.chmod(session_file, desired_mode)
-            except PermissionError:
                 logging.warning(
-                    "Не удалось изменить права доступа к файлу сессии: %s", session_file
+                    "Не удалось изменить права доступа каталога сессий: %s",
+                    directory,
                 )
 
+        file_missing = not os.path.exists(session_file)
+        file_empty = False
+
+        if file_missing:
+            logging.warning("⚠️ Файл сессии не существует, создаем: %s", session_file)
             try:
-                conn = sqlite3.connect(session_file, timeout=30.0)
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA busy_timeout=30000")
-                conn.execute("PRAGMA synchronous=NORMAL")
-                conn.execute("PRAGMA cache_size=10000")
-                conn.close()
-            except Exception:
-                pass
-    except Exception:
-        logging.exception("Ошибка при настройке прав доступа для файла сессии: %s", session_file)
+                with open(session_file, "wb"):
+                    pass
+            except OSError as create_error:
+                logging.warning(
+                    "Не удалось создать файл сессии %s: %s",
+                    session_file,
+                    create_error,
+                )
+                return
+
+        try:
+            if os.path.getsize(session_file) == 0:
+                file_empty = True
+        except OSError as size_error:
+            logging.warning(
+                "Не удалось получить размер файла сессии %s: %s",
+                session_file,
+                size_error,
+            )
+            file_empty = True
+
+        if file_empty:
+            logging.warning("⚠️ Файл сессии пустой (0 байт), переинициализация: %s", session_file)
+            try:
+                with open(session_file, "wb"):
+                    pass
+            except OSError as truncate_error:
+                logging.warning(
+                    "Не удалось переинициализировать файл сессии %s: %s",
+                    session_file,
+                    truncate_error,
+                )
+                return
+
+        try:
+            conn = sqlite3.connect(session_file, timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=-64000")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.close()
+            logging.debug("✅ SQLite настройки применены для: %s", session_file)
+        except Exception as sqlite_error:
+            logging.warning(
+                "⚠️ Не удалось настроить SQLite для %s: %s",
+                session_file,
+                sqlite_error,
+            )
+
+        if os.path.exists(session_file):
+            try:
+                os.chmod(session_file, 0o600)
+            except PermissionError:
+                logging.debug("Не удалось установить права доступа 600 для %s", session_file)
+    except Exception as e:
+        logging.warning("Не удалось настроить SQLite для %s: %s", session_file, e)
 
 
 COMMENT_LOG_RETENTION_DAYS = 2
@@ -731,7 +778,7 @@ async def _run_with_sqlite_retries(
     *,
     attempts: int = 8,
     base_delay: float = 0.5,
-    on_retry: Optional[Callable[[int, BaseException], None]] = None,
+    on_retry: Optional[Callable[[int, BaseException], Union[None, Awaitable[None]]]] = None,
 ) -> Any:
     """Execute an async callable and retry when SQLite reports a locked database."""
 
@@ -747,7 +794,9 @@ async def _run_with_sqlite_retries(
                 last_exc = exc
                 if on_retry is not None:
                     try:
-                        on_retry(attempt, exc)
+                        maybe_awaitable = on_retry(attempt, exc)
+                        if inspect.isawaitable(maybe_awaitable):
+                            await maybe_awaitable
                     except Exception:  # pragma: no cover - defensive
                         logging.exception(
                             "Не удалось повторно подготовить сессию после ошибки блокировки"
@@ -768,7 +817,7 @@ async def _connect_client_with_retries(
     attempts: int = 8,
     base_delay: float = 0.5,
 ) -> None:
-    def _prepare_session(_: int, __: BaseException) -> None:
+    async def _prepare_session(_: int, __: BaseException) -> None:
         if session_file:
             ensure_session_file_permissions(session_file)
 
@@ -787,7 +836,7 @@ async def _start_client_with_retries(
     attempts: int = 8,
     base_delay: float = 0.5,
 ) -> None:
-    def _prepare_session(_: int, __: BaseException) -> None:
+    async def _prepare_session(_: int, __: BaseException) -> None:
         if session_file:
             ensure_session_file_permissions(session_file)
 
@@ -806,7 +855,7 @@ async def _stop_client_with_retries(
     attempts: int = 5,
     base_delay: float = 0.5,
 ) -> None:
-    def _prepare_session(_: int, __: BaseException) -> None:
+    async def _prepare_session(_: int, __: BaseException) -> None:
         if session_file:
             ensure_session_file_permissions(session_file)
 
@@ -865,7 +914,7 @@ async def _disconnect_client_with_retries(
     attempts: int = 5,
     base_delay: float = 0.5,
 ) -> None:
-    def _prepare_session(_: int, __: BaseException) -> None:
+    async def _prepare_session(_: int, __: BaseException) -> None:
         if session_file:
             ensure_session_file_permissions(session_file)
 
@@ -4874,7 +4923,8 @@ async def join_channel_with_retry(
     """Обертка вокруг :func:`join_channel` с повторными попытками при блокировках БД."""
 
     max_retries = 3
-    delay = 2.0
+    delay = 3.0
+    lock_keywords = ("locked", "blocked", "busy", "timeout")
 
     for attempt in range(max_retries):
         try:
@@ -4890,7 +4940,7 @@ async def join_channel_with_retry(
             if success:
                 return True, None
 
-            if error and "locked" in error.lower() and attempt < max_retries - 1:
+            if error and any(word in error.lower() for word in lock_keywords) and attempt < max_retries - 1:
                 logging.warning(
                     "🔒 Блокировка в join_channel, повтор %s/%s",
                     attempt + 1,
@@ -4903,7 +4953,7 @@ async def join_channel_with_retry(
 
         except Exception as exc:
             error_text = str(exc)
-            if "locked" in error_text.lower() and attempt < max_retries - 1:
+            if any(word in error_text.lower() for word in lock_keywords) and attempt < max_retries - 1:
                 logging.warning(
                     "🔒 Блокировка БД, повтор %s/%s",
                     attempt + 1,
@@ -4935,25 +4985,42 @@ async def join_channel(
         session_name = os.path.join(session_dir, session_key)
         session_file = f"{session_name}.session"
 
-        if not os.path.exists(session_file):
-            session_file_alt = f"{session_file}.session"
-            if os.path.exists(session_file_alt):
-                try:
-                    shutil.copy2(session_file_alt, session_file)
-                except Exception as copy_error:
-                    error_message = (
-                        f"Аккаунт {session_key} - не удалось подготовить файл сессии: "
-                        f"{copy_error}"
-                    )
-                    await bot.send_message(log_channel, error_message)
-                    return False, error_message
-                ensure_session_file_permissions(session_file)
-            else:
-                error_message = f"Аккаунт {session_key} - файл сессии не найден: {session_file}"
+        session_file_exists = os.path.exists(session_file)
+        session_file_alt = f"{session_file}.session"
+        session_file_alt_exists = os.path.exists(session_file_alt)
+
+        if not session_file_exists and not session_file_alt_exists:
+            error_message = (
+                f"❌ Файл сессии не найден: {session_file} (и альтернативный тоже)"
+            )
+            logging.error(error_message)
+            await bot.send_message(log_channel, error_message)
+            return False, error_message
+
+        if not session_file_exists and session_file_alt_exists:
+            try:
+                logging.info(
+                    "📋 Копируем альтернативный файл сессии: %s -> %s",
+                    session_file_alt,
+                    session_file,
+                )
+                shutil.copy2(session_file_alt, session_file)
+                session_file_exists = True
+            except Exception as copy_error:
+                error_message = (
+                    f"Аккаунт {session_key} - не удалось скопировать файл сессии: {copy_error}"
+                )
+                logging.error(error_message)
                 await bot.send_message(log_channel, error_message)
                 return False, error_message
-        else:
+
+        if session_file_exists:
             ensure_session_file_permissions(session_file)
+        else:
+            error_message = f"❌ Файл сессии недоступен после копирования: {session_file}"
+            logging.error(error_message)
+            await bot.send_message(log_channel, error_message)
+            return False, error_message
 
         key = make_session_key(user_id, session_key)
 
