@@ -29,7 +29,7 @@ class WarmupService:
                 get_running_warmup_accounts,
                 get_warmup_pending,
             )
-            from main import join_channel
+            from main import join_channel_with_retry
 
             # 1. Получаем аккаунты для прогрева
             accounts = await get_running_warmup_accounts()
@@ -77,17 +77,13 @@ class WarmupService:
                     logging.info(f"📺 {phone} вступает в {channel_name}")
 
                     # ИСПОЛЬЗУЕМ ПОВТОРНЫЕ ПОПЫТКИ для вступления в канал
-                    success, error_message = await retry_on_lock(
-                        lambda: join_channel(
-                            channel=channel_name,
-                            account_id=account_id,
-                            session_key=session_key,
-                            user_id=user_id,
-                            is_warmup=True,
-                            acquire_lock=False,
-                        ),
-                        max_retries=2,
-                        delay=1.0
+                    success, error_message = await join_channel_with_retry(
+                        channel=channel_name,
+                        account_id=account_id,
+                        session_key=session_key,
+                        user_id=user_id,
+                        is_warmup=True,
+                        acquire_lock=False,
                     )
 
                     if success:
