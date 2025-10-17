@@ -23,6 +23,9 @@ class WarmupService:
                 logging.info("💤 Цикл завершен, ждем 1 минуту (для теста)")
                 await asyncio.sleep(60)  # 1 минута для теста
 
+            except asyncio.CancelledError:
+                logging.info("🛑 Сервис прогрева отменен")
+                raise
             except Exception as e:
                 logging.error(f"❌ Ошибка в сервисе прогрева: {e}")
                 await asyncio.sleep(30)
