@@ -4863,6 +4863,60 @@ async def send_comments(userid, session, account_id):
             _release_session_lock(key_inner)
 
 
+async def join_channel_with_retry(
+    channel: str,
+    account_id: int,
+    session_key: str,
+    user_id: int,
+    is_warmup: bool = False,
+    acquire_lock: bool = True,
+) -> Tuple[bool, Optional[str]]:
+    """Обертка вокруг :func:`join_channel` с повторными попытками при блокировках БД."""
+
+    max_retries = 3
+    delay = 2.0
+
+    for attempt in range(max_retries):
+        try:
+            success, error = await join_channel(
+                channel=channel,
+                account_id=account_id,
+                session_key=session_key,
+                user_id=user_id,
+                is_warmup=is_warmup,
+                acquire_lock=acquire_lock,
+            )
+
+            if success:
+                return True, None
+
+            if error and "locked" in error.lower() and attempt < max_retries - 1:
+                logging.warning(
+                    "🔒 Блокировка в join_channel, повтор %s/%s",
+                    attempt + 1,
+                    max_retries,
+                )
+                await asyncio.sleep(delay * (attempt + 1))
+                continue
+
+            return success, error
+
+        except Exception as exc:
+            error_text = str(exc)
+            if "locked" in error_text.lower() and attempt < max_retries - 1:
+                logging.warning(
+                    "🔒 Блокировка БД, повтор %s/%s",
+                    attempt + 1,
+                    max_retries,
+                )
+                await asyncio.sleep(delay * (attempt + 1))
+                continue
+
+            return False, error_text
+
+    return False, "Превышено количество попыток из-за блокировок БД"
+
+
 async def join_channel(
     channel: str,
     account_id: int,
