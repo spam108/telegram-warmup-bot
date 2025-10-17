@@ -9,7 +9,8 @@ async def retry_on_lock(operation, max_retries=3, delay=1.0):
         try:
             return await operation()
         except Exception as e:
-            if "locked" in str(e).lower() and attempt < max_retries - 1:
+            message = str(e).lower()
+            if any(word in message for word in ["locked", "blocked", "busy", "timeout"]) and attempt < max_retries - 1:
                 logging.warning(f"🔒 Блокировка БД, повтор {attempt + 1}/{max_retries}")
                 await asyncio.sleep(delay * (attempt + 1))
             else:
@@ -40,7 +41,7 @@ class WarmupService:
                 try:
                     # ПАУЗА между аккаунтами для снижения нагрузки на БД
                     if i > 0:
-                        await asyncio.sleep(2)  # 2 секунды между аккаунтами
+                        await asyncio.sleep(5)  # 5 секунд между аккаунтами
 
                     account_id = account.get("id")
                     phone = account.get("phone", "unknown")
@@ -83,7 +84,7 @@ class WarmupService:
                         session_key=session_key,
                         user_id=user_id,
                         is_warmup=True,
-                        acquire_lock=False,
+                        acquire_lock=True,
                     )
 
                     if success:
@@ -93,6 +94,7 @@ class WarmupService:
 
                 except Exception as e:
                     logging.error(f"❌ Ошибка прогрева {account.get('phone', 'unknown')}: {e}")
+                    await asyncio.sleep(3)
 
         except Exception as e:
             logging.error(f"💥 Критическая ошибка в цикле прогрева: {e}")
