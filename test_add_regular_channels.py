@@ -56,7 +56,9 @@ def test_add_regular_channels_success_and_failure(monkeypatch):
         async def send_message(self, chat_id: int, text: str, **kwargs: Any) -> None:
             recorded_messages.append((chat_id, text))
 
-    async def fake_join_channel(channel, account_id, session_key, user_id, is_warmup=False):
+    async def fake_join_channel(
+        channel, account_id, session_key, user_id, is_warmup=False, acquire_lock=True
+    ):
         if channel == "@good":
             return True, None
         return False, "Ошибка доступа"

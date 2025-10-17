@@ -14,8 +14,8 @@ class WarmupService:
             from db import (
                 get_running_warmup_accounts,
                 get_warmup_pending,
-                mark_warmup_channel_joined,
             )
+            from main import join_channel
 
             # 1. Получаем аккаунты для прогрева
             accounts = await get_running_warmup_accounts()
@@ -42,26 +42,42 @@ class WarmupService:
 
                     channel = pending_channels[0]
                     channel_name = channel.get("channel")
+
+                    if not channel_name:
+                        logging.warning(
+                            f"⚠️ Для аккаунта {phone} не указан канал для вступления"
+                        )
+                        continue
+
+                    session_key = account.get("phone")
+                    user_id = account.get("user_id")
+
+                    if not session_key or user_id is None:
+                        logging.warning(
+                            f"⚠️ Для аккаунта {phone} отсутствуют данные сессии для вступления в {channel_name}"
+                        )
+                        continue
+
                     logging.info(
                         f"📺 Аккаунт {phone} вступает в {channel_name}"
                     )
 
-                    # 3. Временная заглушка - всегда успешное вступление
-                    success = True
+                    success, error_message = await join_channel(
+                        channel=channel_name,
+                        account_id=account_id,
+                        session_key=session_key,
+                        user_id=user_id,
+                        is_warmup=True,
+                        acquire_lock=False,
+                    )
 
-                    if success and channel_name:
-                        # 4. Обновляем БД при успешном вступлении
-                        await mark_warmup_channel_joined(account_id, channel_name)
+                    if success:
                         logging.info(
                             f"✅ {phone} успешно вступил в {channel_name}"
                         )
-                    elif not channel_name:
-                        logging.warning(
-                            f"⚠️ Для аккаунта {phone} не указан канал для вступления"
-                        )
                     else:
                         logging.warning(
-                            f"⚠️ {phone} не смог вступить в {channel_name}"
+                            f"⚠️ {phone} не смог вступить в {channel_name}: {error_message}"
                         )
 
                 except Exception as e:

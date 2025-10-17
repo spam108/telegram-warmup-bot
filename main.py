@@ -4652,6 +4652,7 @@ async def join_channel(
     session_key: str,
     user_id: int,
     is_warmup: bool = False,
+    acquire_lock: bool = True,
 ) -> Tuple[bool, Optional[str]]:
     """Единая функция для вступления в канал (обычный или прогрев).
 
@@ -4764,6 +4765,7 @@ async def join_channel(
             session_name,
             _join_runner,
             lock_key=key,
+            acquire_lock=acquire_lock,
         )
 
     except TransientJoinError:
