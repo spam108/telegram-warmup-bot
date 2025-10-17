@@ -4927,6 +4927,7 @@ async def process_single_warmup_account(
 ) -> None:
     """Обрабатывает отдельный аккаунт прогрева: комментарии, реакции и вступление в каналы."""
 
+    # 1. Подготовка данных аккаунта
     await process_single_standard_account(account)
 
     account_id = account.get("id")
@@ -4952,13 +4953,36 @@ async def process_single_warmup_account(
     logging.debug("Warmup: Processing account %s, active: %s", session_key, active_sessions.get(key))
     add_summary("debug", f"Processing account {session_key}, active={active_sessions.get(key)}")
 
-    if now.tzinfo is None:
-        now_moscow = now.replace(tzinfo=MOSCOW_TZ)
-    else:
-        now_moscow = now.astimezone(MOSCOW_TZ)
-    now_utc = now_moscow.astimezone(timezone.utc)
-    now_moscow_date = now_moscow.date()
+    try:
+        # 2.1 Временные преобразования
+        if now.tzinfo is None:
+            now_moscow = now.replace(tzinfo=MOSCOW_TZ)
+        else:
+            now_moscow = now.astimezone(MOSCOW_TZ)
+        now_utc = now_moscow.astimezone(timezone.utc)
+        now_moscow_date = now_moscow.date()
 
+        # 2.2 Обработка warmup_end
+        warmup_end = _parse_warmup_datetime(account.get("warmup_end_at"))
+        if warmup_end and warmup_end.tzinfo is None:
+            warmup_end = warmup_end.replace(tzinfo=timezone.utc)
+        if not warmup_end:
+            warmup_end = now_utc + timedelta(days=7)
+            account["warmup_end_at"] = warmup_end
+            try:
+                await db_update_warmup_schedule(account_id, warmup_end=warmup_end)
+            except Exception:
+                logging.exception(
+                    "Warmup: Failed to persist default warmup end timestamp for account %s",
+                    account_id,
+                )
+        else:
+            account["warmup_end_at"] = warmup_end
+            if warmup_end <= now_utc:
+                await set_account_mode(account_id, "standard", warmup_days=None)
+                return
+
+        # 2.3 Обработка warmup_last_join_at
         warmup_last_join_at = _parse_warmup_datetime(account.get("warmup_last_join_at"))
         if warmup_last_join_at and warmup_last_join_at.tzinfo is None:
             warmup_last_join_at = warmup_last_join_at.replace(tzinfo=timezone.utc)
@@ -4981,6 +5005,7 @@ async def process_single_warmup_account(
                 await reset_warmup_daily_state(account_id)
                 account["warmup_joined_today"] = 0
 
+        # 2.4 Обработка next_join_at
         next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
         if next_join_at and next_join_at.tzinfo is None:
             next_join_at = next_join_at.replace(tzinfo=timezone.utc)
@@ -5000,6 +5025,7 @@ async def process_single_warmup_account(
         if next_join_at and next_join_at > now_utc:
             return
 
+        # 2.5 Проверка daily_limit
         joined_today = account.get("warmup_joined_today", 0)
         logging.debug("Warmup: Account %s joined today: %s/%s", session_key, joined_today, daily_limit)
         add_summary("debug", f"{session_key}: {joined_today}/{daily_limit} joins")
@@ -5020,10 +5046,12 @@ async def process_single_warmup_account(
             account["warmup_next_join_at"] = next_time
             return
 
+        # 2.6 Получение pending_channels
         pending_channels = await get_warmup_pending(account_id, limit=1, reset_if_empty=True)
         logging.debug("Warmup: Account %s pending channels: %s", session_key, len(pending_channels))
         add_summary("debug", f"{session_key}: pending channels {len(pending_channels)}")
 
+        # 2.7 Проверка наличия каналов
         if not pending_channels:
             message = f"Account {session_key} has no pending channels, skipping"
             logging.info("Warmup: %s", message)
@@ -5036,33 +5064,24 @@ async def process_single_warmup_account(
                 session_key,
                 next_time.isoformat(),
             )
-    else:
-        account["warmup_last_join_at"] = warmup_last_join_at
+            account["warmup_next_join_at"] = next_time
+            return
 
-    if warmup_last_join_at:
-        last_join_moscow = warmup_last_join_at.astimezone(MOSCOW_TZ)
-        if last_join_moscow.date() < now_moscow_date:
-            await reset_warmup_daily_state(account_id)
-            account["warmup_joined_today"] = 0
+        # 2.8 Подготовка данных канала и файла сессии
+        channel_entry = pending_channels[0]
+        channel = channel_entry["channel"]
 
-    next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
-    if next_join_at and next_join_at.tzinfo is None:
-        next_join_at = next_join_at.replace(tzinfo=timezone.utc)
-    if not next_join_at:
-        next_join_at = now_utc + timedelta(hours=1)
-        account["warmup_next_join_at"] = next_join_at
-        try:
-            await db_update_warmup_schedule(account_id, next_join=next_join_at)
-        except Exception:
-            logging.exception(
-                "Warmup: Failed to persist default next join timestamp for account %s",
-                account_id,
+        session_file = os.path.join(SESSIONS_BASE_DIR, str(user_id), f"{session_key}.session")
+        if not os.path.exists(session_file):
+            warning_message = (
+                f"Аккаунт {session_key} (прогрев) - файл сессии не найден: {session_file}"
             )
             logging.warning("Warmup: %s", warning_message)
             add_summary("warning", warning_message)
             await set_account_mode(account_id, "standard", warmup_days=None)
             return
 
+        # 2.9 Присоединение к каналу (safe_join_channel_warmup)
         try:
             success, error_reason = await safe_join_channel_warmup(
                 account_id=account_id,
@@ -5087,31 +5106,26 @@ async def process_single_warmup_account(
             await asyncio.sleep(min(backoff_seconds, 5))
             return
 
-    if joined_today >= daily_limit:
-        message = f"Account {session_key} reached daily limit, skipping"
-        logging.info("Warmup: %s", message)
-        add_summary("info", message)
-        next_window_start = _next_join_window_start(now_moscow, current_settings)
-        next_time = plan_next_warmup_join(next_window_start, current_settings)
-        await db_update_warmup_schedule(account_id, next_join=next_time)
-        logging.info(
-            "Warmup schedule: account %s (%s) next join at %s",
-            account_id,
-            session_key,
-            next_time.isoformat(),
-        )
-        account["warmup_next_join_at"] = next_time
-        return
+        if not success:
+            if error_reason and any(
+                phrase in error_reason.lower()
+                for phrase in ("занят", "запускается")
+            ):
+                info_message = f"Account {session_key} занят ({error_reason}), повторим позже"
+                logging.info("Warmup: %s", info_message)
+                add_summary("info", info_message)
+                return
+            await set_account_mode(account_id, "standard", warmup_days=None)
+            return
 
+        # 2.10 Обработка результатов присоединения
         success_message = f"Account {session_key} joined {channel}"
         logging.info("Warmup: %s", success_message)
         add_summary("info", success_message)
 
-    if not pending_channels:
-        message = f"Account {session_key} has no pending channels, skipping"
-        logging.info("Warmup: %s", message)
-        add_summary("info", message)
-        next_time = _get_next_warmup_join(now_moscow, current_settings)
+        post_join_now = datetime.now(timezone.utc)
+        # 2.11 Планирование следующего вступления
+        next_time = _get_next_warmup_join(post_join_now, current_settings)
         await db_update_warmup_schedule(account_id, next_join=next_time)
         logging.info(
             "Warmup schedule: account %s (%s) next join at %s",
@@ -5120,7 +5134,6 @@ async def process_single_warmup_account(
             next_time.isoformat(),
         )
         account["warmup_next_join_at"] = next_time
-
     finally:
         _release_session_lock(key)
 
