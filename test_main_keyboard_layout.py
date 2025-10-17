@@ -93,16 +93,14 @@ async def test_main_menu_keyboard_layout_no_accounts(monkeypatch):
     )
     assert account_message["text"] == "Ваши аккаунты"
     keyboard_layout = [[button.text for button in row] for row in account_markup.inline_keyboard]
-    assert keyboard_layout == [["🔥 Прогрев аккаунта"]], "Ожидаем кнопку настроек прогрева"
-    warmup_callback = account_markup.inline_keyboard[0][0].callback_data
-    assert warmup_callback == "warmup_settings", "Кнопка прогрева должна вызывать warmup_settings"
+    assert keyboard_layout == [], "При отсутствии аккаунтов не ожидаем inline-кнопок"
 
     actions_markup = actions_message.get("markup")
     assert actions_message["text"] == "Доступные действия"
     assert isinstance(actions_markup, main.ReplyKeyboardMarkup), "Ожидается reply-клавиатура действий"
     keyboard_layout = [[button.text for button in row] for row in actions_markup.keyboard]
     assert keyboard_layout == [
-        ["Добавить аккаунт", "Добавить прогрев"],
+        ["Добавить аккаунт", "🔥 Настроить прогрев"],
         ["📊 Общая статистика", "⚙️ Настройки прогрева"],
     ]
 
