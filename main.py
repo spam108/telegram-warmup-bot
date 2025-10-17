@@ -73,6 +73,7 @@ from db import (
     get_running_warmup_accounts,
     get_running_accounts,
     get_warmup_pending,
+    get_warmup_channels,
     get_warmup_settings,
     increment_warmup_joined,
     init_db,
@@ -2784,6 +2785,13 @@ async def main_message(message):
         if not is_running:
             builder.row(button_delete)
 
+    builder.row(
+        types.InlineKeyboardButton(
+            text="🔥 Прогрев аккаунта",
+            callback_data="warmup_settings",
+        )
+    )
+
     await bot.send_message(message.from_user.id, 'Ваши аккаунты', reply_markup=builder.as_markup())
     await bot.send_message(
         message.from_user.id,
@@ -2971,6 +2979,64 @@ async def test_warmup_command(message: Message) -> None:
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
         logging.exception("Error in test_warmup_command: %s", e)
+
+
+@dp.message(Command("warmup_status"))
+async def warmup_status_command(message: Message) -> None:
+    """Показывает актуальное состояние прогрева для всех аккаунтов пользователя."""
+
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+
+    accounts = await get_accounts_for_user(message.from_user.id)
+    if not accounts:
+        await message.answer("У вас нет добавленных аккаунтов.")
+        return
+
+    lines = ["🔥 Статус прогрева:"]
+    for account in accounts:
+        account_id = account.get("id")
+        phone = account.get("phone", "неизвестно")
+        if account_id is None:
+            lines.append(f"• {phone}: ⚠️ нет идентификатора аккаунта")
+            continue
+
+        warmup_records = await get_warmup_channels(account_id)
+        warmup_queue = [record.get("channel") for record in warmup_records if record.get("channel")]
+        has_queue = bool(warmup_queue)
+        is_warmup_mode = account.get("mode") == "warmup"
+
+        if has_queue and is_warmup_mode:
+            status_text = "✅ режим прогрева активен"
+        elif has_queue:
+            status_text = "⏳ каналы загружены, режим ожидания"
+        else:
+            status_text = "❌ прогрев отключен"
+
+        joined_today = account.get("warmup_joined_today") or 0
+        next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
+        if next_join_at:
+            if next_join_at.tzinfo is None:
+                next_join_at = next_join_at.replace(tzinfo=timezone.utc)
+            else:
+                next_join_at = next_join_at.astimezone(timezone.utc)
+            next_join_display = next_join_at.strftime("%d.%m %H:%M UTC")
+        else:
+            next_join_display = "—"
+
+        lines.append(
+            "\n".join(
+                [
+                    f"• {phone}: {status_text}",
+                    f"  Каналов в прогреве: {len(warmup_queue)}",
+                    f"  Вступлений сегодня: {joined_today}",
+                    f"  Следующее вступление: {next_join_display}",
+                ]
+            )
+        )
+
+    await message.answer("\n".join(lines))
 
 
 @dp.message(Command("cleansessions"))
