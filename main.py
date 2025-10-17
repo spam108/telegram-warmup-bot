@@ -352,6 +352,10 @@ async def session_file_lock(session_path: str):
         yield
         return
 
+    directory = os.path.dirname(session_path)
+    if directory and not os.path.isdir(directory):
+        os.makedirs(directory, exist_ok=True)
+
     lock_path = session_path + ".lock"
     lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
 
