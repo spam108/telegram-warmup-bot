@@ -5109,12 +5109,12 @@ async def process_single_warmup_account(
 async def process_warmup_accounts():
     """Фоновая задача для добавления каналов в режиме прогрева (во время сна)"""
 
+    # Инициализируем БД перед началом работы
+    from db import init_db
+
     try:
-        try:
-            from db import _require_pool as _ensure_pool_ready
-        except ImportError:
-            _ensure_pool_ready = _require_pool
-        _ensure_pool_ready()
+        # Убеждаемся, что пул БД готов перед обработкой warmup-аккаунтов
+        await init_db()
     except Exception as db_error:
         logging.error("Database not ready for warmup: %s", db_error)
         await asyncio.sleep(30)
