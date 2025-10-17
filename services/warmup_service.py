@@ -8,6 +8,20 @@ class WarmupService:
         self.is_running = False
         self.accounts_stopped = False
 
+    async def stop_all_accounts(self):
+        """Временно останавливает все аккаунты (устанавливает флаг)"""
+        self.accounts_stopped = True
+        logging.info("🛑 Все аккаунты остановлены для прогрева")
+
+    async def start_all_accounts(self):
+        """Запускает аккаунты обратно"""
+        self.accounts_stopped = False
+        logging.info("🟢 Все аккаунты запущены после прогрева")
+
+    async def can_account_operate(self, account_id):
+        """Проверяет может ли аккаунт работать (не в режиме прогрева)"""
+        return not self.accounts_stopped
+
     async def run(self):
         """Основной цикл сервиса"""
         self.is_running = True
