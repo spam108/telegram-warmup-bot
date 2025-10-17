@@ -505,7 +505,7 @@ async def safe_session_operation(
                 lock_acquired_at - wait_started_at,
             )
 
-        ensure_session_file_permissions(f"{session_path}.session")
+        await ensure_session_file_permissions(f"{session_path}.session")
         permissions_ready_at = loop.time()
         logging.debug(
             "safe_session_operation[%s]: session file prepared in %.2fs",
@@ -819,7 +819,7 @@ async def _connect_client_with_retries(
 ) -> None:
     async def _prepare_session(_: int, __: BaseException) -> None:
         if session_file:
-            ensure_session_file_permissions(session_file)
+            await ensure_session_file_permissions(session_file)
 
     await _run_with_sqlite_retries(
         client.connect,
@@ -838,7 +838,7 @@ async def _start_client_with_retries(
 ) -> None:
     async def _prepare_session(_: int, __: BaseException) -> None:
         if session_file:
-            ensure_session_file_permissions(session_file)
+            await ensure_session_file_permissions(session_file)
 
     await _run_with_sqlite_retries(
         client.start,
@@ -857,7 +857,7 @@ async def _stop_client_with_retries(
 ) -> None:
     async def _prepare_session(_: int, __: BaseException) -> None:
         if session_file:
-            ensure_session_file_permissions(session_file)
+            await ensure_session_file_permissions(session_file)
 
     await _run_with_sqlite_retries(
         client.stop,
@@ -916,7 +916,7 @@ async def _disconnect_client_with_retries(
 ) -> None:
     async def _prepare_session(_: int, __: BaseException) -> None:
         if session_file:
-            ensure_session_file_permissions(session_file)
+            await ensure_session_file_permissions(session_file)
 
     await _run_with_sqlite_retries(
         client.disconnect,
@@ -1691,7 +1691,7 @@ async def process_account_reactions(account: Dict[str, Any]) -> None:
         )
         return
 
-    ensure_session_file_permissions(session_path)
+    await ensure_session_file_permissions(session_path)
 
     if session_path.endswith(".session"):
         session_name = session_path[:-len(".session")]
@@ -1796,7 +1796,7 @@ async def process_account_comments(account: Dict[str, Any]) -> None:
             )
         return
 
-    ensure_session_file_permissions(session_path)
+    await ensure_session_file_permissions(session_path)
 
     active_sessions[key] = True
     active_account_ids[key] = account_id
@@ -6144,7 +6144,7 @@ async def get_account_summary(account_id):
     try:
         session_path = account.get('session_path', '')
         if session_path and os.path.exists(session_path):
-            ensure_session_file_permissions(session_path)
+            await ensure_session_file_permissions(session_path)
 
             user_id_value = account.get("user_id")
             phone_value = account.get("phone")
