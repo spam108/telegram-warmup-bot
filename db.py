@@ -44,7 +44,9 @@ REQUIRED_TABLES = {
     "accounts",
     "comment_logs",
     "warmup_channels",
+    "warmup_pending_channels",
     "warmup_logs",
+    "warmup_settings",
     "posts",
     "channel_blacklist",
 }
@@ -230,6 +232,7 @@ async def init_db() -> None:
     _POOL = await asyncpg.create_pool(dsn)
     _BACKEND = "postgres"
     await _init_postgres_schema()
+    await init_warmup_tables()
 
 async def _init_postgres_schema() -> None:
     pool = _require_pool()
@@ -300,25 +303,7 @@ async def _init_postgres_schema() -> None:
             """
         )
 
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS warmup_channels (
-                id BIGSERIAL PRIMARY KEY,
-                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                channel TEXT NOT NULL,
-                position INTEGER NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                error TEXT,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                last_attempt_at TIMESTAMPTZ,
-                joined_at TIMESTAMPTZ,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (account_id, channel),
-                CHECK (status IN ('pending', 'joined', 'error'))
-            )
-            """
-        )
+        await ensure_warmup_tables(connection)
 
         await connection.execute(
             """
@@ -328,21 +313,6 @@ async def _init_postgres_schema() -> None:
                 reason TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (account_id, channel_id)
-            )
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS warmup_settings (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                channels_per_day INTEGER NOT NULL,
-                delay_minutes INTEGER NOT NULL,
-                join_start_hour INTEGER NOT NULL,
-                join_start_minute INTEGER NOT NULL,
-                join_end_hour INTEGER NOT NULL,
-                join_end_minute INTEGER NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
@@ -465,28 +435,8 @@ async def _init_postgres_schema() -> None:
 
         await connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS warmup_logs (
-                id BIGSERIAL PRIMARY KEY,
-                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                channel TEXT,
-                status TEXT NOT NULL,
-                details TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-
-        await connection.execute(
-            """
             CREATE INDEX IF NOT EXISTS idx_account_settings_account_id
             ON account_settings (account_id)
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_warmup_channels_pending
-            ON warmup_channels (account_id, status, position)
             """
         )
 
@@ -682,6 +632,185 @@ async def update_warmup_settings(
     await _execute(query, tuple(params))
 
 
+async def init_warmup_tables() -> None:
+    await ensure_warmup_tables()
+
+
+async def ensure_warmup_tables(connection: Optional[Any] = None) -> None:
+    async def _ensure(conn: Any) -> None:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS warmup_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                channels_per_day INTEGER NOT NULL,
+                delay_minutes INTEGER NOT NULL,
+                join_start_hour INTEGER NOT NULL,
+                join_start_minute INTEGER NOT NULL,
+                join_end_hour INTEGER NOT NULL,
+                join_end_minute INTEGER NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS warmup_channels (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                channel TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at TIMESTAMPTZ,
+                joined_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (account_id, channel),
+                CHECK (status IN ('pending', 'joined', 'error', 'processing'))
+            )
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS warmup_logs (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                channel TEXT,
+                status TEXT NOT NULL,
+                details TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        await conn.execute(
+            "DROP INDEX IF EXISTS idx_warmup_channels_pending"
+        )
+
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_warmup_channels_status
+            ON warmup_channels (account_id, status, position)
+            """
+        )
+
+        await conn.execute(
+            "DROP INDEX IF EXISTS idx_warmup_pending_channels_status"
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS warmup_pending_channels (
+                id BIGSERIAL PRIMARY KEY,
+                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                channel TEXT NOT NULL,
+                channel_username TEXT,
+                position INTEGER DEFAULT 0,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE (account_id, channel)
+            )
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_warmup_pending_account
+            ON warmup_pending_channels(account_id, position)
+            """
+        )
+
+        await conn.execute(
+            """
+            ALTER TABLE accounts
+            ADD COLUMN IF NOT EXISTS warmup_joined_today INTEGER NOT NULL DEFAULT 0
+            """
+        )
+
+        await conn.execute(
+            """
+            ALTER TABLE warmup_channels
+            ADD COLUMN IF NOT EXISTS position INTEGER
+            """
+        )
+
+        await conn.execute(
+            """
+            ALTER TABLE warmup_channels
+            ALTER COLUMN position SET DEFAULT 0
+            """
+        )
+
+        await conn.execute(
+            """
+            UPDATE warmup_channels
+            SET position = 0
+            WHERE position IS NULL
+            """
+        )
+
+        await conn.execute(
+            """
+            ALTER TABLE warmup_channels
+            ALTER COLUMN position SET NOT NULL
+            """
+        )
+
+        await conn.execute(
+            """
+            ALTER TABLE warmup_channels
+            ADD COLUMN IF NOT EXISTS status TEXT
+            """
+        )
+
+        await conn.execute(
+            """
+            ALTER TABLE warmup_channels
+            ALTER COLUMN status SET DEFAULT 'pending'
+            """
+        )
+
+        await conn.execute(
+            """
+            UPDATE warmup_channels
+            SET status = 'pending'
+            WHERE status IS NULL
+            """
+        )
+
+        await conn.execute(
+            """
+            ALTER TABLE warmup_channels
+            ALTER COLUMN status SET NOT NULL
+            """
+        )
+
+        await conn.execute(
+            """
+            ALTER TABLE warmup_channels
+            DROP CONSTRAINT IF EXISTS warmup_channels_status_check
+            """
+        )
+
+        await conn.execute(
+            """
+            ALTER TABLE warmup_channels
+            ADD CONSTRAINT warmup_channels_status_check
+            CHECK (status IN ('pending', 'joined', 'error', 'processing'))
+            """
+        )
+
+    if connection is not None:
+        await _ensure(connection)
+        return
+
+    pool = _require_pool()
+    async with pool.acquire() as connection_obj:
+        await _ensure(connection_obj)
+
+
 async def ensure_user(user_id: int) -> None:
     await _execute(
         """
@@ -736,6 +865,13 @@ def _convert_account_row(row: Any) -> Dict[str, Any]:
     if reactions_enabled is not None:
         data["reactions_enabled"] = bool(reactions_enabled)
     return data
+
+
+async def get_all_accounts() -> List[Dict[str, Any]]:
+    return await _fetch_accounts(
+        "SELECT * FROM accounts ORDER BY created_at",
+        (),
+    )
 
 
 async def get_accounts_for_user(user_id: int) -> List[Dict[str, Any]]:
@@ -1046,9 +1182,25 @@ async def sync_warmup_channels(account_id: int, channels: List[str]) -> None:
 
 
 
+async def get_warmup_channels(account_id: int) -> List[Dict[str, Any]]:
+    """Return all warmup channels for the specified account ordered by queue position."""
+    records = await _fetchall(
+        """
+        SELECT *
+        FROM warmup_channels
+        WHERE account_id = ?
+        ORDER BY position
+        """,
+        (account_id,),
+    )
+
+    return [dict(record) for record in records]
+
+
 async def get_warmup_pending(
-    account_id: int, *, limit: int = 15, reset_if_empty: bool = False
+    account_id: int, *, limit: int = 1, reset_if_empty: bool = False
 ) -> List[Dict[str, Any]]:
+    """Fetch pending warmup channels for an account ordered by queue position."""
     records = await _fetchall(
         """
         SELECT *
@@ -1083,6 +1235,7 @@ async def get_warmup_pending(
 
 
 async def mark_warmup_channel_joined(account_id: int, channel: str) -> None:
+    """Mark a warmup channel as successfully joined for the given account."""
     await _execute(
         """
         UPDATE warmup_channels
@@ -1163,6 +1316,7 @@ async def db_update_warmup_schedule(
 
 
 async def increment_warmup_joined(account_id: int) -> None:
+    """Increment the warmup joins counter for an account and update timestamps."""
     await _execute(
         """
         UPDATE accounts
