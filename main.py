@@ -81,6 +81,9 @@ from db import (
     _require_pool,
 )
 
+# Добавляем импорт сервиса прогрева
+from services.warmup_service import WarmupService
+
 
 logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
@@ -5930,6 +5933,14 @@ async def main():
             log_file.flush()
             
             await init_db()
+
+            # Запускаем сервис прогрева в отдельной таске
+            warmup_service = WarmupService()
+            asyncio.create_task(warmup_service.run())
+            logging.info("✅ Сервис прогрева запущен в отдельной таске")
+            log_file.write("Warmup service started in background task...\\n")
+            log_file.flush()
+
             await ensure_warmup_settings(
                 channels_per_day=DEFAULT_WARMUP_SETTINGS.channels_per_day,
                 delay_minutes=DEFAULT_WARMUP_SETTINGS.delay_minutes,
