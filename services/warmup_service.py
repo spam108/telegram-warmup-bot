@@ -95,15 +95,14 @@ class WarmupService:
             try:
                 logging.info("🔄 Начинаем цикл прогрева...")
 
-                # Здесь будет логика прогрева
-                await asyncio.sleep(10)  # Временная заглушка
+                await self.execute_warmup_cycle()
 
-                logging.info("💤 Цикл завершен, ждем 1 минуту (для теста)")
-                await asyncio.sleep(60)  # 1 минута для теста
+                logging.info("💤 Цикл прогрева завершен, ждем 1 час")
+                await asyncio.sleep(3600)  # 1 час между циклами
 
             except Exception as e:
                 logging.error(f"❌ Ошибка в сервисе прогрева: {e}")
-                await asyncio.sleep(30)
+                await asyncio.sleep(300)  # 5 минут при ошибке
 
     async def stop(self):
         """Остановка сервиса"""
