@@ -698,26 +698,29 @@ async def ensure_session_file_permissions(session_file: str) -> None:
             except PermissionError:
                 logging.warning("Не удалось изменить права доступа каталога сессий: %s", directory)
 
-        if os.path.exists(session_file):
-            desired_mode = 0o666 if os.name == "nt" else 0o600
-            try:
-                os.chmod(session_file, desired_mode)
-            except PermissionError:
-                logging.warning(
-                    "Не удалось изменить права доступа к файлу сессии: %s", session_file
-                )
+        if not os.path.exists(session_file):
+            logging.warning("⚠️ Файл сессии не существует: %s", session_file)
+            return
+
+        if os.path.getsize(session_file) == 0:
+            logging.warning("⚠️ Файл сессии пустой (0 байт): %s", session_file)
+            return
 
         import aiosqlite
 
-        async with aiosqlite.connect(session_file) as conn:
-            await conn.execute("PRAGMA journal_mode=WAL")
-            await conn.execute("PRAGMA busy_timeout=30000")
-            await conn.execute("PRAGMA synchronous=NORMAL")
-            await conn.execute("PRAGMA cache_size=-64000")
-            await conn.execute("PRAGMA foreign_keys=ON")
-            await conn.commit()
-    except Exception:
-        logging.warning("Не удалось настроить SQLite для %s", session_file)
+        try:
+            async with aiosqlite.connect(session_file, timeout=30.0) as conn:
+                await conn.execute("PRAGMA journal_mode=WAL")
+                await conn.execute("PRAGMA busy_timeout=30000")
+                await conn.execute("PRAGMA synchronous=NORMAL")
+                await conn.execute("PRAGMA cache_size=-64000")
+                await conn.execute("PRAGMA foreign_keys=ON")
+                await conn.commit()
+                logging.debug("✅ SQLite настройки применены для: %s", session_file)
+        except Exception as sqlite_error:
+            logging.warning("⚠️ Не удалось настроить SQLite для %s: %s", session_file, sqlite_error)
+    except Exception as e:
+        logging.warning("Не удалось настроить SQLite для %s: %s", session_file, e)
 
 
 COMMENT_LOG_RETENTION_DAYS = 2
@@ -4939,25 +4942,42 @@ async def join_channel(
         session_name = os.path.join(session_dir, session_key)
         session_file = f"{session_name}.session"
 
-        if not os.path.exists(session_file):
-            session_file_alt = f"{session_file}.session"
-            if os.path.exists(session_file_alt):
-                try:
-                    shutil.copy2(session_file_alt, session_file)
-                except Exception as copy_error:
-                    error_message = (
-                        f"Аккаунт {session_key} - не удалось подготовить файл сессии: "
-                        f"{copy_error}"
-                    )
-                    await bot.send_message(log_channel, error_message)
-                    return False, error_message
-                await ensure_session_file_permissions(session_file)
-            else:
-                error_message = f"Аккаунт {session_key} - файл сессии не найден: {session_file}"
+        session_file_exists = os.path.exists(session_file)
+        session_file_alt = f"{session_file}.session"
+        session_file_alt_exists = os.path.exists(session_file_alt)
+
+        if not session_file_exists and not session_file_alt_exists:
+            error_message = (
+                f"❌ Файл сессии не найден: {session_file} (и альтернативный тоже)"
+            )
+            logging.error(error_message)
+            await bot.send_message(log_channel, error_message)
+            return False, error_message
+
+        if not session_file_exists and session_file_alt_exists:
+            try:
+                logging.info(
+                    "📋 Копируем альтернативный файл сессии: %s -> %s",
+                    session_file_alt,
+                    session_file,
+                )
+                shutil.copy2(session_file_alt, session_file)
+                session_file_exists = True
+            except Exception as copy_error:
+                error_message = (
+                    f"Аккаунт {session_key} - не удалось скопировать файл сессии: {copy_error}"
+                )
+                logging.error(error_message)
                 await bot.send_message(log_channel, error_message)
                 return False, error_message
-        else:
+
+        if session_file_exists:
             await ensure_session_file_permissions(session_file)
+        else:
+            error_message = f"❌ Файл сессии недоступен после копирования: {session_file}"
+            logging.error(error_message)
+            await bot.send_message(log_channel, error_message)
+            return False, error_message
 
         key = make_session_key(user_id, session_key)
 

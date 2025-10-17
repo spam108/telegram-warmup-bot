@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from datetime import datetime
 
 
@@ -30,7 +31,7 @@ class WarmupService:
                 get_running_warmup_accounts,
                 get_warmup_pending,
             )
-            from main import join_channel_with_retry
+            from main import join_channel_with_retry, SESSIONS_BASE_DIR
 
             # 1. Получаем аккаунты для прогрева
             accounts = await get_running_warmup_accounts()
@@ -73,6 +74,14 @@ class WarmupService:
 
                     if not session_key or user_id is None:
                         logging.warning(f"⚠️ Для {phone} отсутствуют данные сессии")
+                        continue
+
+                    session_dir = os.path.join(SESSIONS_BASE_DIR, str(user_id))
+                    session_file = os.path.join(session_dir, f"{session_key}.session")
+                    session_file_alt = f"{session_file}.session"
+
+                    if not os.path.exists(session_file) and not os.path.exists(session_file_alt):
+                        logging.error(f"❌ Файлы сессии не найдены для {phone}: {session_file}")
                         continue
 
                     logging.info(f"📺 {phone} вступает в {channel_name}")
