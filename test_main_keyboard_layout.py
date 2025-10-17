@@ -92,14 +92,15 @@ async def test_main_menu_keyboard_layout_no_accounts(monkeypatch):
         "Первое сообщение должно содержать inline-клавиатуру с аккаунтами"
     )
     assert account_message["text"] == "Ваши аккаунты"
-    assert account_markup.inline_keyboard == [], "Без аккаунтов inline-клавиатура должна быть пустой"
+    keyboard_layout = [[button.text for button in row] for row in account_markup.inline_keyboard]
+    assert keyboard_layout == [], "При отсутствии аккаунтов не ожидаем inline-кнопок"
 
     actions_markup = actions_message.get("markup")
     assert actions_message["text"] == "Доступные действия"
     assert isinstance(actions_markup, main.ReplyKeyboardMarkup), "Ожидается reply-клавиатура действий"
     keyboard_layout = [[button.text for button in row] for row in actions_markup.keyboard]
     assert keyboard_layout == [
-        ["Добавить аккаунт", "Добавить прогрев"],
+        ["Добавить аккаунт", "🔥 Настроить прогрев"],
         ["📊 Общая статистика", "⚙️ Настройки прогрева"],
     ]
 

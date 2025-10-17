@@ -39,13 +39,14 @@ from pyrogram.errors import (
 )
 from sqlite3 import OperationalError
 from threading import Lock
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import (
     Message,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    CallbackQuery,
 )
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import CommandStart, Command
@@ -73,6 +74,7 @@ from db import (
     get_running_warmup_accounts,
     get_running_accounts,
     get_warmup_pending,
+    get_warmup_channels,
     get_warmup_settings,
     increment_warmup_joined,
     init_db,
@@ -2774,12 +2776,11 @@ async def main_message(message):
         button_info = types.InlineKeyboardButton(text=f"{call}", callback_data=f"info_{call}")
         button_status = types.InlineKeyboardButton(text=status_button_text, callback_data=status_button_callback)
         button_delete = types.InlineKeyboardButton(text="Удалить", callback_data=f"del_{call}")
-        button_warmup = types.InlineKeyboardButton(text="Прогрев", callback_data=f"warmup_{call}")
         button_reactions = types.InlineKeyboardButton(
             text="🎯 Реакции на посты и ответы", callback_data=f"reaction_{call}"
         )
 
-        builder.row(button_info, button_status, button_warmup)
+        builder.row(button_info, button_status)
         builder.row(button_reactions)
         if not is_running:
             builder.row(button_delete)
@@ -2798,7 +2799,7 @@ def build_main_actions_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         [
             KeyboardButton(text="Добавить аккаунт"),
-            KeyboardButton(text="Добавить прогрев"),
+            KeyboardButton(text="🔥 Настроить прогрев"),
         ],
         [
             KeyboardButton(text="📊 Общая статистика"),
@@ -2813,6 +2814,85 @@ def build_main_actions_keyboard() -> ReplyKeyboardMarkup:
         keyboard.append([KeyboardButton(text=SKIP_SUMMARY_BUTTON_TEXT)])
 
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
+def _render_warmup_settings_overview(settings: WarmupSettingsData) -> str:
+    return (
+        "⚙️ Настройки прогрева:\n"
+        f"Каналов в день: {settings.channels_per_day}\n"
+        f"Интервал: {settings.delay_minutes} мин\n"
+        f"Время работы: {settings.join_start_hour:02d}:{settings.join_start_minute:02d}-"
+        f"{settings.join_end_hour:02d}:{settings.join_end_minute:02d}\n\n"
+        "Выберите действие:"
+    )
+
+
+def _build_warmup_settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Применить ко всем аккаунтам",
+                    callback_data="warmup_apply_all",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="➖ Сохранить текущие",
+                    callback_data="warmup_keep_current",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📺 Добавить каналы",
+                    callback_data="warmup_add_channels",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🕐 Настроить расписание",
+                    callback_data="warmup_schedule",
+                )
+            ],
+        ]
+    )
+
+
+async def _send_warmup_settings_menu(
+    target: Union[Message, CallbackQuery]
+) -> None:
+    try:
+        settings = await ensure_latest_warmup_settings(force=True)
+    except Exception as exc:  # pragma: no cover - defensive branch
+        logging.exception("Failed to load warmup settings: %s", exc)
+        error_text = "Не удалось загрузить настройки прогрева. Попробуйте позже."
+        if isinstance(target, CallbackQuery):
+            await target.message.answer(error_text)
+        else:
+            await target.answer(error_text)
+        return
+
+    overview = _render_warmup_settings_overview(settings)
+    keyboard = _build_warmup_settings_keyboard()
+
+    if isinstance(target, CallbackQuery):
+        await target.message.answer(overview, reply_markup=keyboard)
+    else:
+        await target.answer(overview, reply_markup=keyboard)
+
+
+async def apply_warmup_to_all_accounts(user_id: int) -> int:
+    """Применяет режим прогрева ко всем аккаунтам пользователя."""
+
+    accounts = await get_accounts_for_user(user_id)
+    updated = 0
+    for account in accounts:
+        account_id = account.get("id")
+        if not account_id:
+            continue
+        await set_account_mode(account_id, "warmup")
+        updated += 1
+    return updated
 
 
 async def start_add_account_flow(user_id: int, state: FSMContext, *, warmup_only: bool = False) -> None:
@@ -2900,13 +2980,13 @@ async def handle_add_account_button(message: types.Message, state: FSMContext):
     await start_add_account_flow(message.from_user.id, state, warmup_only=False)
 
 
-@dp.message(lambda message: message.text == "Добавить прогрев")
-async def handle_add_warmup_button(message: types.Message, state: FSMContext):
+@dp.message(lambda message: message.text == "🔥 Настроить прогрев")
+async def handle_configure_warmup_button(message: types.Message, state: FSMContext):  # noqa: ARG001
     if not await is_user_authenticated(message.from_user.id):
         await message.answer("Сначала авторизуйтесь командой /start")
         return
 
-    await start_add_account_flow(message.from_user.id, state, warmup_only=True)
+    await _send_warmup_settings_menu(message)
 
 
 @dp.message(lambda message: message.text == "📊 Общая статистика")
@@ -2941,7 +3021,70 @@ async def handle_warmup_settings_button(message: types.Message, state: FSMContex
         await message.answer("Сначала авторизуйтесь командой /start")
         return
 
-    await open_warmup_settings_dialog(message.from_user.id, state)
+    await _send_warmup_settings_menu(message)
+
+
+@dp.message(lambda message: message.text == "Добавить прогрев")
+async def handle_add_warmup_button(message: types.Message, state: FSMContext):
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+
+    await start_add_account_flow(message.from_user.id, state, warmup_only=True)
+
+
+@dp.callback_query(F.data == "warmup_settings")
+async def warmup_settings_handler(callback: CallbackQuery, state: FSMContext):  # noqa: ARG001
+    await callback.answer()
+    await _send_warmup_settings_menu(callback)
+
+
+@dp.callback_query(F.data == "warmup_apply_all")
+async def warmup_apply_all_handler(callback: CallbackQuery, state: FSMContext):  # noqa: ARG001
+    await callback.answer()
+    updated = await apply_warmup_to_all_accounts(callback.from_user.id)
+    if updated:
+        await callback.message.answer(f"✅ Применен прогрев к {updated} аккаунтам")
+    else:
+        await callback.message.answer("💡 Нет аккаунтов для применения прогрева")
+    await _send_warmup_settings_menu(callback)
+
+
+@dp.callback_query(F.data == "warmup_keep_current")
+async def warmup_keep_current_handler(callback: CallbackQuery, state: FSMContext):  # noqa: ARG001
+    await callback.answer("Настройки сохранены")
+    await callback.message.answer("Текущие настройки прогрева оставлены без изменений.")
+    await _send_warmup_settings_menu(callback)
+
+
+@dp.callback_query(F.data == "warmup_add_channels")
+async def warmup_add_channels_handler(callback: CallbackQuery, state: FSMContext):  # noqa: ARG001
+    await callback.answer()
+    accounts = await get_accounts_for_user(callback.from_user.id)
+    buttons: list[list[InlineKeyboardButton]] = []
+    for account in accounts:
+        phone = account.get("phone")
+        if not phone:
+            continue
+        buttons.append([InlineKeyboardButton(text=str(phone), callback_data=f"warmup_{phone}")])
+
+    if not buttons:
+        await callback.message.answer("💡 У вас пока нет аккаунтов для настройки прогрева.")
+        return
+
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="warmup_settings")])
+    await callback.message.answer(
+        "Выберите аккаунт для управления прогревом:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@dp.callback_query(F.data == "warmup_schedule")
+async def warmup_schedule_handler(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    with suppress(Exception):  # pragma: no cover - optional cleanup
+        await callback.message.delete()
+    await open_warmup_settings_dialog(callback.from_user.id, state)
 
 
 @dp.message(Command("testwarmup"))
@@ -2971,6 +3114,64 @@ async def test_warmup_command(message: Message) -> None:
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
         logging.exception("Error in test_warmup_command: %s", e)
+
+
+@dp.message(Command("warmup_status"))
+async def warmup_status_command(message: Message) -> None:
+    """Показывает актуальное состояние прогрева для всех аккаунтов пользователя."""
+
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+
+    accounts = await get_accounts_for_user(message.from_user.id)
+    if not accounts:
+        await message.answer("У вас нет добавленных аккаунтов.")
+        return
+
+    lines = ["🔥 Статус прогрева:"]
+    for account in accounts:
+        account_id = account.get("id")
+        phone = account.get("phone", "неизвестно")
+        if account_id is None:
+            lines.append(f"• {phone}: ⚠️ нет идентификатора аккаунта")
+            continue
+
+        warmup_records = await get_warmup_channels(account_id)
+        warmup_queue = [record.get("channel") for record in warmup_records if record.get("channel")]
+        has_queue = bool(warmup_queue)
+        is_warmup_mode = account.get("mode") == "warmup"
+
+        if has_queue and is_warmup_mode:
+            status_text = "✅ режим прогрева активен"
+        elif has_queue:
+            status_text = "⏳ каналы загружены, режим ожидания"
+        else:
+            status_text = "❌ прогрев отключен"
+
+        joined_today = account.get("warmup_joined_today") or 0
+        next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
+        if next_join_at:
+            if next_join_at.tzinfo is None:
+                next_join_at = next_join_at.replace(tzinfo=timezone.utc)
+            else:
+                next_join_at = next_join_at.astimezone(timezone.utc)
+            next_join_display = next_join_at.strftime("%d.%m %H:%M UTC")
+        else:
+            next_join_display = "—"
+
+        lines.append(
+            "\n".join(
+                [
+                    f"• {phone}: {status_text}",
+                    f"  Каналов в прогреве: {len(warmup_queue)}",
+                    f"  Вступлений сегодня: {joined_today}",
+                    f"  Следующее вступление: {next_join_display}",
+                ]
+            )
+        )
+
+    await message.answer("\n".join(lines))
 
 
 @dp.message(Command("cleansessions"))
@@ -3063,6 +3264,15 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
             notify=False,
             user_id=user_id,
         )
+        return
+
+    if call in {
+        "warmup_settings",
+        "warmup_apply_all",
+        "warmup_keep_current",
+        "warmup_add_channels",
+        "warmup_schedule",
+    }:
         return
 
     try:
