@@ -2785,6 +2785,13 @@ async def main_message(message):
         if not is_running:
             builder.row(button_delete)
 
+    builder.row(
+        types.InlineKeyboardButton(
+            text="🔥 Прогрев аккаунта",
+            callback_data="warmup_settings",
+        )
+    )
+
     await bot.send_message(message.from_user.id, 'Ваши аккаунты', reply_markup=builder.as_markup())
     await bot.send_message(
         message.from_user.id,
