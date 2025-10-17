@@ -232,7 +232,7 @@ async def init_db() -> None:
     _POOL = await asyncpg.create_pool(dsn)
     _BACKEND = "postgres"
     await _init_postgres_schema()
-    await init_warmup_tables()
+    await ensure_warmup_tables()
 
 async def _init_postgres_schema() -> None:
     pool = _require_pool()
@@ -632,10 +632,6 @@ async def update_warmup_settings(
     await _execute(query, tuple(params))
 
 
-async def init_warmup_tables() -> None:
-    await ensure_warmup_tables()
-
-
 async def ensure_warmup_tables(connection: Optional[Any] = None) -> None:
     async def _ensure(conn: Any) -> None:
         await conn.execute(
@@ -869,7 +865,7 @@ def _convert_account_row(row: Any) -> Dict[str, Any]:
 
 async def get_all_accounts() -> List[Dict[str, Any]]:
     return await _fetch_accounts(
-        "SELECT * FROM accounts ORDER BY created_at",
+        "SELECT * FROM accounts ORDER BY id",
         (),
     )
 
@@ -1122,6 +1118,9 @@ async def update_last_reaction_at(
 
 
 async def set_account_mode(account_id: int, mode: str, warmup_days: Optional[int] = None) -> None:
+    if mode not in {"standard", "warmup"}:
+        raise ValueError("mode must be either 'standard' or 'warmup'")
+
     updates: List[str] = ["mode = ?"]
     params: List[Any] = [mode]
 
@@ -1140,7 +1139,14 @@ async def set_account_mode(account_id: int, mode: str, warmup_days: Optional[int
             ]
         )
     else:
-        updates.append("warmup_next_join_at = NULL")
+        updates.extend(
+            [
+                "warmup_joined_today = 0",
+                "warmup_last_join = NULL",
+                "warmup_last_join_at = NULL",
+                "warmup_next_join_at = NULL",
+            ]
+        )
 
     params.append(account_id)
 
@@ -1189,7 +1195,7 @@ async def get_warmup_channels(account_id: int) -> List[Dict[str, Any]]:
         SELECT *
         FROM warmup_channels
         WHERE account_id = ?
-        ORDER BY position
+        ORDER BY position, id
         """,
         (account_id,),
     )
