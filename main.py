@@ -9,7 +9,19 @@ from collections import Counter, defaultdict
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, time, timezone, timedelta
-from typing import Awaitable, Callable, Dict, List, Optional, Set, Any, Union, Tuple, AsyncIterator, IO
+from typing import (
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Set,
+    Any,
+    Union,
+    Tuple,
+    AsyncIterator,
+    IO,
+)
 from types import SimpleNamespace
 import random
 import re
@@ -89,6 +101,10 @@ logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+# Глобальная переменная для сервиса прогрева
+warmup_service: Optional[WarmupService] = None
 
 
 # Глобальный кэш для доступных реакций
@@ -1557,6 +1573,12 @@ async def process_channel_reactions(
 async def process_account_reactions(account: Dict[str, Any]) -> None:
     account_id = account.get("id")
     if account_id is None:
+        return
+
+    if warmup_service and not await warmup_service.can_account_operate(account_id):
+        logging.debug(
+            f"⏸️ Аккаунт {account_id} временно остановлен для прогрева (реакции)"
+        )
         return
 
     user_id_raw = account.get("user_id")
@@ -4437,6 +4459,12 @@ async def add_channels(message: Message, state: FSMContext) -> None:
 
 
 async def send_comments(userid, session, account_id):
+    if warmup_service and not await warmup_service.can_account_operate(account_id):
+        logging.debug(
+            f"⏸️ Аккаунт {account_id} временно остановлен для прогрева (комментарии)"
+        )
+        return
+
     async with account_semaphore:
         key = make_session_key(userid, session)
         session_name = os.path.join(SESSIONS_BASE_DIR, str(userid), str(session))
@@ -5926,6 +5954,8 @@ async def send_account_summary_to_logs(account_id, session_name):
         await bot.send_message(log_channel, f"❌ Не удалось получить информацию об аккаунте {session_name}")
 
 async def main():
+    global warmup_service
+
     try:
         _acquire_process_lock()
         with open("bot_log.txt", "w") as log_file:
