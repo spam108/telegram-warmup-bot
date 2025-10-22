@@ -767,7 +767,7 @@ class ReactionEngine:
                 await self._log_reaction_event(
                     account_id,
                     channel_id,
-                    message_id,
+                    channel_message_id,
                     emoji,
                     success=True,
                     error_message=None,
@@ -795,7 +795,7 @@ class ReactionEngine:
                 await self._log_reaction_event(
                     account_id,
                     channel_id,
-                    message_id,
+                    channel_message_id,
                     emoji,
                     success=False,
                     error_message=str(exc),
