@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from fnmatch import fnmatch
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 try:
     from db import DEFAULT_REACTION_EMOJIS, DatabaseNotInitialized, _require_pool
@@ -92,6 +92,7 @@ class ReactionEngine:
         self.reaction_settings_table = "reaction_settings"
         self.linked_posts_table = "linked_posts"
         self.post_reactions_table = "post_reactions"
+        self.uses_kv_reaction_settings = False
 
     async def initialize(self) -> bool:
         """Initialise database/redis connections and ensure schema exists."""
@@ -149,10 +150,7 @@ class ReactionEngine:
         if self.pool is None:
             raise DatabaseNotInitialized("ReactionEngine database pool not ready")
 
-        self.reaction_settings_table = await self._resolve_table_name(
-            "reaction_settings",
-            ("channel_id", "enabled", "reaction_emojis", "delay_seconds"),
-        )
+        await self._determine_reaction_settings_storage()
         self.linked_posts_table = await self._resolve_table_name(
             "linked_posts",
             (
@@ -194,6 +192,15 @@ class ReactionEngine:
         existing = {row["column_name"] for row in rows}
         return all(column in existing for column in columns)
 
+    async def _get_table_columns(self, table_name: str) -> Set[str]:
+        assert self.pool is not None
+        query = (
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = $1"
+        )
+        rows = await self.pool.fetch(query, table_name)
+        return {row["column_name"] for row in rows}
+
     async def _resolve_table_name(self, table_name: str, required_columns: Sequence[str]) -> str:
         if not await self._table_exists(table_name):
             return table_name
@@ -210,22 +217,52 @@ class ReactionEngine:
         )
         return fallback
 
+    async def _determine_reaction_settings_storage(self) -> None:
+        self.reaction_settings_table = "reaction_settings"
+        self.uses_kv_reaction_settings = False
+
+        if not await self._table_exists(self.reaction_settings_table):
+            return
+
+        columns = await self._get_table_columns(self.reaction_settings_table)
+        kv_columns = {"setting_key", "setting_value"}
+        structured_columns = {"channel_id", "enabled", "reaction_emojis", "delay_seconds"}
+
+        if kv_columns.issubset(columns):
+            self.uses_kv_reaction_settings = True
+            logger.info("✅ reaction_settings table detected as key-value storage")
+            return
+
+        if structured_columns.issubset(columns):
+            return
+
+        fallback = "reaction_engine_reaction_settings"
+        self.reaction_settings_table = fallback
+
+        if not await self._table_exists(fallback):
+            return
+
+        fallback_columns = await self._get_table_columns(fallback)
+        if kv_columns.issubset(fallback_columns):
+            self.uses_kv_reaction_settings = True
+
     async def create_reaction_tables(self) -> bool:
         assert self.pool is not None
 
-        await self.pool.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {self.reaction_settings_table} (
-                id SERIAL PRIMARY KEY,
-                channel_id BIGINT UNIQUE NOT NULL,
-                enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                reaction_emojis TEXT[],
-                delay_seconds INTEGER NOT NULL DEFAULT 0,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        if not self.uses_kv_reaction_settings:
+            await self.pool.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {self.reaction_settings_table} (
+                    id SERIAL PRIMARY KEY,
+                    channel_id BIGINT UNIQUE NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    reaction_emojis TEXT[],
+                    delay_seconds INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
             )
-            """
-        )
 
         await self.pool.execute(
             f"""
@@ -383,6 +420,10 @@ class ReactionEngine:
 
     async def get_channel_reaction_settings(self, channel_id: int) -> ReactionSettings:
         assert self.pool is not None
+
+        if self.uses_kv_reaction_settings:
+            return await self._get_channel_reaction_settings_kv(channel_id)
+
         query = (
             f"SELECT enabled, reaction_emojis, delay_seconds "
             f"FROM {self.reaction_settings_table} WHERE channel_id = $1"
@@ -391,11 +432,89 @@ class ReactionEngine:
 
         if row:
             emojis = self._normalize_emoji_list(row.get("reaction_emojis"))
+            if not emojis:
+                emojis = list(DEFAULT_REACTION_EMOJIS)
             delay_seconds = int(row.get("delay_seconds") or 0)
-            enabled = bool(row.get("enabled"))
+            enabled = bool(row.get("enabled", True))
             return ReactionSettings(enabled=enabled, reaction_emojis=emojis, delay_seconds=delay_seconds)
 
-        return ReactionSettings(enabled=False, reaction_emojis=list(DEFAULT_REACTION_EMOJIS), delay_seconds=0)
+        return ReactionSettings(enabled=True, reaction_emojis=list(DEFAULT_REACTION_EMOJIS), delay_seconds=0)
+
+    async def _get_channel_reaction_settings_kv(self, channel_id: int) -> ReactionSettings:
+        assert self.pool is not None
+
+        keys_to_try = [f"reactions_channel_{channel_id}", "reactions_global_settings"]
+        query = (
+            f"SELECT setting_value FROM {self.reaction_settings_table} "
+            "WHERE setting_key = $1 ORDER BY updated_at DESC NULLS LAST, id DESC LIMIT 1"
+        )
+
+        for setting_key in keys_to_try:
+            row = await self.pool.fetchrow(query, setting_key)
+            if not row:
+                continue
+
+            raw_value = row.get("setting_value")
+            settings_dict = self._parse_reaction_settings_value(raw_value, setting_key)
+            if settings_dict is None:
+                continue
+
+            if setting_key == keys_to_try[0]:
+                logger.info(
+                    "✅ Found reaction settings for channel %s via key %s",
+                    channel_id,
+                    setting_key,
+                )
+            else:
+                logger.info("⚠️ Using global reaction settings for channel %s", channel_id)
+
+            return self._reaction_settings_from_dict(settings_dict)
+
+        logger.info("⚠️ Using default reaction settings for channel %s", channel_id)
+        return ReactionSettings(enabled=True, reaction_emojis=list(DEFAULT_REACTION_EMOJIS), delay_seconds=0)
+
+    def _parse_reaction_settings_value(
+        self,
+        raw_value: Any,
+        setting_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        if raw_value is None:
+            return None
+
+        if isinstance(raw_value, str):
+            try:
+                parsed = json.loads(raw_value)
+            except json.JSONDecodeError:
+                logger.error("❌ Invalid JSON in reaction settings for key %s", setting_key)
+                return None
+        elif isinstance(raw_value, dict):
+            parsed = raw_value
+        else:
+            logger.debug(
+                "Unsupported type %s for reaction settings key %s", type(raw_value).__name__, setting_key
+            )
+            return None
+
+        if isinstance(parsed, dict):
+            return parsed
+
+        logger.debug("Reaction settings value for key %s is not a dict", setting_key)
+        return None
+
+    def _reaction_settings_from_dict(self, settings_dict: Dict[str, Any]) -> ReactionSettings:
+        enabled = bool(settings_dict.get("enabled", True))
+        emojis = self._normalize_emoji_list(settings_dict.get("reaction_emojis"))
+        if not emojis:
+            emojis = list(DEFAULT_REACTION_EMOJIS)
+
+        delay_value = settings_dict.get("delay_seconds", 0)
+        try:
+            delay_seconds = int(delay_value)
+        except (TypeError, ValueError):
+            logger.debug("Invalid delay_seconds value %r in reaction settings", delay_value)
+            delay_seconds = 0
+
+        return ReactionSettings(enabled=enabled, reaction_emojis=emojis, delay_seconds=delay_seconds)
 
     async def cache_channel_message(
         self,
