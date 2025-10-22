@@ -79,10 +79,24 @@ from db import (
     update_last_reaction_at,
     update_warmup_settings,
     _require_pool,
+    DatabaseNotInitialized,
 )
 
 
 logger = logging.getLogger(__name__)
+
+REACTION_ENGINE_AVAILABLE = False
+reaction_engine_instance = None
+
+try:
+    from reaction_engine import ReactionEngine  # type: ignore
+except ImportError as exc:
+    logger.error("❌ Failed to import ReactionEngine: %s", exc)
+    ReactionEngine = None  # type: ignore[assignment]
+else:
+    REACTION_ENGINE_AVAILABLE = True
+    logger.info("✅ ReactionEngine imported successfully")
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -118,7 +132,18 @@ async def update_last_reaction_at_with_logging(account_id: int, timestamp: datet
     """Обновление времени последней реакции с логированием"""
 
     logging.info(f"Last reaction updated for account {account_id} at {timestamp}")
-    await update_last_reaction_at(account_id, timestamp)
+    try:
+        await update_last_reaction_at(account_id, timestamp)
+    except DatabaseNotInitialized as exc:
+        logging.warning(
+            "Database not initialised while updating last reaction for %s: %s",
+            account_id,
+            exc,
+        )
+    except Exception:
+        logging.exception(
+            "Unexpected error updating last reaction for account %s", account_id
+        )
 
 
 # Конфигурация
@@ -1063,7 +1088,26 @@ async def _maybe_send_reaction(
             )
             return current_last_reaction_at, True
         if channel_for_reactions and message_id is not None:
-            reaction_count = await count_reactions_for_message(channel_for_reactions, message_id)
+            try:
+                reaction_count = await count_reactions_for_message(
+                    channel_for_reactions,
+                    message_id,
+                )
+            except DatabaseNotInitialized as exc:
+                logging.warning(
+                    "Database not initialised while counting reactions for %s/%s: %s",
+                    channel_for_reactions,
+                    message_id,
+                    exc,
+                )
+                reaction_count = 0
+            except Exception:
+                logging.exception(
+                    "Unexpected error counting reactions for %s/%s",
+                    channel_for_reactions,
+                    message_id,
+                )
+                reaction_count = 0
             if reaction_count >= limit:
                 reason = f'reaction limit {reaction_count}/{limit}'
                 enqueue_skip_log(
@@ -1109,9 +1153,29 @@ async def _maybe_send_reaction(
         chat_id_for_reactions,
     )
     if allowed_reaction_emojis is not None:
-        working_reaction_emojis = [
-            emoji for emoji in working_reaction_emojis if emoji in allowed_reaction_emojis
-        ]
+        if not allowed_reaction_emojis:
+            reason = "no allowed quick reactions"
+            enqueue_skip_log(
+                session,
+                "reaction",
+                f"{reason}{reaction_comment_context}",
+            )
+            await asyncio.sleep(0.2)
+            await add_comment_log(
+                account_id,
+                channel=str(getattr(getattr(message, "chat", None), "id", "")),
+                message_id=message.id,
+                status=f'reaction_skipped{status_suffix}',
+                error=f"{reason} (available: none)",
+            )
+            return current_last_reaction_at, True
+        configured_set = set(working_reaction_emojis)
+        if not configured_set.issubset(allowed_reaction_emojis):
+            logging.debug(
+                "Configured reactions %s not fully present in allowed set %s; proceeding with configured list",
+                working_reaction_emojis,
+                sorted(allowed_reaction_emojis),
+            )
 
     if not working_reaction_emojis:
         available_text: Optional[str] = None
@@ -1259,29 +1323,33 @@ async def _maybe_send_reaction(
                 reaction_error,
                 exc_info=True,
             )
-            if reaction_attempt < max_reaction_attempts and working_reaction_emojis:
+
+            error_text_lower = (last_reaction_error_text or "").lower()
+            retryable_error = any(
+                keyword in error_text_lower for keyword in ("invalid", "reaction", "not_supported")
+            )
+
+            should_retry = (
+                retryable_error
+                and reaction_attempt < max_reaction_attempts
+                and bool(working_reaction_emojis)
+            )
+
+            if should_retry:
                 await asyncio.sleep(3)
+                continue
 
-    if not reaction_sent and last_reaction_error is not None:
-        error_text = last_reaction_error_text or str(last_reaction_error)
-        attempts_text = attempts_performed or max_reaction_attempts
-        await bot.send_message(
-            log_channel,
-            (
-                f'Аккаунт {session} ошибка при установке реакции '
-                f"после {attempts_text} попыток: {error_text}"
-            ),
-        )
-        await asyncio.sleep(0.2)
-        await add_comment_log(
-            account_id,
-            channel=str(message.chat.id),
-            message_id=message.id,
-            status=f'reaction_error{status_suffix}',
-            error=error_text,
-        )
+            await asyncio.sleep(0.2)
+            await add_comment_log(
+                account_id,
+                channel=str(getattr(getattr(message, "chat", None), "id", "")),
+                message_id=message.id,
+                status=f'reaction_error{status_suffix}',
+                error=last_reaction_error_text,
+            )
+            return current_last_reaction_at, False
 
-    return current_last_reaction_at, False
+    return current_last_reaction_at, reaction_sent
 
 
 async def send_reaction_safe(
@@ -1890,13 +1958,19 @@ async def _handle_linked_channel_message(
     except (TypeError, ValueError):
         numeric_message_id = None
 
-    if channel_identifier and await is_channel_blacklisted(account_id, channel_identifier):
-        logging.debug(
-            "Skipping blacklisted channel %s for account %s in linked handler",
-            channel_identifier,
-            account_id,
-        )
-        return current_last_reaction_at
+    if channel_identifier:
+        try:
+            if await is_channel_blacklisted(account_id, channel_identifier):
+                logging.debug(
+                    "Skipping blacklisted channel %s for account %s in linked handler",
+                    channel_identifier,
+                    account_id,
+                )
+                return current_last_reaction_at
+        except DatabaseNotInitialized:
+            logging.debug("Skipping blacklist check for %s: database not initialised", channel_identifier)
+        except Exception as blacklist_error:
+            logging.exception("Failed to check blacklist for %s: %s", channel_identifier, blacklist_error)
 
     if channel_identifier and numeric_message_id is not None:
         try:
@@ -1981,7 +2055,23 @@ async def _handle_linked_channel_message(
                 logging.debug(
                     "Пропуск комментария для %s: пустой текст комментария", session
                 )
-                return current_last_reaction_at
+                if is_discussion_message:
+                    comment_skipped = True
+                    comment_skip_reason = "generated comment empty"
+                    enqueue_skip_log(
+                        session,
+                        "comment",
+                        f"{comment_skip_reason}; проверяем реакцию",
+                    )
+                    await add_comment_log(
+                        account_id,
+                        channel=str(getattr(getattr(message, "chat", None), "id", "")),
+                        message_id=getattr(message, "id", None),
+                        status='comment_skipped',
+                        error=comment_skip_reason,
+                    )
+                else:
+                    return current_last_reaction_at
             else:
                 try:
                     msg = await client.send_message(
@@ -4484,6 +4574,10 @@ async def send_comments(userid, session, account_id):
 
             active_pyrogram_clients[key] = app
 
+            if REACTION_ENGINE_AVAILABLE and reaction_engine_instance is not None:
+                setattr(app, "reaction_engine", reaction_engine_instance)
+                setattr(app, "reaction_engine_account_id", account_id)
+
             @app.on_message(filters.channel)
             async def channel_handler(client: Client, message: Message):
                 nonlocal last_reaction_at_dt
@@ -4507,6 +4601,12 @@ async def send_comments(userid, session, account_id):
                 message_id = getattr(message, "id", None)
                 if channel_id is None or message_id is None:
                     return
+
+                if REACTION_ENGINE_AVAILABLE and getattr(client, "reaction_engine", None) is not None:
+                    try:
+                        await client.reaction_engine.handle_linked_channel_message(client, message)
+                    except Exception as exc:
+                        logger.exception("ReactionEngine channel handler error: %s", exc)
 
                 channel_identifier = str(channel_id)
                 if await is_channel_blacklisted(account_id, channel_identifier):
@@ -4563,6 +4663,11 @@ async def send_comments(userid, session, account_id):
             @app.on_message(filters.linked_channel | discussion_filter)
             async def linked_channel_handler(client: Client, message: Message):
                 nonlocal last_reaction_at_dt
+                if REACTION_ENGINE_AVAILABLE and getattr(client, "reaction_engine", None) is not None:
+                    try:
+                        await client.reaction_engine.handle_discussion_message(client, message)
+                    except Exception as exc:
+                        logger.exception("ReactionEngine discussion handler error: %s", exc)
                 last_reaction_at_dt = await _handle_linked_channel_message(
                     client,
                     message,
@@ -5923,6 +6028,7 @@ async def send_account_summary_to_logs(account_id, session_name):
         await bot.send_message(log_channel, f"❌ Не удалось получить информацию об аккаунте {session_name}")
 
 async def main():
+    global reaction_engine_instance, REACTION_ENGINE_AVAILABLE
     try:
         _acquire_process_lock()
         with open("bot_log.txt", "w") as log_file:
@@ -5939,6 +6045,35 @@ async def main():
                 join_end_minute=DEFAULT_WARMUP_SETTINGS.join_end_minute,
             )
             await ensure_latest_warmup_settings(force=True)
+
+            if REACTION_ENGINE_AVAILABLE and 'ReactionEngine' in globals() and ReactionEngine is not None:
+                try:
+                    reaction_engine_instance = ReactionEngine()
+                    if await reaction_engine_instance.initialize():
+                        logger.info("✅ ReactionEngine started successfully")
+                        log_file.write("ReactionEngine initialized successfully\n")
+                        log_file.flush()
+                        try:
+                            await reaction_engine_instance.ensure_reaction_tables_exist()
+                        except Exception as exc:
+                            logger.warning("⚠️ ReactionEngine table verification issue: %s", exc)
+                    else:
+                        logger.error("❌ Failed to initialize ReactionEngine")
+                        log_file.write("ReactionEngine initialization failed\n")
+                        log_file.flush()
+                        reaction_engine_instance = None
+                        REACTION_ENGINE_AVAILABLE = False
+                except Exception as exc:
+                    logger.error("❌ Critical error during ReactionEngine initialization: %s", exc)
+                    log_file.write("ReactionEngine critical initialization error\n")
+                    log_file.flush()
+                    reaction_engine_instance = None
+                    REACTION_ENGINE_AVAILABLE = False
+            else:
+                logger.warning("⚠️ ReactionEngine not available")
+                log_file.write("ReactionEngine not available\n")
+                log_file.flush()
+
             logging.info("✅ Database initialized successfully")
             log_file.write("Database initialized successfully\n")
             log_file.flush()
