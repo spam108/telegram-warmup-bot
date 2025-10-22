@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -77,6 +78,9 @@ class ReactionSettings:
     enabled: bool
     reaction_emojis: List[str]
     delay_seconds: int
+    reaction_chance: int = 20
+    discussion_chance: int = 20
+    reaction_limit: int = 1
 
 
 class ReactionEngine:
@@ -316,10 +320,30 @@ class ReactionEngine:
         if channel_id is None or message_id is None:
             return
 
-        settings = await self.get_channel_reaction_settings(channel_id)
+        account_id = getattr(client, "reaction_engine_account_id", None)
+
+        settings = await self._build_reaction_settings(channel_id, message_id, account_id)
         if not settings.enabled:
             logger.debug("Reactions disabled for channel %s", channel_id)
             return
+
+        if random.randint(1, 100) > settings.reaction_chance:
+            logger.info(
+                "🎲 Skip caching reactions for %s/%s: roll exceeded chance %s",
+                channel_id,
+                message_id,
+                settings.reaction_chance,
+            )
+            return
+
+        logger.info(
+            "📊 Reaction settings for %s/%s: emojis=%s, limit=%s, chance=%s",
+            channel_id,
+            message_id,
+            settings.reaction_emojis,
+            settings.reaction_limit,
+            settings.reaction_chance,
+        )
 
         discussion_chat_id = await self._resolve_discussion_chat_id(client, channel_obj)
 
@@ -328,6 +352,7 @@ class ReactionEngine:
             message_id,
             discussion_chat_id,
             settings,
+            account_id=account_id,
         )
 
     async def handle_discussion_message(self, client: Any, message: Any) -> None:
@@ -379,16 +404,13 @@ class ReactionEngine:
                 discussion_chat_id=discussion_chat_id,
             )
 
-        settings = None
-        if linked_data is not None and linked_data.get("reaction_emojis") is not None:
-            settings = ReactionSettings(
-                enabled=True,
-                reaction_emojis=list(linked_data.get("reaction_emojis") or []),
-                delay_seconds=int(linked_data.get("delay_seconds") or 0),
-            )
-
-        if settings is None:
-            settings = await self.get_channel_reaction_settings(channel_id)
+        account_id = getattr(client, "reaction_engine_account_id", None)
+        settings = await self._build_reaction_settings(
+            channel_id,
+            channel_message_id,
+            account_id,
+            linked_data=linked_data,
+        )
 
         if not settings.enabled:
             logger.debug("Reactions disabled for channel %s", channel_id)
@@ -398,6 +420,22 @@ class ReactionEngine:
             logger.debug("No reactions configured for channel %s", channel_id)
             return
 
+        if random.randint(1, 100) > settings.discussion_chance:
+            logger.info(
+                "🎲 Skip discussion reaction for %s/%s: roll exceeded chance %s",
+                discussion_chat_id,
+                discussion_message_id,
+                settings.discussion_chance,
+            )
+            return
+
+        logger.info(
+            "🎯 Applying reactions: %s to %s/%s",
+            settings.reaction_emojis,
+            discussion_chat_id,
+            discussion_message_id,
+        )
+
         await self._record_discussion_message(
             channel_id,
             channel_message_id,
@@ -406,8 +444,7 @@ class ReactionEngine:
             settings,
         )
 
-        account_id = getattr(client, "reaction_engine_account_id", None)
-        await self.add_reaction_emojis(
+        success = await self.add_reaction_emojis(
             client,
             discussion_chat_id,
             discussion_message_id,
@@ -417,6 +454,11 @@ class ReactionEngine:
             channel_id,
             channel_message_id,
         )
+
+        if success:
+            logger.info("✅ Reactions applied successfully: %s", settings.reaction_emojis)
+        else:
+            logger.error("❌ Failed to apply reactions: %s", settings.reaction_emojis)
 
     async def get_channel_reaction_settings(self, channel_id: int) -> ReactionSettings:
         assert self.pool is not None
@@ -516,12 +558,110 @@ class ReactionEngine:
 
         return ReactionSettings(enabled=enabled, reaction_emojis=emojis, delay_seconds=delay_seconds)
 
+    async def _get_account_reaction_settings(self, account_id: Optional[int]) -> Dict[str, Any]:
+        if self.pool is None or account_id is None:
+            return {}
+
+        query = """
+            SELECT
+                reactions_enabled,
+                reaction_emojis,
+                reaction_chance,
+                reaction_discussion_chance,
+                reaction_limit_per_message
+            FROM accounts
+            WHERE id = $1
+        """
+
+        row = await self.pool.fetchrow(query, account_id)
+        if row is None:
+            return {}
+
+        data = dict(row)
+        data["reactions_enabled"] = bool(data.get("reactions_enabled", True))
+        data["reaction_emojis"] = self._normalize_emoji_list(data.get("reaction_emojis"))
+        data["reaction_chance"] = self._coerce_int(data.get("reaction_chance"), 20)
+        data["reaction_discussion_chance"] = self._coerce_int(
+            data.get("reaction_discussion_chance"), data["reaction_chance"]
+        )
+        default_limit = len(data["reaction_emojis"]) or 1
+        data["reaction_limit_per_message"] = self._coerce_int(
+            data.get("reaction_limit_per_message"), default_limit
+        )
+        if data["reaction_limit_per_message"] <= 0:
+            data["reaction_limit_per_message"] = default_limit
+
+        return data
+
+    async def _build_reaction_settings(
+        self,
+        channel_id: int,
+        channel_message_id: Optional[int],
+        account_id: Optional[int],
+        *,
+        linked_data: Optional[Dict[str, Any]] = None,
+    ) -> ReactionSettings:
+        if linked_data and account_id is not None:
+            cached_account = linked_data.get("account_id")
+            if cached_account is not None and cached_account != account_id:
+                linked_data = None
+
+        base_settings = await self.get_channel_reaction_settings(channel_id)
+        reaction_emojis = list(base_settings.reaction_emojis)
+        delay_seconds = base_settings.delay_seconds
+
+        post_data: Optional[Dict[str, Any]] = None
+        if linked_data is not None:
+            post_data = linked_data
+        elif channel_message_id is not None:
+            post_data = await self._get_linked_post(channel_id, channel_message_id, None)
+
+        if post_data:
+            post_emojis = self._normalize_emoji_list(post_data.get("reaction_emojis"))
+            if post_emojis:
+                reaction_emojis = post_emojis
+            delay_seconds = self._coerce_int(post_data.get("delay_seconds"), delay_seconds)
+
+        account_settings = await self._get_account_reaction_settings(account_id)
+        reactions_enabled = account_settings.get("reactions_enabled", True)
+
+        if not reaction_emojis:
+            account_emojis = account_settings.get("reaction_emojis") or []
+            if account_emojis:
+                reaction_emojis = [str(emoji) for emoji in account_emojis if emoji]
+
+        if not reaction_emojis:
+            reaction_emojis = list(DEFAULT_REACTION_EMOJIS)
+
+        reaction_chance = account_settings.get("reaction_chance", 20)
+        discussion_chance = account_settings.get("reaction_discussion_chance", reaction_chance)
+        limit_default = len(reaction_emojis) or 1
+        reaction_limit = account_settings.get("reaction_limit_per_message", limit_default)
+        if reaction_limit <= 0:
+            reaction_limit = limit_default
+        if reaction_limit and reaction_emojis:
+            reaction_emojis = reaction_emojis[:reaction_limit]
+            reaction_limit = len(reaction_emojis)
+
+        enabled = bool(base_settings.enabled and reactions_enabled)
+
+        return ReactionSettings(
+            enabled=enabled,
+            reaction_emojis=reaction_emojis,
+            delay_seconds=delay_seconds,
+            reaction_chance=reaction_chance,
+            discussion_chance=discussion_chance,
+            reaction_limit=reaction_limit,
+        )
+
     async def cache_channel_message(
         self,
         channel_id: int,
         message_id: int,
         discussion_chat_id: Optional[int],
         settings: ReactionSettings,
+        *,
+        account_id: Optional[int] = None,
     ) -> None:
         payload = {
             "channel_id": channel_id,
@@ -529,6 +669,11 @@ class ReactionEngine:
             "discussion_chat_id": discussion_chat_id,
             "reaction_emojis": settings.reaction_emojis,
             "delay_seconds": settings.delay_seconds,
+            "reaction_chance": settings.reaction_chance,
+            "reaction_discussion_chance": settings.discussion_chance,
+            "reaction_limit": settings.reaction_limit,
+            "account_id": account_id,
+            "enabled": settings.enabled,
             "timestamp": datetime.utcnow().isoformat(),
         }
 
@@ -619,6 +764,14 @@ class ReactionEngine:
                     success=True,
                     error_message=None,
                 )
+                await self._log_reaction_event(
+                    account_id,
+                    channel_id,
+                    message_id,
+                    emoji,
+                    success=True,
+                    error_message=None,
+                )
                 logger.info(
                     "✅ Reaction added: %s to discussion %s/%s",
                     emoji,
@@ -635,6 +788,14 @@ class ReactionEngine:
                     chat_id,
                     message_id,
                     account_id,
+                    emoji,
+                    success=False,
+                    error_message=str(exc),
+                )
+                await self._log_reaction_event(
+                    account_id,
+                    channel_id,
+                    message_id,
                     emoji,
                     success=False,
                     error_message=str(exc),
@@ -776,6 +937,42 @@ class ReactionEngine:
             error_message,
         )
 
+    async def _log_reaction_event(
+        self,
+        account_id: Optional[int],
+        channel_id: int,
+        message_id: int,
+        emoji: str,
+        *,
+        success: bool,
+        error_message: Optional[str],
+    ) -> None:
+        if self.pool is None or account_id is None:
+            return
+
+        status = "success" if success else "error"
+        query = """
+            INSERT INTO reaction_logs (
+                account_id,
+                channel,
+                message_id,
+                emoji,
+                status,
+                error_message,
+                created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+        """
+
+        await self.pool.execute(
+            query,
+            account_id,
+            str(channel_id),
+            message_id,
+            emoji,
+            status,
+            error_message,
+        )
+
     async def _get_linked_post(
         self,
         channel_id: Optional[int],
@@ -859,6 +1056,15 @@ class ReactionEngine:
             return getattr(reply, "id", None) or getattr(reply, "message_id", None)
 
         return getattr(message, "top_msg_id", None)
+
+    @staticmethod
+    def _coerce_int(value: Any, default: int) -> int:
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _normalize_emoji_list(value: Any) -> List[str]:
