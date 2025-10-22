@@ -1890,6 +1890,10 @@ async def _handle_linked_channel_message(
     reaction_limit_per_message: Optional[int],
     reactions_enabled: bool,
     last_reaction_at: Optional[datetime] = None,
+    force_discussion: bool = False,
+    comment_chance_override: Optional[int] = None,
+    comment_prompt_override: Optional[str] = None,
+    selected_reaction_chance_override: Optional[int] = None,
 ) -> Optional[datetime]:
     key = make_session_key(userid, session)
     if not active_sessions.get(key, False):
@@ -1922,19 +1926,37 @@ async def _handle_linked_channel_message(
         return current_last_reaction_at
 
     is_discussion_message = _is_discussion_reply_message(message)
+    if force_discussion:
+        is_discussion_message = True
     if is_discussion_message and _is_self_generated_message(message):
         logging.debug("Обнаружен собственный комментарий в обсуждении для %s", session)
         return current_last_reaction_at
 
     if is_discussion_message:
-        if discussion_reply_prompt is None or discussion_reply_chance is None:
+        comment_chance_value = (
+            comment_chance_override
+            if comment_chance_override is not None
+            else discussion_reply_chance
+        )
+        comment_prompt_value = (
+            comment_prompt_override
+            if comment_prompt_override is not None
+            else discussion_reply_prompt
+        )
+        selected_reaction_chance_value = (
+            selected_reaction_chance_override
+            if selected_reaction_chance_override is not None
+            else (reaction_discussion_chance or 0)
+        )
+
+        if comment_prompt_value is None or comment_chance_value is None:
             logging.debug(
                 "Обсуждения отключены для %s: отсутствуют настройки", session
             )
             return current_last_reaction_at
-        comment_chance = discussion_reply_chance
-        comment_prompt = discussion_reply_prompt
-        selected_reaction_chance = reaction_discussion_chance or 0
+        comment_chance = comment_chance_value
+        comment_prompt = comment_prompt_value
+        selected_reaction_chance = selected_reaction_chance_value
     else:
         comment_chance = chance
         comment_prompt = system_prompt
@@ -4688,6 +4710,73 @@ async def send_comments(userid, session, account_id):
                     reaction_limit_per_message=reaction_limit_per_message,
                     reactions_enabled=reactions_enabled,
                     last_reaction_at=last_reaction_at_dt,
+                )
+
+            @app.on_message(filters.group)
+            async def group_discussion_handler(client: Client, message: Message):
+                """
+                Обработчик для обычных сообщений в обсуждениях
+                НЕ обрабатывает реплаи - их обрабатывает существующий discussion_filter
+                """
+
+                nonlocal last_reaction_at_dt
+                key_inner = make_session_key(userid, session)
+
+                # Проверяем что сессия активна
+                if not active_sessions.get(key_inner, False):
+                    return
+
+                # Пропускаем собственные сообщения
+                if _is_self_generated_message(message):
+                    return
+
+                # Пропускаем реплаи - их обрабатывает существующий discussion_filter
+                if _is_discussion_reply_message(message):
+                    return
+
+                # Проверяем что это обсуждение (группа связанная с каналом)
+                try:
+                    chat = await client.get_chat(message.chat.id)
+                    if not getattr(chat, "linked_chat", None):
+                        return  # Обычная группа, не обсуждение
+                except Exception as exc:
+                    logging.debug(
+                        "Ошибка проверки чата %s: %s",
+                        getattr(message.chat, "id", "?"),
+                        exc,
+                    )
+                    return
+
+                # ReactionEngine вызов НЕ ДУБЛИРУЕМ - он будет вызван внутри _handle_linked_channel_message
+                # через существующую логику обработки обсуждений
+
+                # Упрощенный вызов - передаем только необходимые параметры
+                last_reaction_at_dt = await _handle_linked_channel_message(
+                    client=client,
+                    message=message,
+                    userid=userid,
+                    session=session,
+                    account_id=account_id,
+                    # Обязательные параметры с значениями по умолчанию
+                    chance=chance or 20,
+                    xsleep=xsleep or 1,
+                    ysleep=ysleep or 5,
+                    system_prompt=system_prompt or "",
+                    reaction_emojis=reaction_emojis or ["👍"],
+                    reaction_chance=reaction_chance or 20,
+                    reaction_discussion_chance=reaction_discussion_chance,
+                    discussion_reply_prompt=discussion_reply_prompt,
+                    discussion_reply_chance=discussion_reply_chance,
+                    reaction_sleep_min=reaction_sleep_min or 0,
+                    reaction_sleep_max=reaction_sleep_max or 0,
+                    reaction_limit_per_message=reaction_limit_per_message or 1,
+                    reactions_enabled=reactions_enabled,
+                    last_reaction_at=last_reaction_at_dt,
+                    # Новые параметры для принудительной обработки как обсуждения
+                    force_discussion=True,
+                    comment_chance_override=discussion_reply_chance or 25,
+                    comment_prompt_override=discussion_reply_prompt,
+                    selected_reaction_chance_override=reaction_discussion_chance or 45,
                 )
 
             try:
