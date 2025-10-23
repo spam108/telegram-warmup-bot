@@ -1929,6 +1929,7 @@ async def _handle_linked_channel_message(
     if await _is_reply_to_account_comment(message, account_id):
         reaction_comment_context = ' (ответ на комментарий аккаунта)'
         status_suffix = '_reply'
+        previous_last_reaction_at = current_last_reaction_at
         updated_last_reaction_at, should_exit = await _maybe_send_reaction(
             client=client,
             message=message,
@@ -1948,7 +1949,8 @@ async def _handle_linked_channel_message(
             ignore_cooldown=True,
         )
         current_last_reaction_at = updated_last_reaction_at
-        return current_last_reaction_at
+        if should_exit and updated_last_reaction_at == previous_last_reaction_at:
+            return current_last_reaction_at
 
     is_discussion_message = _is_discussion_reply_message(message)
     if force_discussion:
@@ -1974,15 +1976,14 @@ async def _handle_linked_channel_message(
             else reaction_discussion_chance
         )
 
-        if comment_prompt_value is None or comment_chance_value is None:
-            logging.debug(
-                "Обсуждения отключены для %s: отсутствуют настройки", session
-            )
-            return current_last_reaction_at
-
-        comment_chance = comment_chance_value
-        comment_prompt = comment_prompt_value
-        selected_reaction_chance = selected_reaction_chance_value
+        if comment_prompt_value is not None and comment_chance_value is not None:
+            comment_chance = comment_chance_value
+            comment_prompt = comment_prompt_value
+            selected_reaction_chance = selected_reaction_chance_value
+        else:
+            comment_chance = chance
+            comment_prompt = system_prompt
+            selected_reaction_chance = reaction_chance
     else:
         comment_chance = chance
         comment_prompt = system_prompt
