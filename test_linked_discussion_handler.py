@@ -1211,6 +1211,7 @@ async def test_reaction_sent_for_reply_to_own_comment(monkeypatch):
 
     comment_logs = []
     updated_reactions: list[tuple[int, datetime]] = []
+    bot_logs: list[tuple[int, str]] = []
 
     async def fake_add_comment_log(*args, **kwargs):
         comment_logs.append((args, kwargs))
@@ -1224,7 +1225,8 @@ async def test_reaction_sent_for_reply_to_own_comment(monkeypatch):
     async def fake_update_last_reaction_at(account, ts):
         updated_reactions.append((account, ts))
 
-    async def fake_bot_send_message(*args, **kwargs):
+    async def fake_bot_send_message(chat_id, text, **kwargs):
+        bot_logs.append((chat_id, text))
         return None
 
     monkeypatch.setattr(main, "REACTION_MIN_INTERVAL_SECONDS", 60)
@@ -1276,6 +1278,10 @@ async def test_reaction_sent_for_reply_to_own_comment(monkeypatch):
     assert updated_reactions[-1][0] == account_id
     assert updated_reactions[-1][1] == result
     assert result >= recent_reaction
+    assert any(
+        "поставил реакцию 🔥" in text and "ответ на комментарий аккаунта" in text
+        for _, text in bot_logs
+    )
 
 
 @pytest.mark.anyio
@@ -1308,6 +1314,7 @@ async def test_reaction_for_reply_detected_via_comment_log(monkeypatch):
 
     comment_logs = []
     updated_reactions: list[tuple[int, datetime]] = []
+    bot_logs: list[tuple[int, str]] = []
 
     async def fake_add_comment_log(*args, **kwargs):
         comment_logs.append((args, kwargs))
@@ -1321,7 +1328,8 @@ async def test_reaction_for_reply_detected_via_comment_log(monkeypatch):
     async def fake_update_last_reaction_at(account, ts):
         updated_reactions.append((account, ts))
 
-    async def fake_bot_send_message(*args, **kwargs):
+    async def fake_bot_send_message(chat_id, text, **kwargs):
+        bot_logs.append((chat_id, text))
         return None
 
     async def fake_has_successful_comment(account, channel, message_id):
@@ -1380,6 +1388,10 @@ async def test_reaction_for_reply_detected_via_comment_log(monkeypatch):
     assert updated_reactions[-1][0] == account_id
     assert updated_reactions[-1][1] == result
     assert result >= recent_reaction
+    assert any(
+        "поставил реакцию 🔥" in text and "ответ на комментарий аккаунта" in text
+        for _, text in bot_logs
+    )
 
 
 @pytest.mark.anyio
