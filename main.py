@@ -1234,6 +1234,8 @@ async def _maybe_send_reaction(
     last_reaction_error: Optional[BaseException] = None
     last_reaction_error_text: Optional[str] = None
     attempts_performed = 0
+    used_reaction_emoji: Optional[str] = None
+    reaction_link_to_log: Optional[str] = None
 
     for reaction_attempt in range(1, max_reaction_attempts + 1):
         if not working_reaction_emojis:
@@ -1284,13 +1286,8 @@ async def _maybe_send_reaction(
             ):
                 reaction_link = f"{reaction_link}?comment={message.id}"
 
-            await bot.send_message(
-                log_channel,
-                (
-                    f'Аккаунт {session} поставил реакцию {reaction_emoji}'
-                    f'{reaction_comment_context}\n{reaction_link}'
-                ),
-            )
+            used_reaction_emoji = reaction_emoji
+            reaction_link_to_log = reaction_link
             await update_last_reaction_at_with_logging(account_id, now)
             current_last_reaction_at = now
             await asyncio.sleep(0.2)
@@ -1373,6 +1370,20 @@ async def _maybe_send_reaction(
                 error=last_reaction_error_text,
             )
             return current_last_reaction_at, False
+
+    if reaction_sent and used_reaction_emoji and log_channel:
+        reaction_link_text = reaction_link_to_log or ""
+        link_suffix = f"\n{reaction_link_text}" if reaction_link_text else ""
+        log_text = (
+            f'Аккаунт {session} поставил реакцию {used_reaction_emoji}'
+            f'{reaction_comment_context}{link_suffix}'
+        )
+        try:
+            await bot.send_message(log_channel, log_text)
+        except Exception:
+            logging.exception(
+                "Не удалось отправить лог реакции для аккаунта %s", session
+            )
 
     return current_last_reaction_at, reaction_sent
 
