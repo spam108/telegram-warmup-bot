@@ -1379,6 +1379,20 @@ async def _maybe_send_reaction(
             )
             return current_last_reaction_at, False
 
+    if reaction_sent and used_reaction_emoji and log_channel:
+        reaction_link_text = reaction_link_to_log or ""
+        link_suffix = f"\n{reaction_link_text}" if reaction_link_text else ""
+        log_text = (
+            f'Аккаунт {session} поставил реакцию {used_reaction_emoji}'
+            f'{reaction_comment_context}{link_suffix}'
+        )
+        try:
+            await bot.send_message(log_channel, log_text)
+        except Exception:
+            logging.exception(
+                "Не удалось отправить лог реакции для аккаунта %s", session
+            )
+
     return current_last_reaction_at, reaction_sent
 
 
