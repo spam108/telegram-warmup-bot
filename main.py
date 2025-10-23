@@ -1971,7 +1971,7 @@ async def _handle_linked_channel_message(
         selected_reaction_chance_value = (
             selected_reaction_chance_override
             if selected_reaction_chance_override is not None
-            else (reaction_discussion_chance or 0)
+            else reaction_discussion_chance
         )
 
         if comment_prompt_value is None or comment_chance_value is None:
@@ -1979,6 +1979,7 @@ async def _handle_linked_channel_message(
                 "Обсуждения отключены для %s: отсутствуют настройки", session
             )
             return current_last_reaction_at
+
         comment_chance = comment_chance_value
         comment_prompt = comment_prompt_value
         selected_reaction_chance = selected_reaction_chance_value
