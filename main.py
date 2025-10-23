@@ -1957,6 +1957,10 @@ async def _handle_linked_channel_message(
         logging.debug("Обнаружен собственный комментарий в обсуждении для %s", session)
         return current_last_reaction_at
 
+    comment_chance = chance
+    comment_prompt = system_prompt
+    selected_reaction_chance = reaction_chance
+
     if is_discussion_message:
         comment_chance_value = (
             comment_chance_override
@@ -1971,21 +1975,27 @@ async def _handle_linked_channel_message(
         selected_reaction_chance_value = (
             selected_reaction_chance_override
             if selected_reaction_chance_override is not None
-            else (reaction_discussion_chance or 0)
+            else (
+                reaction_discussion_chance
+                if reaction_discussion_chance is not None
+                else selected_reaction_chance
+            )
         )
 
-        if comment_prompt_value is None or comment_chance_value is None:
+        if comment_prompt_value is None and comment_chance_value is None:
             logging.debug(
                 "Обсуждения отключены для %s: отсутствуют настройки", session
             )
             return current_last_reaction_at
-        comment_chance = comment_chance_value
-        comment_prompt = comment_prompt_value
-        selected_reaction_chance = selected_reaction_chance_value
-    else:
-        comment_chance = chance
-        comment_prompt = system_prompt
-        selected_reaction_chance = reaction_chance
+
+        if comment_chance_value is not None:
+            comment_chance = comment_chance_value
+
+        if comment_prompt_value is not None:
+            comment_prompt = comment_prompt_value
+
+        if selected_reaction_chance_value is not None:
+            selected_reaction_chance = selected_reaction_chance_value
 
     post_text = _extract_post_text(message)
     if post_text is None:
