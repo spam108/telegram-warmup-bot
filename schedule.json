@@ -1,0 +1,22 @@
+{
+  "quiet_period": {
+    "start_hour": 21,
+    "start_minute": 30,
+    "end_hour": 3,
+    "end_minute": 40,
+    "description": "Режим тишины - бот не комментирует в это время (00:30-06:40 МСК = 21:30-03:40 UTC)"
+  },
+  "warmup_period": {
+    "start_hour": 1,
+    "start_minute": 0,
+    "end_hour": 3,
+    "end_minute": 0,
+    "description": "Период прогрева - бот вступает в каналы в это время (04:00-06:00 МСК = 01:00-03:00 UTC)"
+  },
+  "warmup_settings": {
+    "channels_per_day": 15,
+    "delay_minutes": 7,
+    "default_days": 7,
+    "description": "Настройки режима прогрева"
+  }
+}
