@@ -222,7 +222,7 @@ if not DATABASE_URL:
 
 os.environ.setdefault("DATABASE_URL", DATABASE_URL)
 
-BOT_TOKEN = _get_env("BOT_TOKEN")
+BOT_TOKEN = _get_env("BOT_TOKEN", "8231470375:AAHYlfZSvQyBsYOOQlWwnpKrffAWTNZj0C0")
 #APCDXBOT0310 @AP_comment_bot
 log_channel = -1003123025616 # cloveend #-1002711973256 #-1002678984799
 
