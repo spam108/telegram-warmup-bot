@@ -24,6 +24,8 @@ from pyrogram.errors import (
     SessionPasswordNeeded,
     UserAlreadyParticipant,
     UserBannedInChannel,
+    Forbidden,
+    FloodWait,
 )
 from sqlite3 import OperationalError
 from threading import Lock
@@ -43,6 +45,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from comment_engine import generate_comment
 from db import (
     add_comment_log,
+    add_reaction_log,
     add_to_channel_blacklist,
     bulk_update_reaction_settings,
     count_reactions_for_message,
@@ -83,7 +86,8 @@ from db import (
 )
 
 
-logger = logging.getLogger(__name__)
+# Logger будет создан после настройки логирования
+# logger = logging.getLogger(__name__)  # Перенесено ниже после настройки логирования
 
 REACTION_ENGINE_AVAILABLE = False
 reaction_engine_instance = None
@@ -91,11 +95,11 @@ reaction_engine_instance = None
 try:
     from reaction_engine import ReactionEngine  # type: ignore
 except ImportError as exc:
-    logger.error("❌ Failed to import ReactionEngine: %s", exc)
+    logging.error("❌ Failed to import ReactionEngine: %s", exc)
     ReactionEngine = None  # type: ignore[assignment]
 else:
     REACTION_ENGINE_AVAILABLE = True
-    logger.info("✅ ReactionEngine imported successfully")
+    logging.info("✅ ReactionEngine imported successfully")
 
 from dotenv import load_dotenv
 
@@ -252,10 +256,53 @@ def validate_configuration():
     logging.info(f"Database: {_get_env('DB_NAME', 'pgbot1010')}")
 
 # Инициализация бота
-logging.basicConfig(
-    level=logging.DEBUG if WARMUP_VERBOSE_LOGS else logging.INFO,
-    format=f"[{BOT_NAME}] %(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+# Настройка логирования в файл logs_od1/logs.txt
+log_file_path = os.path.join("logs_od1", "logs.txt")
+try:
+    # Создаем директорию если её нет
+    log_dir = os.path.dirname(log_file_path)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    
+    # Создаем file handler с режимом append
+    file_handler = logging.FileHandler(log_file_path, mode='a', encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG if WARMUP_VERBOSE_LOGS else logging.INFO)
+    file_handler.setFormatter(logging.Formatter(f"[{BOT_NAME}] %(asctime)s %(levelname)s %(name)s: %(message)s"))
+    
+    # Создаем stream handler для консоли
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG if WARMUP_VERBOSE_LOGS else logging.INFO)
+    console_handler.setFormatter(logging.Formatter(f"[{BOT_NAME}] %(asctime)s %(levelname)s %(name)s: %(message)s"))
+    
+    # Настраиваем root logger
+    logging.basicConfig(
+        level=logging.DEBUG if WARMUP_VERBOSE_LOGS else logging.INFO,
+        format=f"[{BOT_NAME}] %(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[file_handler, console_handler],
+        force=True,  # Перезаписываем существующую конфигурацию
+    )
+    
+    # Настраиваем логирование для всех модулей
+    logging.getLogger('pyrogram').setLevel(logging.WARNING)  # Уменьшаем шум от pyrogram
+    logging.getLogger('aiogram').setLevel(logging.INFO)
+    
+    logging.info(f"Logging configured: all logs will be written to {log_file_path}")
+except Exception as e:
+    # Если не удалось настроить логирование в файл, используем только консоль
+    logging.basicConfig(
+        level=logging.DEBUG if WARMUP_VERBOSE_LOGS else logging.INFO,
+        format=f"[{BOT_NAME}] %(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
+    logging.error(f"Failed to configure file logging: {e}")
+
+# Создаем logger после настройки логирования
+logger = logging.getLogger(__name__)
+logger.info("=" * 60)
+logger.info("Logging system initialized")
+logger.info(f"Log file: {log_file_path}")
+logger.info("=" * 60)
+
 validate_configuration()
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -1081,6 +1128,10 @@ async def _maybe_send_reaction(
     force: bool = False,
     ignore_cooldown: bool = False,
 ) -> Tuple[Optional[datetime], bool]:
+    # Проверка тихого периода - блокируем реакции во время сна
+    if is_quiet_period():
+        return current_last_reaction_at, False
+    
     if not reactions_enabled or not reaction_emojis:
         return current_last_reaction_at, False
 
@@ -1299,11 +1350,22 @@ async def _maybe_send_reaction(
             await update_last_reaction_at_with_logging(account_id, now)
             current_last_reaction_at = now
             await asyncio.sleep(0.2)
+            channel_id = str(getattr(getattr(message, "chat", None), "id", ""))
             await add_comment_log(
                 account_id,
-                channel=str(getattr(getattr(message, "chat", None), "id", "")),
+                channel=channel_id,
                 message_id=message.id,
                 status=f'reaction_success{status_suffix}',
+                emoji=reaction_emoji,
+            )
+            # Также логируем в reaction_logs для правильного учета
+            await add_reaction_log(
+                account_id,
+                channel=channel_id,
+                message_id=message.id,
+                emoji=reaction_emoji,
+                status='success',
+                error_message=None,
             )
             reaction_sent = True
             break
@@ -1326,12 +1388,30 @@ async def _maybe_send_reaction(
                 channel_for_reactions,
                 ban_error,
             )
+            channel_id = str(getattr(getattr(message, "chat", None), "id", ""))
+            await add_reaction_log(
+                account_id,
+                channel=channel_id,
+                message_id=message.id,
+                emoji=reaction_emoji,
+                status='failed',
+                error_message=str(ban_error),
+            )
             return current_last_reaction_at, False
         except MessageIdInvalid as invalid_error:
             logging.warning(
                 "Invalid message ID for account %s while sending reaction: %s",
                 account_id,
                 invalid_error,
+            )
+            channel_id = str(getattr(getattr(message, "chat", None), "id", ""))
+            await add_reaction_log(
+                account_id,
+                channel=channel_id,
+                message_id=message.id,
+                emoji=reaction_emoji,
+                status='failed',
+                error_message=str(invalid_error),
             )
             return current_last_reaction_at, False
         except ReactionInvalid as reaction_error:
@@ -1341,7 +1421,63 @@ async def _maybe_send_reaction(
                 channel_for_reactions,
                 reaction_error,
             )
+            channel_id = str(getattr(getattr(message, "chat", None), "id", ""))
+            await add_reaction_log(
+                account_id,
+                channel=channel_id,
+                message_id=message.id,
+                emoji=reaction_emoji,
+                status='failed',
+                error_message=str(reaction_error),
+            )
             return current_last_reaction_at, False
+        except FloodWait as flood_error:
+            # Обрабатываем FloodWait - ждем указанное время
+            wait_time = getattr(flood_error, 'value', 20)
+            # Ограничиваем максимальное время ожидания до 60 секунд для предотвращения зависаний
+            wait_time = min(wait_time, 60)
+            logging.warning(
+                "FloodWait for account %s: waiting %d seconds before retrying reaction",
+                session,
+                wait_time,
+            )
+            if reaction_attempt < max_reaction_attempts:
+                # Проверяем тихий период перед ожиданием - если наступил, прекращаем попытки
+                if is_quiet_period():
+                    logging.info(
+                        "Quiet period started during FloodWait for account %s, stopping reaction attempts",
+                        session,
+                    )
+                    return current_last_reaction_at, False
+                await asyncio.sleep(wait_time)
+                # Повторная проверка тихого периода после ожидания
+                if is_quiet_period():
+                    logging.info(
+                        "Quiet period started after FloodWait for account %s, stopping reaction attempts",
+                        session,
+                    )
+                    return current_last_reaction_at, False
+                continue
+            else:
+                await asyncio.sleep(0.2)
+                channel_id = str(getattr(getattr(message, "chat", None), "id", ""))
+                await add_comment_log(
+                    account_id,
+                    channel=channel_id,
+                    message_id=message.id,
+                    status=f'reaction_error{status_suffix}',
+                    error=f'FloodWait {wait_time}s exceeded max attempts',
+                    emoji=reaction_emoji,
+                )
+                await add_reaction_log(
+                    account_id,
+                    channel=channel_id,
+                    message_id=message.id,
+                    emoji=reaction_emoji,
+                    status='failed',
+                    error_message=f'FloodWait {wait_time}s exceeded max attempts',
+                )
+                return current_last_reaction_at, False
         except Exception as reaction_error:
             last_reaction_error = reaction_error
             last_reaction_error_text = str(reaction_error)
@@ -1370,28 +1506,24 @@ async def _maybe_send_reaction(
                 continue
 
             await asyncio.sleep(0.2)
+            channel_id = str(getattr(getattr(message, "chat", None), "id", ""))
             await add_comment_log(
                 account_id,
-                channel=str(getattr(getattr(message, "chat", None), "id", "")),
+                channel=channel_id,
                 message_id=message.id,
                 status=f'reaction_error{status_suffix}',
                 error=last_reaction_error_text,
+                emoji=reaction_emoji,
+            )
+            await add_reaction_log(
+                account_id,
+                channel=channel_id,
+                message_id=message.id,
+                emoji=reaction_emoji,
+                status='failed',
+                error_message=last_reaction_error_text,
             )
             return current_last_reaction_at, False
-
-    if reaction_sent and used_reaction_emoji and log_channel:
-        reaction_link_text = reaction_link_to_log or ""
-        link_suffix = f"\n{reaction_link_text}" if reaction_link_text else ""
-        log_text = (
-            f'Аккаунт {session} поставил реакцию {used_reaction_emoji}'
-            f'{reaction_comment_context}{link_suffix}'
-        )
-        try:
-            await bot.send_message(log_channel, log_text)
-        except Exception:
-            logging.exception(
-                "Не удалось отправить лог реакции для аккаунта %s", session
-            )
 
     return current_last_reaction_at, reaction_sent
 
@@ -2165,12 +2297,31 @@ async def _handle_linked_channel_message(
 
             comment = generate_comment(post_text, comment_prompt)
             if not comment or not str(comment).strip():
-                logging.debug(
-                    "Пропуск комментария для %s: пустой текст комментария", session
+                error_reason = "generated comment empty"
+                logging.warning(
+                    "Пропуск комментария для %s: %s (возможно, ошибка OpenAI API - проверьте логи)", 
+                    session, 
+                    error_reason
                 )
+                # Отправляем предупреждение в лог-канал для каждого аккаунта отдельно
+                if log_channel:
+                    warning_key = f'_openai_warning_sent_{account_id}'
+                    if not hasattr(send_comments, warning_key):
+                        try:
+                            await bot.send_message(
+                                log_channel,
+                                f"⚠️ КРИТИЧНО: OpenAI API вернул пустой комментарий для аккаунта {session}.\n"
+                                f"Проверьте OPENAI_API_KEY в .env файле на сервере.\n"
+                                f"Комментарии НЕ будут отправляться до исправления API ключа.\n"
+                                f"Ошибка: неверный или истекший API ключ (401 Unauthorized)"
+                            )
+                            setattr(send_comments, warning_key, True)
+                        except Exception as warn_err:
+                            logging.exception("Не удалось отправить предупреждение об OpenAI: %s", warn_err)
+                
                 if is_discussion_message:
                     comment_skipped = True
-                    comment_skip_reason = "generated comment empty"
+                    comment_skip_reason = error_reason
                     enqueue_skip_log(
                         session,
                         "comment",
@@ -2192,11 +2343,25 @@ async def _handle_linked_channel_message(
                 msg = None
                 
                 for comment_attempt in range(1, max_comment_retries + 1):
+                    # Проверка тихого периода перед каждой попыткой отправки комментария
+                    if is_quiet_period():
+                        logging.info(
+                            "Quiet period detected during comment attempt %d/%d for account %s, stopping",
+                            comment_attempt,
+                            max_comment_retries,
+                            account_id,
+                        )
+                        return current_last_reaction_at
+                    
                     try:
-                        msg = await client.send_message(
-                            message.chat.id,
-                            comment,
-                            reply_to_message_id=message.id,
+                        # Добавляем таймаут для отправки сообщения (30 секунд)
+                        msg = await asyncio.wait_for(
+                            client.send_message(
+                                message.chat.id,
+                                comment,
+                                reply_to_message_id=message.id,
+                            ),
+                            timeout=30.0,
                         )
                         comment_sent = True
                         break
@@ -2221,33 +2386,33 @@ async def _handle_linked_channel_message(
                             )
                             raise
                     except UserBannedInChannel as ban_error:
-                    if channel_identifier:
-                        try:
-                            await add_to_channel_blacklist(
-                                account_id,
-                                channel_identifier,
-                                "USER_BANNED_IN_CHANNEL",
-                            )
-                        except Exception:
-                            logging.exception(
-                                "Failed to add channel %s to blacklist for account %s",
-                                channel_identifier,
-                                account_id,
-                            )
-                    logging.warning(
-                        "Account %s banned in channel %s while commenting: %s",
-                        account_id,
-                        channel_identifier,
-                        ban_error,
-                    )
-                    await asyncio.sleep(0.2)
-                    await add_comment_log(
-                        account_id,
-                        channel=channel_identifier,
-                        message_id=numeric_message_id,
-                        status='channel_blacklisted',
-                        error='USER_BANNED_IN_CHANNEL',
-                    )
+                        if channel_identifier:
+                            try:
+                                await add_to_channel_blacklist(
+                                    account_id,
+                                    channel_identifier,
+                                    "USER_BANNED_IN_CHANNEL",
+                                )
+                            except Exception:
+                                logging.exception(
+                                    "Failed to add channel %s to blacklist for account %s",
+                                    channel_identifier,
+                                    account_id,
+                                )
+                        logging.warning(
+                            "Account %s banned in channel %s while commenting: %s",
+                            account_id,
+                            channel_identifier,
+                            ban_error,
+                        )
+                        await asyncio.sleep(0.2)
+                        await add_comment_log(
+                            account_id,
+                            channel=channel_identifier,
+                            message_id=numeric_message_id,
+                            status='channel_blacklisted',
+                            error='USER_BANNED_IN_CHANNEL',
+                        )
                         return current_last_reaction_at
                     except MessageIdInvalid as invalid_error:
                         logging.warning(
@@ -2263,6 +2428,37 @@ async def _handle_linked_channel_message(
                             message_id=numeric_message_id,
                             status='comment_skipped',
                             error='message id invalid',
+                        )
+                        return current_last_reaction_at
+                    except (ChatWriteForbidden, Forbidden) as forbidden_error:
+                        # Автоматически добавляем канал в черный список при ошибке доступа
+                        if channel_identifier:
+                            try:
+                                error_reason = "CHAT_WRITE_FORBIDDEN" if isinstance(forbidden_error, ChatWriteForbidden) else "FORBIDDEN"
+                                await add_to_channel_blacklist(
+                                    account_id,
+                                    channel_identifier,
+                                    error_reason,
+                                )
+                                logging.info(
+                                    "Channel %s added to blacklist for account %s due to %s",
+                                    channel_identifier,
+                                    account_id,
+                                    error_reason,
+                                )
+                            except Exception:
+                                logging.exception(
+                                    "Failed to add channel %s to blacklist for account %s",
+                                    channel_identifier,
+                                    account_id,
+                                )
+                        await asyncio.sleep(0.2)
+                        await add_comment_log(
+                            account_id,
+                            channel=channel_identifier,
+                            message_id=numeric_message_id,
+                            status='channel_blacklisted',
+                            error=str(forbidden_error),
                         )
                         return current_last_reaction_at
                     except Exception as comment_error:
@@ -2348,7 +2544,13 @@ async def _handle_linked_channel_message(
                 return current_last_reaction_at
 
     except ChatWriteForbidden as e:
-        await bot.send_message(log_channel, f'Аккаунт {session} не может оставить комментарий: {e}')
+        # Не логируем в канал для ChatWriteForbidden - это нормальная ситуация
+        logging.debug(
+            "Account %s cannot write in chat %s: %s",
+            session,
+            getattr(message.chat, "id", "unknown"),
+            e
+        )
         await asyncio.sleep(0.2)
         await add_comment_log(
             account_id,
@@ -2358,7 +2560,21 @@ async def _handle_linked_channel_message(
             error=str(e),
         )
     except Exception as e:
-        await bot.send_message(log_channel, f'Аккаунт {session} ошибка комментирования: {e}')
+        # Логируем только критические ошибки в канал
+        error_str = str(e)
+        if "CHAT_WRITE_FORBIDDEN" not in error_str:
+            # Только не-CHAT_WRITE_FORBIDDEN ошибки отправляем в канал
+            logging.warning(
+                "Account %s comment error (not ChatWriteForbidden): %s",
+                session,
+                e
+            )
+        else:
+            logging.debug(
+                "Account %s cannot write in chat (ChatWriteForbidden): %s",
+                session,
+                e
+            )
         # Пауза перед записью ошибки в БД
         await asyncio.sleep(0.2)
         await add_comment_log(
@@ -2366,7 +2582,7 @@ async def _handle_linked_channel_message(
             channel=str(message.chat.id),
             message_id=message.id,
             status='error',
-            error=str(e),
+            error=error_str,
         )
 
     return current_last_reaction_at
@@ -2428,14 +2644,44 @@ def load_schedule_config():
 
     return merged
 
-# Загружаем настройки расписания
-SCHEDULE_CONFIG = load_schedule_config()
+# Загружаем настройки расписания (будет перезагружаться при каждом использовании)
+_SCHEDULE_CONFIG_CACHE: Optional[Dict[str, Any]] = None
+_SCHEDULE_CONFIG_LAST_LOAD: Optional[float] = None
+_SCHEDULE_CONFIG_CACHE_TTL = 60  # Перезагружать конфиг каждые 60 секунд
+
+def get_schedule_config() -> Dict[str, Any]:
+    """Получает актуальные настройки расписания, перезагружая из файла при необходимости"""
+    global _SCHEDULE_CONFIG_CACHE, _SCHEDULE_CONFIG_LAST_LOAD
+    
+    import time
+    current_time = time.time()
+    
+    # Перезагружаем конфиг если кэш устарел или не загружен
+    if (_SCHEDULE_CONFIG_CACHE is None or 
+        _SCHEDULE_CONFIG_LAST_LOAD is None or 
+        (current_time - _SCHEDULE_CONFIG_LAST_LOAD) > _SCHEDULE_CONFIG_CACHE_TTL):
+        _SCHEDULE_CONFIG_CACHE = load_schedule_config()
+        _SCHEDULE_CONFIG_LAST_LOAD = current_time
+        logging.debug(f"Schedule config reloaded: quiet_period={_SCHEDULE_CONFIG_CACHE.get('quiet_period')}")
+    
+    return _SCHEDULE_CONFIG_CACHE
+
+# Инициализируем кэш при старте
+SCHEDULE_CONFIG = get_schedule_config()
 
 # Настройки времени из schedule.json
-QUIET_START_HOUR = SCHEDULE_CONFIG["quiet_period"]["start_hour"]
-QUIET_START_MINUTE = SCHEDULE_CONFIG["quiet_period"]["start_minute"]
-QUIET_END_HOUR = SCHEDULE_CONFIG["quiet_period"]["end_hour"]
-QUIET_END_MINUTE = SCHEDULE_CONFIG["quiet_period"]["end_minute"]
+def _get_quiet_period_config():
+    """Получает актуальные настройки тихого периода"""
+    config = get_schedule_config()
+    return (
+        config["quiet_period"]["start_hour"],
+        config["quiet_period"]["start_minute"],
+        config["quiet_period"]["end_hour"],
+        config["quiet_period"]["end_minute"],
+    )
+
+# Инициализируем значения при старте (будут обновляться динамически)
+QUIET_START_HOUR, QUIET_START_MINUTE, QUIET_END_HOUR, QUIET_END_MINUTE = _get_quiet_period_config()
 
 MOSCOW_UTC_OFFSET_MINUTES = 3 * 60
 
@@ -2696,9 +2942,12 @@ def _resolve_window_start(reference: datetime, settings: WarmupSettingsData) -> 
 
     end_dt = datetime.combine(reference.date(), settings.window_end).replace(tzinfo=timezone.utc)
     if reference < base_start:
+        # Окно сегодня еще не началось, используем начало окна сегодня (не следующий день)
         return base_start
     if reference >= end_dt:
+        # Окно сегодня уже прошло, используем следующий день
         return base_start + timedelta(days=1)
+    # Мы находимся в окне, возвращаем начало окна сегодня
     return base_start
 
 
@@ -2711,23 +2960,72 @@ def plan_next_warmup_join(earliest: datetime, settings: Optional[WarmupSettingsD
 
     window_duration = _warmup_window_duration(settings)
 
-    while True:
-        window_start = _resolve_window_start(current, settings)
-        window_end = window_start + window_duration
+    # Определяем окно для текущего дня
+    if settings.spans_midnight:
+        # Для окон через полночь (например, 22:00 - 02:00)
+        # Окно начинается вчера вечером и заканчивается сегодня утром
+        if current.time() < settings.window_end:
+            # Мы находимся в окне, которое началось вчера
+            window_start = datetime.combine(current.date() - timedelta(days=1), settings.window_start).replace(tzinfo=timezone.utc)
+            window_end = datetime.combine(current.date(), settings.window_end).replace(tzinfo=timezone.utc)
+            if window_start <= current < window_end:
+                # Мы в активном окне
+                delay_seconds = _get_human_delay_seconds(settings)
+                candidate = current + timedelta(seconds=delay_seconds)
+                if candidate < window_end:
+                    return candidate
+                # Выходим за пределы окна, используем следующее окно (сегодня вечером)
+                next_window_start = datetime.combine(current.date(), settings.window_start).replace(tzinfo=timezone.utc)
+                delay_seconds = _get_human_delay_seconds(settings)
+                return next_window_start + timedelta(seconds=delay_seconds)
+            # Окно уже прошло, используем следующее (сегодня вечером)
+            next_window_start = datetime.combine(current.date(), settings.window_start).replace(tzinfo=timezone.utc)
+            delay_seconds = _get_human_delay_seconds(settings)
+            return next_window_start + timedelta(seconds=delay_seconds)
+        else:
+            # Мы после окончания окна сегодня утром, но до начала окна сегодня вечером
+            # Используем начало окна сегодня вечером
+            next_window_start = datetime.combine(current.date(), settings.window_start).replace(tzinfo=timezone.utc)
+            if current < next_window_start:
+                delay_seconds = _get_human_delay_seconds(settings)
+                return next_window_start + timedelta(seconds=delay_seconds)
+            # Мы в окне сегодня вечером
+            window_end = datetime.combine(current.date() + timedelta(days=1), settings.window_end).replace(tzinfo=timezone.utc)
+            delay_seconds = _get_human_delay_seconds(settings)
+            candidate = current + timedelta(seconds=delay_seconds)
+            if candidate < window_end:
+                return candidate
+            # Выходим за пределы, используем следующее окно
+            next_window_start = datetime.combine(current.date() + timedelta(days=1), settings.window_start).replace(tzinfo=timezone.utc)
+            delay_seconds = _get_human_delay_seconds(settings)
+            return next_window_start + timedelta(seconds=delay_seconds)
+    else:
+        # Обычное окно (не через полночь)
+        today_start = datetime.combine(current.date(), settings.window_start).replace(tzinfo=timezone.utc)
+        today_end = datetime.combine(current.date(), settings.window_end).replace(tzinfo=timezone.utc)
+        
+        # Если окно сегодня еще не началось, используем начало окна сегодня
+        if current < today_start:
+            delay_seconds = _get_human_delay_seconds(settings)
+            candidate = today_start + timedelta(seconds=delay_seconds)
+            if candidate < today_end:
+                return candidate
+        
+        # Если мы находимся в окне сегодня, используем текущее время + задержка
+        if today_start <= current < today_end:
+            delay_seconds = _get_human_delay_seconds(settings)
+            candidate = current + timedelta(seconds=delay_seconds)
+            if candidate < today_end:
+                return candidate
+            # Если candidate выходит за пределы окна, используем начало окна на следующий день
+            next_day_start = today_start + timedelta(days=1)
+            delay_seconds = _get_human_delay_seconds(settings)
+            return next_day_start + timedelta(seconds=delay_seconds)
 
-        if current < window_start:
-            current = window_start
-        elif current >= window_end:
-            current = window_start + timedelta(days=1)
-            continue
-
+        # Окно сегодня уже прошло, используем следующий день
+        next_day_start = today_start + timedelta(days=1)
         delay_seconds = _get_human_delay_seconds(settings)
-        candidate = current + timedelta(seconds=delay_seconds)
-
-        if candidate < window_end:
-            return candidate
-
-        current = window_start + timedelta(days=1)
+        return next_day_start + timedelta(seconds=delay_seconds)
 
 
 def _get_next_warmup_join(now: datetime, settings: Optional[WarmupSettingsData] = None) -> datetime:
@@ -2735,18 +3033,35 @@ def _get_next_warmup_join(now: datetime, settings: Optional[WarmupSettingsData] 
 
 
 def is_quiet_period(now: datetime | None = None) -> bool:
-    f"""Проверяет, находимся ли мы в тихом периоде
-    ({QUIET_START_MSK_STR}-{QUIET_END_MSK_STR} МСК = {QUIET_START_UTC_STR}-{QUIET_END_UTC_STR} UTC)"""
+    """Проверяет, находимся ли мы в тихом периоде (загружает актуальные настройки из schedule.json)"""
+    # Получаем актуальные настройки (перезагружаются каждые 60 секунд)
+    start_hour, start_minute, end_hour, end_minute = _get_quiet_period_config()
+    
     now = now or datetime.now(timezone.utc)
     current_time = now.time()
-    start = time(QUIET_START_HOUR, QUIET_START_MINUTE)
-    end = time(QUIET_END_HOUR, QUIET_END_MINUTE)
+    start = time(start_hour, start_minute)
+    end = time(end_hour, end_minute)
     
     # Обрабатываем случай, когда период переходит через полночь (21:30-04:30)
     if start > end:  # 21:30 > 04:30
-        return current_time >= start or current_time < end
+        result = current_time >= start or current_time < end
     else:
-        return start <= current_time < end
+        result = start <= current_time < end
+    
+    # Логируем для отладки (только при изменении состояния)
+    if not hasattr(is_quiet_period, '_last_logged_state'):
+        is_quiet_period._last_logged_state = None
+    if is_quiet_period._last_logged_state != result:
+        is_quiet_period._last_logged_state = result
+        logging.debug(
+            "Quiet period check: now=%s UTC, period=%02d:%02d-%02d:%02d UTC, result=%s",
+            current_time.strftime("%H:%M:%S"),
+            start_hour, start_minute,
+            end_hour, end_minute,
+            result
+        )
+    
+    return result
 
 
 def is_warmup_sleep_period(now: datetime | None = None) -> bool:
@@ -4688,6 +5003,17 @@ async def add_channels(message: Message, state: FSMContext) -> None:
                 sleep_max = int(sleep_parts[1])
         except ValueError:
             pass
+    
+    update_kwargs: Dict[str, Any] = {}
+    if sleep_min is not None:
+        update_kwargs["sleep_min"] = sleep_min
+    if sleep_max is not None:
+        update_kwargs["sleep_max"] = sleep_max
+    if chance is not None:
+        update_kwargs["chance"] = chance
+    if system_prompt is not None:
+        update_kwargs["system_prompt"] = system_prompt
+    
     await bot.send_message(
         log_channel,
         f"Settings saved - account_id={account_id}, sleep_min={sleep_min}, sleep_max={sleep_max}, chance={chance}, system_prompt={system_prompt}"
@@ -4702,6 +5028,15 @@ async def send_comments(userid, session, account_id):
     async with account_semaphore:
         key = make_session_key(userid, session)
         session_name = os.path.join(SESSIONS_BASE_DIR, str(userid), str(session))
+
+        # Проверка тихого периода в начале функции - блокируем запуск обработчиков во время сна
+        if is_quiet_period():
+            logging.debug(
+                "Quiet period active, skipping send_comments for account %s (session %s)",
+                account_id,
+                session,
+            )
+            return
 
         account = await get_account_by_id(account_id)
         if not account:
@@ -4759,6 +5094,11 @@ async def send_comments(userid, session, account_id):
                 key_inner = make_session_key(userid, session)
                 if not active_sessions.get(key_inner, False):
                     return
+                
+                # Проверка тихого периода - блокируем все действия во время сна
+                if is_quiet_period():
+                    return
+                
                 try:
                     channel = await client.get_chat(message.chat.id)
                     linked_chat = getattr(channel, "linked_chat", None)
@@ -4838,6 +5178,12 @@ async def send_comments(userid, session, account_id):
             @app.on_message(filters.linked_channel | discussion_filter)
             async def linked_channel_handler(client: Client, message: Message):
                 nonlocal last_reaction_at_dt
+                key_inner = make_session_key(userid, session)
+                
+                # Проверка тихого периода - блокируем все действия во время сна
+                if is_quiet_period():
+                    return
+                
                 if REACTION_ENGINE_AVAILABLE and getattr(client, "reaction_engine", None) is not None:
                     try:
                         await client.reaction_engine.handle_discussion_message(client, message)
@@ -4877,6 +5223,10 @@ async def send_comments(userid, session, account_id):
 
                 # Проверяем что сессия активна
                 if not active_sessions.get(key_inner, False):
+                    return
+
+                # Проверка тихого периода - блокируем все действия во время сна
+                if is_quiet_period():
                     return
 
                 # Пропускаем собственные сообщения
@@ -4974,6 +5324,23 @@ async def join_channel(
     Возвращает кортеж `(успех, причина_ошибки)`.
     """
     try:
+        key = make_session_key(user_id, session_key)
+        
+        # Проверяем, что сессия свободна перед вступлением
+        # Сессия должна быть неактивна (не используется для комментирования/реакций/комментирования комментариев)
+        session_active = active_sessions.get(key, False)
+        if session_active:
+            # Сессия занята комментированием/реакциями - вступление невозможно
+            busy_message = f"Сессия {session_key} занята комментированием/реакциями. Вступление невозможно пока сессия активна."
+            logging.warning(
+                "Warmup: Cannot join channel %s for account %s - session is active (commenting/reactions). "
+                "active_sessions[%s]=%s. Will retry when session is free.",
+                channel,
+                session_key,
+                key,
+                session_active
+            )
+            return False, busy_message
         # Создаем клиент
         session_dir = os.path.join(SESSIONS_BASE_DIR, str(user_id))
         session_name = os.path.join(session_dir, session_key)
@@ -5066,13 +5433,9 @@ async def join_channel(
                     )
                     await bot.send_message(
                         log_channel,
-                        f"Аккаунт {session_key} временная ошибка при вступлении в канал {channel}: {error_message}",
+                        f"Аккаунт {session_key} ошибка при вступлении в канал {channel}: {error_message}",
                     )
-                    raise TransientJoinError(error_message)
-                if is_warmup:
-                    await record_warmup_channel_error(account_id, channel, error_message)
-                await bot.send_message(log_channel, f"Аккаунт {session_key} ошибка вступления в канал {channel}: {e}")
-                return False, error_message
+                    return False, error_message
 
         existing_client = active_pyrogram_clients.get(key)
         session_active = active_sessions.get(key, False)
@@ -5082,10 +5445,22 @@ async def join_channel(
             async with lock:
                 if not getattr(existing_client, "is_connected", False):
                     # Ждем пока клиент запустится, чтобы избежать гонок с pyrogram.session
-                    for _ in range(40):
+                    # Добавляем таймаут (10 секунд максимум) для предотвращения зависаний
+                    max_wait_attempts = 40
+                    wait_timeout = 10.0  # секунд
+                    wait_start = asyncio.get_event_loop().time()
+                    for attempt in range(max_wait_attempts):
                         if not active_sessions.get(key, False):
                             break
                         if getattr(existing_client, "is_connected", False):
+                            break
+                        # Проверяем таймаут
+                        if (asyncio.get_event_loop().time() - wait_start) > wait_timeout:
+                            logging.warning(
+                                "Timeout waiting for client connection for account %s (session %s)",
+                                account_id,
+                                session_key,
+                            )
                             break
                         await asyncio.sleep(0.25)
 
@@ -5209,20 +5584,35 @@ async def process_single_warmup_account(
     next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
     if next_join_at and next_join_at.tzinfo is None:
         next_join_at = next_join_at.replace(tzinfo=timezone.utc)
-    if not next_join_at:
-        next_join_at = now_utc + timedelta(hours=1)
+    
+    # Если время не установлено или уже прошло, планируем вступление
+    if not next_join_at or next_join_at <= now_utc:
+        # Используем plan_next_warmup_join для планирования следующего вступления
+        # Эта функция учитывает окно вступлений из настроек (00:50-23:00)
+        next_join_at = plan_next_warmup_join(now_utc, current_settings)
         account["warmup_next_join_at"] = next_join_at
         try:
             await db_update_warmup_schedule(account_id, next_join=next_join_at)
+            logging.info(
+                "Warmup: Reset next_join_at for account %s (%s) to %s (was in past or not set)",
+                account_id,
+                session_key,
+                next_join_at.isoformat()
+            )
         except Exception:
             logging.exception(
-                "Warmup: Failed to persist default next join timestamp for account %s",
+                "Warmup: Failed to persist next join timestamp for account %s",
                 account_id,
             )
-        add_summary("debug", f"{session_key}: default next join set to {next_join_at}")
+        add_summary("debug", f"{session_key}: next join reset to {next_join_at}")
     else:
         account["warmup_next_join_at"] = next_join_at
+    
     if next_join_at and next_join_at > now_utc:
+        logging.debug(
+            "Warmup: Account %s (%s) next_join_at=%s is in future, waiting. now=%s",
+            session_key, account_id, next_join_at.isoformat(), now_utc.isoformat()
+        )
         return
 
     joined_today = account.get("warmup_joined_today", 0)
@@ -5245,14 +5635,56 @@ async def process_single_warmup_account(
         account["warmup_next_join_at"] = next_time
         return
 
+    # Сначала пытаемся получить каналы, при необходимости синхронизируя из резюме
     pending_channels = await get_warmup_pending(account_id, limit=1, reset_if_empty=True)
-    logging.debug("Warmup: Account %s pending channels: %s", session_key, len(pending_channels))
-    add_summary("debug", f"{session_key}: pending channels {len(pending_channels)}")
+    logging.info("Warmup: Account %s pending channels: %d", session_key, len(pending_channels))
+    add_summary("info", f"{session_key}: pending channels {len(pending_channels)}")
+    
+    # Если каналов нет, пытаемся синхронизировать из accounts.channels (резюме аккаунта)
+    if not pending_channels:
+        account_data = await get_account_by_id(account_id)
+        if account_data:
+            real_channels = account_data.get("channels") or []
+            if real_channels:
+                logging.info(
+                    "Warmup: Account %s has no pending channels, syncing %d channels from resume",
+                    session_key,
+                    len(real_channels),
+                )
+                await sync_warmup_channels(account_id, real_channels)
+                # Пытаемся получить каналы снова после синхронизации
+                pending_channels = await get_warmup_pending(account_id, limit=1, reset_if_empty=False)
+                logging.info(
+                    "Warmup: After sync, Account %s has %d pending channels",
+                    session_key,
+                    len(pending_channels),
+                )
+    
+    if pending_channels:
+        logging.info("Warmup: Account %s will join channel: %s", session_key, pending_channels[0].get("channel"))
+    else:
+        # Проверяем все каналы для диагностики
+        all_warmup_channels = await get_warmup_pending(account_id, limit=100, reset_if_empty=False)
+        logging.warning(
+            "Warmup: Account %s has no pending channels. Total warmup channels: %d",
+            session_key,
+            len(all_warmup_channels),
+        )
+        if all_warmup_channels:
+            statuses = {}
+            for ch in all_warmup_channels:
+                status = ch.get("status", "unknown")
+                statuses[status] = statuses.get(status, 0) + 1
+            logging.warning(
+                "Warmup: Account %s channel statuses: %s",
+                session_key,
+                statuses,
+            )
 
     if not pending_channels:
         message = f"Account {session_key} has no pending channels, skipping"
-        logging.info("Warmup: %s", message)
-        add_summary("info", message)
+        logging.warning("Warmup: %s", message)
+        add_summary("warning", message)
         next_time = _get_next_warmup_join(now_utc, current_settings)
         await db_update_warmup_schedule(account_id, next_join=next_time)
         logging.info(
@@ -5266,6 +5698,14 @@ async def process_single_warmup_account(
 
     channel_entry = pending_channels[0]
     channel = channel_entry["channel"]
+    
+    logging.info(
+        "Warmup: Account %s attempting to join channel %s (position %s, status %s)",
+        session_key,
+        channel,
+        channel_entry.get("position"),
+        channel_entry.get("status"),
+    )
 
     session_file = os.path.join(SESSIONS_BASE_DIR, str(user_id), f"{session_key}.session")
     if not os.path.exists(session_file):
@@ -5278,9 +5718,23 @@ async def process_single_warmup_account(
         return
 
     try:
+        logging.info(
+            "Warmup: 🔵 Attempting to join channel %s for account %s (id=%d, user_id=%d, session=%s)",
+            channel, session_key, account_id, user_id, session_key
+        )
         success, error_reason = await join_channel(
             channel, account_id, session_key, user_id, is_warmup=True
         )
+        if success:
+            logging.info(
+                "Warmup: ✅ Successfully joined channel %s for account %s",
+                channel, session_key
+            )
+        else:
+            logging.warning(
+                "Warmup: ❌ Failed to join channel %s for account %s: %s",
+                channel, session_key, error_reason
+            )
     except TransientJoinError as transient_error:
         transient_message = (
             transient_error.message if hasattr(transient_error, "message") else str(transient_error)
@@ -5298,11 +5752,23 @@ async def process_single_warmup_account(
         return
 
     if not success:
+        # Записываем ошибку в БД, если она еще не записана в join_channel
+        if error_reason:
+            try:
+                await record_warmup_channel_error(account_id, channel, error_reason)
+            except Exception as e:
+                logging.warning("Failed to record warmup channel error: %s", e)
+        
         if error_reason and any(
             phrase in error_reason.lower()
             for phrase in ("занят", "запускается")
         ):
-            info_message = f"Account {session_key} занят ({error_reason}), повторим позже"
+            # Сессия занята - устанавливаем время следующей попытки через несколько минут
+            retry_delay_minutes = 5
+            retry_time = datetime.now(timezone.utc) + timedelta(minutes=retry_delay_minutes)
+            await db_update_warmup_schedule(account_id, next_join=retry_time)
+            account["warmup_next_join_at"] = retry_time
+            info_message = f"Account {session_key} занят ({error_reason}), следующая попытка в {retry_time.isoformat()}"
             logging.info("Warmup: %s", info_message)
             add_summary("info", info_message)
             return
@@ -5312,6 +5778,10 @@ async def process_single_warmup_account(
     success_message = f"Account {session_key} joined {channel}"
     logging.info("Warmup: %s", success_message)
     add_summary("info", success_message)
+
+    # Обновляем счетчик вступлений в локальном объекте account
+    account["warmup_joined_today"] = account.get("warmup_joined_today", 0) + 1
+    account["warmup_last_join_at"] = datetime.now(timezone.utc)
 
     post_join_now = datetime.now(timezone.utc)
     next_time = _get_next_warmup_join(post_join_now, current_settings)
@@ -5344,33 +5814,88 @@ async def process_warmup_accounts():
             is_warmup_join_time = is_warmup_join_period(now)
             daily_limit = current_settings.channels_per_day
 
+            # Логируем настройки для диагностики
             if now.minute % 10 == 0:
                 message = (
                     f"Warmup check: {now.strftime('%H:%M')} UTC, "
-                    f"is_warmup_join_time: {is_warmup_join_time}"
+                    f"is_warmup_join_time: {is_warmup_join_time}, "
+                    f"window: {current_settings.format_window()}, "
+                    f"spans_midnight: {current_settings.spans_midnight}"
                 )
-                logging.debug(message)
-                add_summary("debug", message)
-
-            if not is_warmup_join_time:
-                await asyncio.sleep(WARMUP_SCAN_INTERVAL_SECONDS)
-                continue
+                logging.info(message)
+                add_summary("info", message)
 
             warmup_accounts = await get_running_warmup_accounts()
             all_accounts = await get_running_accounts()
 
-            logging.info("Found %d running warmup accounts", len(warmup_accounts))
+            # Проверяем, есть ли аккаунты, у которых время вступления уже наступило
+            # Также обрабатываем аккаунты без установленного времени, чтобы установить его
+            accounts_ready_to_join = []
+            accounts_without_schedule = []
+            for account in warmup_accounts:
+                next_join_at = _parse_warmup_datetime(account.get("warmup_next_join_at"))
+                if next_join_at:
+                    if next_join_at.tzinfo is None:
+                        next_join_at = next_join_at.replace(tzinfo=timezone.utc)
+                    if next_join_at <= now:
+                        accounts_ready_to_join.append(account)
+                        logging.debug(
+                            "Warmup: Account %s ready to join (next_join_at=%s <= now=%s)",
+                            account.get("phone"),
+                            next_join_at.isoformat(),
+                            now.isoformat()
+                        )
+                else:
+                    # Аккаунт без установленного времени - нужно обработать, чтобы установить
+                    accounts_without_schedule.append(account)
+                    logging.debug(
+                        "Warmup: Account %s has no next_join_at, will process to set schedule",
+                        account.get("phone")
+                    )
+
+            if not is_warmup_join_time and not accounts_ready_to_join and not accounts_without_schedule:
+                await asyncio.sleep(WARMUP_SCAN_INTERVAL_SECONDS)
+                continue
+
+            if is_warmup_join_time:
+                logging.info("Found %d running warmup accounts (warmup window active)", len(warmup_accounts))
+            else:
+                logging.info("Found %d running warmup accounts, %d ready to join, %d without schedule (outside window)", 
+                           len(warmup_accounts), len(accounts_ready_to_join), len(accounts_without_schedule))
+            
             add_summary(
                 "info",
-                f"Running accounts: {len(all_accounts)}, warmup: {len(warmup_accounts)}",
+                f"Running accounts: {len(all_accounts)}, warmup: {len(warmup_accounts)}, ready: {len(accounts_ready_to_join)}, without schedule: {len(accounts_without_schedule)}",
             )
 
-            random.shuffle(warmup_accounts)
+            # Если окно прогрева активно, обрабатываем все аккаунты
+            # Если окно не активно, обрабатываем те, у которых время наступило, и те, у которых время не установлено
+            if is_warmup_join_time:
+                accounts_to_process = warmup_accounts
+                logging.info("Warmup: Processing all %d warmup accounts (warmup window is active)", len(warmup_accounts))
+            else:
+                accounts_to_process = accounts_ready_to_join + accounts_without_schedule
+                logging.info(
+                    "Warmup: Processing %d accounts ready to join + %d without schedule (outside warmup window)",
+                    len(accounts_ready_to_join), len(accounts_without_schedule)
+                )
+            
+            if not accounts_to_process:
+                await asyncio.sleep(WARMUP_SCAN_INTERVAL_SECONDS)
+                continue
+
+            random.shuffle(accounts_to_process)
 
             logging.debug("Warmup: Active sessions: %s", list(active_sessions.keys()))
             add_summary("debug", f"Active sessions: {list(active_sessions.keys())}")
 
-            for account in warmup_accounts:
+            for account in accounts_to_process:
+                account_phone = account.get("phone", "unknown")
+                account_id = account.get("id")
+                logging.debug(
+                    "Warmup: 🔵 Processing account %s (id=%s) for warmup join",
+                    account_phone, account_id
+                )
                 try:
                     await process_single_warmup_account(
                         account,
@@ -5773,12 +6298,27 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
 
     if str(message.text) == '-':
         # Проверяем, есть ли уже каналы в прогреве
-        existing_warmup = await get_warmup_pending(account_id, limit=1)
+        existing_warmup = await get_warmup_pending(account_id, limit=1, reset_if_empty=True)
         
         if existing_warmup:
             # Есть каналы в прогреве - запускаем в режиме прогрева
             await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
-            next_join = plan_next_warmup_join(datetime.now(timezone.utc), warmup_settings)
+            now_utc = datetime.now(timezone.utc)
+            # Если окно прогрева активно, устанавливаем время вступления на ближайшее время
+            if is_warmup_join_period(now_utc):
+                delay_seconds = _get_human_delay_seconds(warmup_settings)
+                next_join = now_utc + timedelta(seconds=delay_seconds)
+                logging.info(
+                    "Warmup window is active, setting next join to %s (in %d seconds)",
+                    next_join.isoformat(),
+                    delay_seconds,
+                )
+            else:
+                next_join = plan_next_warmup_join(now_utc, warmup_settings)
+                logging.info(
+                    "Warmup window is not active, setting next join to %s",
+                    next_join.isoformat(),
+                )
             await db_update_warmup_schedule(account_id, next_join=next_join)
             logging.info(
                 "Warmup schedule: account %s (%s) next join at %s",
@@ -5796,7 +6336,8 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             await mark_account_running(account_id)
             
             await state.clear()
-            await bot.send_message(message.from_user.id, f'Аккаунт запущен в режиме прогрева. Используются существующие каналы прогрева.')
+            warmup_count = len(await get_warmup_pending(account_id, limit=100))
+            await bot.send_message(message.from_user.id, f'Аккаунт запущен в режиме прогрева. Используются существующие каналы прогрева ({warmup_count} каналов).')
             await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование в режиме прогрева')
             
             # Отправляем резюме аккаунта пользователю и в лог-канал
@@ -5807,29 +6348,111 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
             _schedule_safe_send_comments(message.from_user.id, session, account_id)
             return
         else:
-            # Нет каналов в прогреве - запускаем в стандартном режиме
-            await set_account_mode(account_id, "standard", warmup_days=None)
-            await sync_warmup_channels(account_id, [])
+            # Нет каналов в прогреве - пытаемся синхронизировать реальные подписки из Telegram
+            session_name = os.path.join(SESSIONS_BASE_DIR, str(message.from_user.id), str(session))
+            key = make_session_key(message.from_user.id, str(session))
             
-            # Запускаем аккаунт в режиме прогрева (С комментированием + прогрев)
-            key = make_session_key(message.from_user.id, session)
-            active_sessions[key] = True  # Устанавливаем для комментирования
-            active_account_ids[key] = account_id
-            quiet_sessions_notified.discard(key)
-            await asyncio.sleep(0.1)  # Пауза перед операцией с БД
-            await mark_account_running(account_id)
+            async def _collect_real_channels(app: Client) -> List[str]:
+                collected: List[str] = []
+                async for dialog in app.get_dialogs():
+                    chat = dialog.chat
+                    if str(chat.type) == "ChatType.CHANNEL" and chat.username is not None:
+                        channel_handle = f"@{chat.username}"
+                        if channel_handle not in collected:
+                            collected.append(channel_handle)
+                return collected
             
-            await state.clear()
-            await bot.send_message(message.from_user.id, 'Аккаунт запущен в стандартном режиме (без прогрева).')
-            await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование')
+            real_channels = []
+            try:
+                if await check_account(message.from_user.id, session):
+                    logging.info("Fetching real channels from Telegram for account %s (warmup)", session)
+                    real_channels = await with_retry(
+                        session_name,
+                        _collect_real_channels,
+                        lock_key=key,
+                    )
+                    logging.info("Found %d real channels from Telegram for account %s", len(real_channels), session)
+                    # Обновляем accounts.channels с реальными подписками
+                    if real_channels and account_id:
+                        await update_account_settings(account_id, channels=real_channels)
+                        logging.info("Updated accounts.channels with %d channels for account %s", len(real_channels), account_id)
+                    elif not real_channels:
+                        logging.warning("No channels found from Telegram for account %s", session)
+                else:
+                    logging.warning("Account %s check failed, cannot fetch real channels", session)
+            except Exception as e:
+                logging.error("Failed to fetch real channels for warmup: %s", e, exc_info=True)
             
-            # Отправляем резюме аккаунта пользователю и в лог-канал
-            await send_account_summary_to_user(message.from_user.id, account_id, session)
-            await send_account_summary_to_logs(account_id, session)
+            # Проверяем еще раз после синхронизации
+            existing_warmup = await get_warmup_pending(account_id, limit=1, reset_if_empty=True)
             
-            await main_message(message)
-            _schedule_safe_send_comments(message.from_user.id, session, account_id)
-            return
+            if existing_warmup:
+                # Нашли каналы после синхронизации - запускаем в режиме прогрева
+                await set_account_mode(account_id, "warmup", warmup_days=WARMUP_DEFAULT_DAYS)
+                now_utc = datetime.now(timezone.utc)
+                # Если окно прогрева активно, устанавливаем время вступления на ближайшее время
+                if is_warmup_join_period(now_utc):
+                    delay_seconds = _get_human_delay_seconds(warmup_settings)
+                    next_join = now_utc + timedelta(seconds=delay_seconds)
+                    logging.info(
+                        "Warmup window is active, setting next join to %s (in %d seconds)",
+                        next_join.isoformat(),
+                        delay_seconds,
+                    )
+                else:
+                    next_join = plan_next_warmup_join(now_utc, warmup_settings)
+                    logging.info(
+                        "Warmup window is not active, setting next join to %s",
+                        next_join.isoformat(),
+                    )
+                await db_update_warmup_schedule(account_id, next_join=next_join)
+                logging.info(
+                    "Warmup schedule: account %s (%s) next join at %s (synced from real subscriptions)",
+                    account_id,
+                    session,
+                    next_join.isoformat(),
+                )
+                
+                # Запускаем аккаунт в режиме прогрева
+                active_sessions[key] = True
+                active_account_ids[key] = account_id
+                quiet_sessions_notified.discard(key)
+                await asyncio.sleep(0.1)
+                await mark_account_running(account_id)
+                
+                await state.clear()
+                warmup_count = len(await get_warmup_pending(account_id, limit=100))
+                await bot.send_message(message.from_user.id, f'Аккаунт запущен в режиме прогрева. Синхронизировано {warmup_count} каналов из реальных подписок Telegram.')
+                await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование в режиме прогрева (синхронизировано из реальных подписок)')
+                
+                await send_account_summary_to_user(message.from_user.id, account_id, session)
+                await send_account_summary_to_logs(account_id, session)
+                
+                await main_message(message)
+                _schedule_safe_send_comments(message.from_user.id, session, account_id)
+                return
+            else:
+                # Нет каналов даже после синхронизации - запускаем в стандартном режиме
+                await set_account_mode(account_id, "standard", warmup_days=None)
+                await sync_warmup_channels(account_id, [])
+                
+                # Запускаем аккаунт в стандартном режиме
+                active_sessions[key] = True
+                active_account_ids[key] = account_id
+                quiet_sessions_notified.discard(key)
+                await asyncio.sleep(0.1)
+                await mark_account_running(account_id)
+                
+                await state.clear()
+                await bot.send_message(message.from_user.id, 'Аккаунт запущен в стандартном режиме (без прогрева). Не найдено каналов для прогрева.')
+                await bot.send_message(log_channel, f'Аккаунт {session} начал комментирование в стандартном режиме')
+                
+                await send_account_summary_to_user(message.from_user.id, account_id, session)
+                await send_account_summary_to_logs(account_id, session)
+                
+                await main_message(message)
+                _schedule_safe_send_comments(message.from_user.id, session, account_id)
+                return
 
     channels = [line.strip() for line in message.text.splitlines() if line.strip()]
     warmup_channels = [chl for chl in channels if not chl.startswith('-')]
@@ -5839,8 +6462,8 @@ async def add_warmup_channels(message: Message, state: FSMContext) -> None:
     warmup_channels = [x for x in warmup_channels if not (x in seen_warmup or seen_warmup.add(x))]
 
     if not warmup_channels:
-        # Проверяем, есть ли уже каналы в прогреве
-        existing_warmup = await get_warmup_pending(account_id, limit=1)
+        # Проверяем, есть ли уже каналы в прогреве (с автоматической синхронизацией)
+        existing_warmup = await get_warmup_pending(account_id, limit=1, reset_if_empty=True)
         
         if existing_warmup:
             # Есть каналы в прогреве - запускаем в режиме прогрева
@@ -6308,15 +6931,18 @@ async def main():
     """Main entry point with improved error handling and logging."""
     global reaction_engine_instance, REACTION_ENGINE_AVAILABLE
     
-    # Setup logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler('bot.log'),
-            logging.StreamHandler(),
-        ],
-    )
+    # Setup logging (уже настроено выше, но обновляем для совместимости)
+    log_file_path = os.path.join("logs_od1", "logs.txt")
+    os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+    
+    # Получаем root logger и добавляем file handler если его еще нет
+    root_logger = logging.getLogger()
+    has_file_handler = any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(log_file_path) for h in root_logger.handlers)
+    if not has_file_handler:
+        file_handler = logging.FileHandler(log_file_path, mode='a', encoding='utf-8')
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter(f"[{BOT_NAME}] %(asctime)s %(levelname)s %(name)s: %(message)s"))
+        root_logger.addHandler(file_handler)
     
     logger = logging.getLogger(__name__)
     logger.info("=" * 60)

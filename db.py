@@ -407,38 +407,8 @@ async def _init_postgres_schema() -> None:
 
         await connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS posts (
-                id BIGSERIAL PRIMARY KEY,
-                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                channel TEXT NOT NULL,
-                post_id INTEGER NOT NULL,
-                message TEXT,
-                has_media BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (account_id, channel, post_id)
-            )
-            """
-        )
-
-        await connection.execute(
-            """
             CREATE INDEX IF NOT EXISTS idx_posts_account_id
             ON posts (account_id)
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reaction_logs (
-                id BIGSERIAL PRIMARY KEY,
-                account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                channel TEXT NOT NULL,
-                message_id INTEGER NOT NULL,
-                emoji TEXT NOT NULL,
-                status TEXT NOT NULL,
-                error_message TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
             """
         )
 
@@ -1021,16 +991,46 @@ async def sync_warmup_channels(account_id: int, channels: List[str]) -> None:
     seen: set[str] = set()
     unique_channels = [x for x in channels if not (x in seen or seen.add(x))]
 
-    await _execute("DELETE FROM warmup_channels WHERE account_id = ?", (account_id,))
+    # Получаем уже присоединенные каналы, чтобы сохранить их статус
+    existing_joined = await _fetchall(
+        """
+        SELECT channel, status
+        FROM warmup_channels
+        WHERE account_id = ? AND status = 'joined'
+        """,
+        (account_id,),
+    )
+    joined_channels = {row["channel"]: row["status"] for row in existing_joined}
+    
+    # Удаляем только каналы со статусом 'pending' или 'error', сохраняя 'joined'
+    await _execute(
+        """
+        DELETE FROM warmup_channels 
+        WHERE account_id = ? AND status IN ('pending', 'error')
+        """,
+        (account_id,),
+    )
 
+    # Добавляем/обновляем все каналы с правильными позициями
     for idx, channel in enumerate(unique_channels, start=1):
         try:
+            # Определяем статус: сохраняем 'joined' если канал уже был присоединен, иначе 'pending'
+            channel_status = 'joined' if channel in joined_channels else 'pending'
+            
+            # Используем INSERT с ON CONFLICT для обновления существующих записей
             await _execute(
                 """
-                INSERT INTO warmup_channels (account_id, channel, position)
-                VALUES (?, ?, ?)
+                INSERT INTO warmup_channels (account_id, channel, position, status)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (account_id, channel) DO UPDATE SET
+                    position = EXCLUDED.position,
+                    status = CASE 
+                        WHEN warmup_channels.status = 'joined' THEN 'joined'
+                        ELSE EXCLUDED.status
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
                 """,
-                (account_id, channel, idx),
+                (account_id, channel, idx, channel_status),
             )
         except AsyncpgUniqueViolationError:  # pragma: no cover - PostgreSQL duplicate guard
             continue
@@ -1065,19 +1065,59 @@ async def get_warmup_pending(
         if account:
             base_channels = account.get("warmup_channels") or []
             active_channels = set(account.get("channels") or [])
-            queue = [chl for chl in base_channels if chl not in active_channels]
-            if queue:
-                await sync_warmup_channels(account_id, queue)
-                records = await _fetchall(
-                    """
-                    SELECT *
-                    FROM warmup_channels
-                    WHERE account_id = ? AND status = 'pending'
-                    ORDER BY position
-                    LIMIT ?
-                    """,
-                    (account_id, limit),
+            
+            # Если base_channels пусто, используем реальные подписки из accounts.channels
+            if not base_channels:
+                # Используем реальные подписки из Telegram (уже синхронизированы в accounts.channels)
+                real_channels = list(active_channels)
+                logger.info(
+                    "get_warmup_pending: account %s has no warmup_channels, using %d real channels from accounts.channels",
+                    account_id,
+                    len(real_channels),
                 )
+                if real_channels:
+                    # Синхронизируем реальные подписки в warmup_channels
+                    logger.info(
+                        "Syncing %d real channels to warmup_channels for account %s",
+                        len(real_channels),
+                        account_id,
+                    )
+                    await sync_warmup_channels(account_id, real_channels)
+                    records = await _fetchall(
+                        """
+                        SELECT *
+                        FROM warmup_channels
+                        WHERE account_id = ? AND status = 'pending'
+                        ORDER BY position
+                        LIMIT ?
+                        """,
+                        (account_id, limit),
+                    )
+                    logger.info(
+                        "After sync: found %d pending channels for account %s",
+                        len(records),
+                        account_id,
+                    )
+                else:
+                    logger.warning(
+                        "No real channels found in accounts.channels for account %s",
+                        account_id,
+                    )
+            else:
+                # Используем существующую логику: исключаем уже активные каналы
+                queue = [chl for chl in base_channels if chl not in active_channels]
+                if queue:
+                    await sync_warmup_channels(account_id, queue)
+                    records = await _fetchall(
+                        """
+                        SELECT *
+                        FROM warmup_channels
+                        WHERE account_id = ? AND status = 'pending'
+                        ORDER BY position
+                        LIMIT ?
+                        """,
+                        (account_id, limit),
+                    )
 
     return [dict(record) for record in records]
 
