@@ -6,21 +6,21 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
-if TYPE_CHECKING:  # pragma: no cover - imported for typing only
+if TYPE_CHECKING:
     import asyncpg as asyncpg_type
 
 _asyncpg_spec = importlib.util.find_spec("asyncpg")
 
 if _asyncpg_spec is not None:
     asyncpg = importlib.import_module("asyncpg")
-else:  # pragma: no cover - executed only when asyncpg is not installed
-    asyncpg = None  # type: ignore[assignment]
+else:
+    asyncpg = None
 
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    AsyncpgPool = asyncpg_type.pool.Pool  # pragma: no cover - typing only
+    AsyncpgPool = asyncpg_type.pool.Pool
 else:
     AsyncpgPool = Any
 
@@ -30,8 +30,8 @@ class _AsyncpgUniqueViolationError(Exception):
 
 
 if _asyncpg_spec is not None:
-    AsyncpgUniqueViolationError = asyncpg.UniqueViolationError  # type: ignore[attr-defined]
-else:  # pragma: no cover - executed only when asyncpg is not installed
+    AsyncpgUniqueViolationError = asyncpg.UniqueViolationError
+else:
     AsyncpgUniqueViolationError = _AsyncpgUniqueViolationError
 
 
@@ -183,7 +183,7 @@ async def _execute_rowcount(query: str, params: Sequence[Any] = ()) -> int:
         result = await connection.execute(prepared_query, *prepared_params)
     try:
         return int(str(result).split()[-1])
-    except (ValueError, IndexError):  # pragma: no cover - defensive branch
+    except (ValueError, IndexError):
         return 0
 
 
@@ -222,7 +222,7 @@ async def init_db() -> None:
     if not dsn.startswith(("postgres://", "postgresql://")):
         raise RuntimeError("DATABASE_URL must use the postgres scheme")
 
-    if asyncpg is None:  # pragma: no cover - requires asyncpg installed
+    if asyncpg is None:
         raise RuntimeError(
             "asyncpg is required for PostgreSQL connections. Install the 'asyncpg' package to use a PostgreSQL DSN."
         )
@@ -1032,7 +1032,7 @@ async def sync_warmup_channels(account_id: int, channels: List[str]) -> None:
                 """,
                 (account_id, channel, idx, channel_status),
             )
-        except AsyncpgUniqueViolationError:  # pragma: no cover - PostgreSQL duplicate guard
+        except AsyncpgUniqueViolationError:
             continue
 
     await _execute(

@@ -93,10 +93,10 @@ REACTION_ENGINE_AVAILABLE = False
 reaction_engine_instance = None
 
 try:
-    from reaction_engine import ReactionEngine  # type: ignore
+    from reaction_engine import ReactionEngine
 except ImportError as exc:
     logging.error("❌ Failed to import ReactionEngine: %s", exc)
-    ReactionEngine = None  # type: ignore[assignment]
+    ReactionEngine = None
 else:
     REACTION_ENGINE_AVAILABLE = True
     logging.info("✅ ReactionEngine imported successfully")
@@ -444,9 +444,9 @@ def _acquire_process_lock(lock_path: Optional[str] = None) -> None:
 
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:  # pragma: no cover - depends on runtime
+            except BlockingIOError as exc:
                 _raise_already_running(exc)
-        elif os.name == "nt":  # pragma: no cover - windows-specific logic
+        elif os.name == "nt":
             import msvcrt
 
             lock_file.seek(0)
@@ -454,7 +454,7 @@ def _acquire_process_lock(lock_path: Optional[str] = None) -> None:
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, _PROCESS_LOCK_SIZE)
             except OSError as exc:
                 _raise_already_running(exc)
-        else:  # pragma: no cover - unsupported platforms
+        else:
             lock_file.close()
             raise RuntimeError(
                 f"Process locking is not supported on platform: {os.name}"
@@ -489,7 +489,7 @@ def _release_process_lock() -> None:
             import fcntl
 
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        elif os.name == "nt":  # pragma: no cover - windows-specific logic
+        elif os.name == "nt":
             import msvcrt
 
             lock_file.seek(0)
@@ -796,7 +796,7 @@ async def _run_with_sqlite_retries(
                 if on_retry is not None:
                     try:
                         on_retry(attempt, exc)
-                    except Exception:  # pragma: no cover - defensive
+                    except Exception:
                         logging.exception(
                             "Не удалось повторно подготовить сессию после ошибки блокировки"
                         )
@@ -1021,7 +1021,7 @@ async def _is_reply_to_account_comment(message: Any, account_id: int) -> bool:
             channel_for_lookup,
             reply_message_id,
         )
-    except Exception:  # pragma: no cover - defensive logging
+    except Exception:
         logging.exception("Не удалось проверить лог комментариев для ответа")
         return False
 
@@ -3619,7 +3619,7 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
 
     try:
         await callback_query.message.delete()
-    except Exception as exc:  # pragma: no cover - best effort cleanup
+    except Exception as exc:
         logging.debug("Failed to delete callback message: %s", exc)
 
     if call == "add_account":
@@ -4416,7 +4416,7 @@ async def add_post_reaction_chance(message: Message, state: FSMContext) -> None:
     incoming = (message.text or "").strip()
 
     def _parse_value(raw: Union[str, int, None]) -> int:
-        value = int(raw)  # type: ignore[arg-type]
+        value = int(raw)
         if value < 0 or value > 100:
             raise ValueError
         return value

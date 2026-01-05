@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 try:
     from db import DEFAULT_REACTION_EMOJIS, DatabaseNotInitialized, _require_pool
-except ImportError as e:  # pragma: no cover - defensive fallback
+except ImportError as e:
     logger = logging.getLogger(__name__)
     logger.error("❌ Failed to import database modules: %s", e)
     DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🔥", "👏"]
@@ -26,10 +26,10 @@ except ImportError as e:  # pragma: no cover - defensive fallback
     def _require_pool():
         raise DatabaseNotInitialized("Database not available")
 
-try:  # pragma: no cover - optional dependency
-    import redis.asyncio as redis_asyncio  # type: ignore
-except ImportError:  # pragma: no cover - executed when redis is unavailable
-    redis_asyncio = None  # type: ignore
+try:
+    import redis.asyncio as redis_asyncio
+except ImportError:
+    redis_asyncio = None
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,7 @@ class ReactionEngine:
 
             try:
                 await self.ensure_reaction_tables_exist()
-            except Exception as exc:  # pragma: no cover - defensive logging
+            except Exception as exc:
                 logger.exception("❌ Failed to ensure reaction tables: %s", exc)
                 return False
 
@@ -135,7 +135,7 @@ class ReactionEngine:
             return InMemoryCache()
 
         try:
-            redis = redis_asyncio.from_url(  # type: ignore[union-attr]
+            redis = redis_asyncio.from_url(
                 redis_url,
                 encoding="utf-8",
                 decode_responses=True,
@@ -143,7 +143,7 @@ class ReactionEngine:
             await redis.ping()
             logger.info("✅ Connected to Redis for ReactionEngine")
             return redis
-        except Exception as exc:  # pragma: no cover - depends on environment
+        except Exception as exc:
             logger.warning(
                 "⚠️ Falling back to in-memory cache for ReactionEngine: %s",
                 exc,
@@ -680,7 +680,7 @@ class ReactionEngine:
         key = self._cache_key(channel_id, message_id)
         try:
             await self.redis.setex(key, self.CACHE_TTL_SECONDS, json.dumps(payload))
-        except Exception as exc:  # pragma: no cover - redis specific failure
+        except Exception as exc:
             logger.warning("Failed to cache channel message %s/%s: %s", channel_id, message_id, exc)
 
         await self._record_linked_post(
@@ -702,7 +702,7 @@ class ReactionEngine:
             cache_key = self._cache_key(channel_id, channel_message_id)
             try:
                 cached = await self.redis.get(cache_key)
-            except Exception:  # pragma: no cover - redis specific failure
+            except Exception:
                 cached = None
             if cached:
                 try:
@@ -780,7 +780,7 @@ class ReactionEngine:
                 )
                 any_sent = True
                 await asyncio.sleep(self.REACTION_COOLDOWN_SECONDS)
-            except Exception as exc:  # pragma: no cover - depends on Telegram runtime
+            except Exception as exc:
                 logger.error("❌ Failed to add reaction %s: %s", emoji, exc)
                 await self._record_reaction_result(
                     channel_id,
@@ -1015,7 +1015,7 @@ class ReactionEngine:
 
         try:
             chat = await client.get_chat(channel_id)
-        except Exception as exc:  # pragma: no cover - depends on Telegram runtime
+        except Exception as exc:
             logger.debug("Failed to fetch linked chat for %s: %s", channel_id, exc)
             return None
 
@@ -1035,7 +1035,7 @@ class ReactionEngine:
 
         try:
             chat = await client.get_chat(discussion_chat_id)
-        except Exception as exc:  # pragma: no cover - depends on Telegram runtime
+        except Exception as exc:
             logger.debug(
                 "Failed to resolve channel id from discussion %s: %s",
                 discussion_chat_id,
