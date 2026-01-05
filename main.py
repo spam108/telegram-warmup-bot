@@ -223,14 +223,11 @@ if not DATABASE_URL:
 os.environ.setdefault("DATABASE_URL", DATABASE_URL)
 
 BOT_TOKEN = _get_env("BOT_TOKEN")
-print(f"BOT_TOKEN loaded: {BOT_TOKEN}")
 #APCDXBOT0310 @AP_comment_bot
 log_channel = -1003123025616 # cloveend #-1002711973256 #-1002678984799
 
 API_ID = int(_get_env("API_ID", "0"))
-print(f"API_ID loaded: {API_ID}")
 API_HASH = _get_env("API_HASH")
-print(f"API_HASH loaded: {API_HASH}")
 #1823
 
 WARMUP_VERBOSE_LOGS = _get_bool_env("WARMUP_VERBOSE_LOGS", default=False)
@@ -2629,7 +2626,7 @@ def load_schedule_config():
     except FileNotFoundError:
         return default_config
     except Exception as e:
-        print(f"Ошибка загрузки schedule.json: {e}")
+        logging.warning(f"Ошибка загрузки schedule.json: {e}")
         return default_config
 
     if not isinstance(file_config, dict):
@@ -6803,7 +6800,7 @@ async def get_account_summary(account_id):
             )
             real_channels.extend(collected)
     except Exception as e:
-        print(f"Ошибка при получении подписок для аккаунта {account_id}: {e}")
+        logging.warning(f"Ошибка при получении подписок для аккаунта {account_id}: {e}")
         # Если не удалось получить реальные подписки, используем из БД
         real_channels = account.get('channels', []) or []
     
