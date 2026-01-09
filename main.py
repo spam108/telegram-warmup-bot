@@ -222,7 +222,7 @@ if not DATABASE_URL:
 
 os.environ.setdefault("DATABASE_URL", DATABASE_URL)
 
-BOT_TOKEN = _get_env("BOT_TOKEN", "8275337080:AAEUd0-CuOPTm_l5ljYy1XEWk_2TcQ2TxS8")
+BOT_TOKEN = _get_env("BOT_TOKEN", "8231470375:AAHYlfZSvQyBsYOOQlWwnpKrffAWTNZj0C0")
 #APCDXBOT0310 @AP_comment_bot
 log_channel = -1003123025616 # cloveend #-1002711973256 #-1002678984799
 
@@ -2516,9 +2516,14 @@ async def _handle_linked_channel_message(
             reaction_comment_context = (
                 ' (без комментария)' if not comment_sent and comment_skipped else ''
             )
-            pause = COMMENT_TO_REACTION_PAUSE_SECONDS
-            if not comment_sent:
-                pause = max(pause / 2, 0.1)
+            # Используем настройки аккаунта для задержки реакции
+            if reaction_sleep_min and reaction_sleep_max and reaction_sleep_min > 0 and reaction_sleep_max > 0:
+                pause = random.uniform(reaction_sleep_min, reaction_sleep_max)
+            else:
+                # Fallback на минимальную паузу если настройки не заданы
+                pause = COMMENT_TO_REACTION_PAUSE_SECONDS
+                if not comment_sent:
+                    pause = max(pause / 2, 0.1)
             await asyncio.sleep(pause)
             updated_last_reaction_at, should_exit = await _maybe_send_reaction(
                 client=client,
