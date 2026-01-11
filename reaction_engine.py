@@ -77,7 +77,7 @@ class InMemoryCache:
 class ReactionSettings:
     enabled: bool
     reaction_emojis: List[str]
-    delay_seconds: int
+    delay_seconds: float
     reaction_chance: int = 20
     discussion_chance: int = 20
     reaction_limit: int = 1
@@ -476,11 +476,11 @@ class ReactionEngine:
             emojis = self._normalize_emoji_list(row.get("reaction_emojis"))
             if not emojis:
                 emojis = list(DEFAULT_REACTION_EMOJIS)
-            delay_seconds = int(row.get("delay_seconds") or 0)
+            delay_seconds = float(row.get("delay_seconds") or 0)
             enabled = bool(row.get("enabled", True))
             return ReactionSettings(enabled=enabled, reaction_emojis=emojis, delay_seconds=delay_seconds)
 
-        return ReactionSettings(enabled=True, reaction_emojis=list(DEFAULT_REACTION_EMOJIS), delay_seconds=0)
+        return ReactionSettings(enabled=True, reaction_emojis=list(DEFAULT_REACTION_EMOJIS), delay_seconds=0.0)
 
     async def _get_channel_reaction_settings_kv(self, channel_id: int) -> ReactionSettings:
         assert self.pool is not None
@@ -513,7 +513,7 @@ class ReactionEngine:
             return self._reaction_settings_from_dict(settings_dict)
 
         logger.info("⚠️ Using default reaction settings for channel %s", channel_id)
-        return ReactionSettings(enabled=True, reaction_emojis=list(DEFAULT_REACTION_EMOJIS), delay_seconds=0)
+        return ReactionSettings(enabled=True, reaction_emojis=list(DEFAULT_REACTION_EMOJIS), delay_seconds=0.0)
 
     def _parse_reaction_settings_value(
         self,
@@ -551,10 +551,10 @@ class ReactionEngine:
 
         delay_value = settings_dict.get("delay_seconds", 0)
         try:
-            delay_seconds = int(delay_value)
+            delay_seconds = float(delay_value)
         except (TypeError, ValueError):
             logger.debug("Invalid delay_seconds value %r in reaction settings", delay_value)
-            delay_seconds = 0
+            delay_seconds = 0.0
 
         return ReactionSettings(enabled=enabled, reaction_emojis=emojis, delay_seconds=delay_seconds)
 
@@ -568,7 +568,9 @@ class ReactionEngine:
                 reaction_emojis,
                 reaction_chance,
                 reaction_discussion_chance,
-                reaction_limit_per_message
+                reaction_limit_per_message,
+                reaction_sleep_min,
+                reaction_sleep_max
             FROM accounts
             WHERE id = $1
         """
@@ -590,6 +592,19 @@ class ReactionEngine:
         )
         if data["reaction_limit_per_message"] <= 0:
             data["reaction_limit_per_message"] = default_limit
+
+        # Получаем reaction_sleep_min и reaction_sleep_max
+        reaction_sleep_min = self._coerce_int(data.get("reaction_sleep_min"), 0)
+        reaction_sleep_max = self._coerce_int(data.get("reaction_sleep_max"), 0)
+        
+        # Если значения > 100, считаем их миллисекундами и конвертируем в секунды
+        if reaction_sleep_min > 100:
+            reaction_sleep_min = reaction_sleep_min / 1000.0
+        if reaction_sleep_max > 100:
+            reaction_sleep_max = reaction_sleep_max / 1000.0
+        
+        data["reaction_sleep_min"] = reaction_sleep_min if reaction_sleep_min > 0 else None
+        data["reaction_sleep_max"] = reaction_sleep_max if reaction_sleep_max > 0 else None
 
         return data
 
@@ -620,10 +635,30 @@ class ReactionEngine:
             post_emojis = self._normalize_emoji_list(post_data.get("reaction_emojis"))
             if post_emojis:
                 reaction_emojis = post_emojis
-            delay_seconds = self._coerce_int(post_data.get("delay_seconds"), delay_seconds)
+            delay_value = post_data.get("delay_seconds")
+            if delay_value is not None:
+                try:
+                    delay_seconds = float(delay_value)
+                except (TypeError, ValueError):
+                    pass  # Используем текущее значение delay_seconds
 
         account_settings = await self._get_account_reaction_settings(account_id)
         reactions_enabled = account_settings.get("reactions_enabled", True)
+
+        # Используем настройки задержки из аккаунта, если они заданы
+        account_sleep_min = account_settings.get("reaction_sleep_min")
+        account_sleep_max = account_settings.get("reaction_sleep_max")
+        if account_sleep_min is not None and account_sleep_max is not None and account_sleep_min > 0 and account_sleep_max > 0:
+            # Генерируем случайную задержку из диапазона
+            if account_sleep_min > account_sleep_max:
+                account_sleep_min, account_sleep_max = account_sleep_max, account_sleep_min
+            delay_seconds = random.uniform(account_sleep_min, account_sleep_max)
+            logger.debug(
+                "Using account reaction delay range: %.3f-%.3f seconds, generated: %.3f",
+                account_sleep_min,
+                account_sleep_max,
+                delay_seconds,
+            )
 
         if not reaction_emojis:
             account_emojis = account_settings.get("reaction_emojis") or []
@@ -648,7 +683,7 @@ class ReactionEngine:
         return ReactionSettings(
             enabled=enabled,
             reaction_emojis=reaction_emojis,
-            delay_seconds=delay_seconds,
+            delay_seconds=float(delay_seconds),
             reaction_chance=reaction_chance,
             discussion_chance=discussion_chance,
             reaction_limit=reaction_limit,
@@ -725,7 +760,7 @@ class ReactionEngine:
         chat_id: int,
         message_id: int,
         emojis: Iterable[str],
-        delay_seconds: int,
+        delay_seconds: float,
         account_id: Optional[int],
         channel_id: int,
         channel_message_id: int,
