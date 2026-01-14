@@ -352,6 +352,8 @@ class warmupmanage(StatesGroup):
 active_sessions: Dict[str, bool] = {}  # Глобальный словарь для хранения активных сессий
 active_account_ids: Dict[str, int] = {}
 quiet_sessions_notified: Set[str] = set()
+# Отслеживание последнего времени обработки сообщений для каждого аккаунта (для задержек)
+last_message_processed_at: Dict[int, datetime] = {}
 _chat_available_reactions_cache: Dict[int, Set[str]] = {}
 class _NoOpAsyncContextManager:
     """A lightweight async context manager that does nothing."""
@@ -1891,7 +1893,25 @@ async def process_account_reactions(account: Dict[str, Any]) -> None:
 
     async def _runner(client: Client) -> None:
         nonlocal last_reaction_at
-        for channel in channels:
+        # Получаем задержку между каналами из настроек аккаунта
+        sleep_min = _coerce_int(account.get("sleep_min"), 10)
+        sleep_max = _coerce_int(account.get("sleep_max"), sleep_min)
+        if sleep_max < sleep_min:
+            sleep_max = sleep_min
+        
+        for idx, channel in enumerate(channels):
+            # Добавляем задержку между обработкой разных каналов (кроме первого)
+            if idx > 0:
+                delay = random.uniform(sleep_min, sleep_max)
+                logging.debug(
+                    "Задержка между каналами для аккаунта %s: %.2f сек (канал %d/%d)",
+                    account_id,
+                    delay,
+                    idx + 1,
+                    len(channels),
+                )
+                await asyncio.sleep(delay)
+            
             updated = await process_channel_reactions(
                 client,
                 account,
@@ -2833,7 +2853,7 @@ async def ensure_latest_warmup_settings(force: bool = False) -> WarmupSettingsDa
 
 # Ограничение одновременных подключений
 MAX_CONCURRENT_ACCOUNTS = 5
-ACCOUNT_CHECK_INTERVAL = 300  # 5 минут для стандартных аккаунтов
+ACCOUNT_CHECK_INTERVAL = 60  # 1 минута для стандартных аккаунтов (было 5 минут)
 WARMUP_CHECK_INTERVAL = 600   # 10 минут для warmup аккаунтов
 ACCOUNT_LAUNCH_STAGGER_SECONDS = 3
 ACCOUNT_LAUNCH_JITTER_SECONDS = 2
@@ -5101,6 +5121,26 @@ async def send_comments(userid, session, account_id):
                 if is_quiet_period():
                     return
                 
+                # Применяем задержку между обработкой разных сообщений
+                now = datetime.now(timezone.utc)
+                if account_id in last_message_processed_at:
+                    last_processed = last_message_processed_at[account_id]
+                    if last_processed.tzinfo is None:
+                        last_processed = last_processed.replace(tzinfo=timezone.utc)
+                    time_since_last = (now - last_processed).total_seconds()
+                    # Применяем задержку, если прошло меньше минимальной задержки
+                    if time_since_last < sleep_min:
+                        delay_needed = sleep_min - time_since_last
+                        logging.debug(
+                            "Задержка между сообщениями для аккаунта %s: %.2f сек (прошло %.2f сек, мин: %d сек)",
+                            account_id,
+                            delay_needed,
+                            time_since_last,
+                            sleep_min,
+                        )
+                        await asyncio.sleep(delay_needed)
+                last_message_processed_at[account_id] = datetime.now(timezone.utc)
+                
                 try:
                     channel = await client.get_chat(message.chat.id)
                     linked_chat = getattr(channel, "linked_chat", None)
@@ -5185,6 +5225,26 @@ async def send_comments(userid, session, account_id):
                 # Проверка тихого периода - блокируем все действия во время сна
                 if is_quiet_period():
                     return
+                
+                # Применяем задержку между обработкой разных сообщений
+                now = datetime.now(timezone.utc)
+                if account_id in last_message_processed_at:
+                    last_processed = last_message_processed_at[account_id]
+                    if last_processed.tzinfo is None:
+                        last_processed = last_processed.replace(tzinfo=timezone.utc)
+                    time_since_last = (now - last_processed).total_seconds()
+                    # Применяем задержку, если прошло меньше минимальной задержки
+                    if time_since_last < sleep_min:
+                        delay_needed = sleep_min - time_since_last
+                        logging.debug(
+                            "Задержка между сообщениями (linked) для аккаунта %s: %.2f сек (прошло %.2f сек, мин: %d сек)",
+                            account_id,
+                            delay_needed,
+                            time_since_last,
+                            sleep_min,
+                        )
+                        await asyncio.sleep(delay_needed)
+                last_message_processed_at[account_id] = datetime.now(timezone.utc)
                 
                 if REACTION_ENGINE_AVAILABLE and getattr(client, "reaction_engine", None) is not None:
                     try:
