@@ -83,6 +83,10 @@ from db import (
     update_warmup_settings,
     _require_pool,
     DatabaseNotInitialized,
+    get_channel_blacklist,
+    get_problematic_channels_report,
+    auto_analyze_and_mark_problematic_channels,
+    get_channel_blacklist_info,
 )
 
 
@@ -161,7 +165,11 @@ def load_env_file():
                 line = line.strip()
                 if line and not line.startswith('#') and '=' in line:
                     key, value = line.split('=', 1)
-                    env_vars[key.strip()] = value.strip()
+                    value = value.strip()
+                    # Убираем кавычки из начала и конца значения (если есть)
+                    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                        value = value[1:-1]
+                    env_vars[key.strip()] = value
     except FileNotFoundError:
         pass
     return env_vars
@@ -213,7 +221,8 @@ for directory in (SESSIONS_BASE_DIR, LOGS_BASE_DIR, DATA_BASE_DIR):
 DB_NAME = _get_env("DB_NAME", "pgbot1010")
 DB_USER = _get_env("DB_USER", "postgres")
 DB_PASSWORD = _get_env("DB_PASSWORD", "postgres")
-DB_HOST = _get_env("DB_HOST", "postgres")
+# По умолчанию localhost для запуска вне Docker, "postgres" для Docker
+DB_HOST = _get_env("DB_HOST", "localhost")
 DB_PORT = _get_env("DB_PORT", "5432")
 
 DATABASE_URL = _get_env("DATABASE_URL")
@@ -253,14 +262,9 @@ def validate_configuration():
     logging.info(f"Database: {_get_env('DB_NAME', 'pgbot1010')}")
 
 # Инициализация бота
-# Настройка логирования в файл logs_od1/logs.txt
-log_file_path = os.path.join("logs_od1", "logs.txt")
+# Все логи в bot_log.txt (logs_od1/bot_log.txt локально, logs/bot_log.txt в Docker)
+log_file_path = os.path.join(LOGS_BASE_DIR, "bot_log.txt")
 try:
-    # Создаем директорию если её нет
-    log_dir = os.path.dirname(log_file_path)
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-    
     # Создаем file handler с режимом append
     file_handler = logging.FileHandler(log_file_path, mode='a', encoding='utf-8')
     file_handler.setLevel(logging.DEBUG if WARMUP_VERBOSE_LOGS else logging.INFO)
@@ -348,6 +352,12 @@ class warmupsettings(StatesGroup):
 
 class warmupmanage(StatesGroup):
     channels = State()
+
+
+class UnsubscribeStates(StatesGroup):
+    account = State()
+    channel = State()
+    reason = State()
 
 active_sessions: Dict[str, bool] = {}  # Глобальный словарь для хранения активных сессий
 active_account_ids: Dict[str, int] = {}
@@ -938,7 +948,45 @@ _CORRUPTED_SESSION_ERRORS = (
     "database disk image is malformed",
     "file is not a database",
     "file is encrypted or is not a database",
+    "AUTH_KEY_UNREGISTRED",
+    "401",
+    "auth key",
+    "key is not registered",
 )
+
+
+async def _is_session_valid(session_path: str) -> bool:
+    """Проверяет, что сессия валидна (авторизация завершена). Если нет — удаляет файл и возвращает False."""
+    session_base = session_path.replace(".session.session", "").replace(".session", "")
+    client: Optional[Client] = None
+    try:
+        client = Client(
+            session_base,
+            api_id=API_ID,
+            api_hash=API_HASH,
+            no_updates=True,
+        )
+        await client.connect()
+        await asyncio.wait_for(client.get_me(), timeout=10.0)
+        return True
+    except Exception as exc:
+        exc_str = str(exc).lower()
+        if any(m in exc_str for m in ("auth_key", "401", "unregistred", "key is not registered")):
+            logging.warning("Invalid/incomplete session %s: %s", session_path, exc)
+            try:
+                for p in (f"{session_base}.session", f"{session_base}.session.session"):
+                    if os.path.exists(p):
+                        os.remove(p)
+                        logging.info("Removed invalid session file %s", p)
+            except OSError:
+                logging.exception("Failed to remove invalid session %s", session_path)
+        return False
+    finally:
+        if client:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
 
 def _is_regular_reply_message(message: Any) -> bool:
@@ -2257,6 +2305,85 @@ async def _handle_linked_channel_message(
         )
         return current_last_reaction_at
 
+    # Проверка наличия linked_chat (чата комментариев) перед комментированием
+    if channel_identifier:
+        try:
+            channel_obj = await client.get_chat(channel_identifier)
+            linked_chat = getattr(channel_obj, "linked_chat", None)
+            if not linked_chat:
+                # Канал без linked_chat - логируем и добавляем в blacklist
+                await add_comment_log(
+                    account_id,
+                    channel=channel_identifier,
+                    message_id=numeric_message_id,
+                    status='no_linked_chat',
+                    error='channel has no linked chat',
+                )
+                await add_to_channel_blacklist(account_id, channel_identifier, "NO_LINKED_CHAT")
+                logging.debug(
+                    "Channel %s has no linked_chat, added to blacklist for account %s",
+                    channel_identifier,
+                    account_id,
+                )
+                return current_last_reaction_at
+        except UserBannedInChannel as ban_error:
+            # Пользователь забанен в канале - сразу в blacklist
+            await add_to_channel_blacklist(account_id, channel_identifier, "USER_BANNED_IN_CHANNEL")
+            await add_comment_log(
+                account_id,
+                channel=channel_identifier,
+                message_id=numeric_message_id,
+                status='banned',
+                error='USER_BANNED_IN_CHANNEL',
+            )
+            logging.warning(
+                "Account %s banned in channel %s: %s",
+                account_id,
+                channel_identifier,
+                ban_error,
+            )
+            return current_last_reaction_at
+        except Exception as check_error:
+            # Ошибка при проверке - логируем, но продолжаем работу
+            logging.warning(
+                "Failed to check linked_chat for channel %s (account %s): %s",
+                channel_identifier,
+                account_id,
+                check_error,
+            )
+
+    # Проверка на бан перед генерацией комментария (дополнительная проверка)
+    if channel_identifier:
+        try:
+            # Пытаемся получить информацию о канале для проверки бана
+            chat_info = await client.get_chat(channel_identifier)
+            # Если получили - значит не забанены, продолжаем
+        except UserBannedInChannel as ban_error:
+            # Пользователь забанен - добавляем в blacklist и прекращаем
+            await add_to_channel_blacklist(account_id, channel_identifier, "USER_BANNED_IN_CHANNEL")
+            await add_comment_log(
+                account_id,
+                channel=channel_identifier,
+                message_id=numeric_message_id,
+                status='banned',
+                error='USER_BANNED_IN_CHANNEL',
+            )
+            logging.warning(
+                "Account %s banned in channel %s before commenting: %s",
+                account_id,
+                channel_identifier,
+                ban_error,
+            )
+            return current_last_reaction_at
+        except Exception as check_error:
+            # Другие ошибки - логируем, но продолжаем
+            logging.debug(
+                "Error checking channel %s for ban (account %s): %s",
+                channel_identifier,
+                account_id,
+                check_error,
+            )
+
     try:
         comment_sent = False
         comment_skipped = False
@@ -3197,21 +3324,21 @@ async def check_account(user_id, phone):
             return True
 
         async def _cleanup_session_state(reason: str) -> None:
-            session_file = f"{session_base}.session"
-            if os.path.exists(session_file):
-                try:
-                    os.remove(session_file)
-                    logging.warning(
-                        "Removed session file %s due to %s",
-                        session_file,
-                        reason,
-                    )
-                except OSError:
-                    logging.exception(
-                        "Failed to remove session file %s after %s",
-                        session_file,
-                        reason,
-                    )
+            for session_file in (f"{session_base}.session", f"{session_base}.session.session"):
+                if os.path.exists(session_file):
+                    try:
+                        os.remove(session_file)
+                        logging.warning(
+                            "Removed session file %s due to %s",
+                            session_file,
+                            reason,
+                        )
+                    except OSError:
+                        logging.exception(
+                            "Failed to remove session file %s after %s",
+                            session_file,
+                            reason,
+                        )
 
             account_row = await get_account_by_session(user_id, phone)
             if account_row:
@@ -3293,15 +3420,21 @@ async def check_account(user_id, phone):
                 exc,
             )
 
-            if isinstance(exc, sqlite3.DatabaseError):
-                message = str(exc).lower()
-                if any(marker in message for marker in _CORRUPTED_SESSION_ERRORS):
-                    await bot.send_message(
-                        user_id,
-                        f"Файл сессии аккаунта {phone} поврежден. Пожалуйста, авторизуйте его заново.",
-                    )
-                    await _cleanup_session_state("corrupted session file")
-                    return False
+            exc_str = str(exc).lower()
+            is_session_error = (
+                isinstance(exc, sqlite3.DatabaseError)
+                and any(marker in exc_str for marker in ("malformed", "not a database", "encrypted"))
+            ) or any(
+                marker in exc_str for marker in ("auth_key_unregistred", "401", "key is not registered")
+            )
+
+            if is_session_error:
+                await bot.send_message(
+                    user_id,
+                    f"Файл сессии аккаунта {phone} поврежден или авторизация не завершена. Удалите сессию и добавьте аккаунт заново через «Добавить аккаунт».",
+                )
+                await _cleanup_session_state("invalid or incomplete session")
+                return False
 
             await asyncio.sleep(1)
             await bot.send_message(user_id, f"Аккаунт удален ошибка: {str(exc)}")
@@ -3326,7 +3459,9 @@ async def main_message(message):
             phone = file.replace('.session', '')
             if phone not in existing_accounts:
                 session_path = os.path.join(user_sessions_dir, file)
-                await ensure_account(user_id, phone, session_path)
+                if await _is_session_valid(session_path):
+                    await ensure_account(user_id, phone, session_path)
+                # иначе _is_session_valid уже удалил невалидную сессию
 
     db_accounts = await get_accounts_for_user(user_id)
 
@@ -3355,9 +3490,13 @@ async def main_message(message):
         button_reactions = types.InlineKeyboardButton(
             text="🎯 Реакции на посты и ответы", callback_data=f"reaction_{call}"
         )
+        button_unsubscribe = types.InlineKeyboardButton(
+            text="🚫 Отписаться", callback_data=f"unsubscribe_account_{account.get('id')}"
+        )
 
         builder.row(button_info, button_status, button_warmup)
         builder.row(button_reactions)
+        builder.row(button_unsubscribe)
         if not is_running:
             builder.row(button_delete)
 
@@ -3381,6 +3520,14 @@ def build_main_actions_keyboard() -> ReplyKeyboardMarkup:
             KeyboardButton(text="📊 Общая статистика"),
             KeyboardButton(text="⚙️ Настройки прогрева"),
         ],
+        [
+            KeyboardButton(text="📋 Черный список"),
+            KeyboardButton(text="⚠️ Проблемные каналы"),
+        ],
+        [
+            KeyboardButton(text="🔍 Анализ каналов"),
+            KeyboardButton(text="🚫 Отписка от каналов"),
+        ],
     ]
 
     # Кнопка перехода в лог-канал полезна только когда включены подробные
@@ -3395,8 +3542,23 @@ def build_main_actions_keyboard() -> ReplyKeyboardMarkup:
 async def start_add_account_flow(user_id: int, state: FSMContext, *, warmup_only: bool = False) -> None:
     """Запускает сценарий добавления аккаунта или назначения прогрева."""
 
+    data = await state.get_data()
+    prev_client = data.get("client")
+    if prev_client:
+        await cleanup_auth(prev_client, state)
+        prev_number = data.get("number")
+        if prev_number:
+            session_base = os.path.join(SESSIONS_BASE_DIR, str(user_id), str(prev_number))
+            for p in (f"{session_base}.session", f"{session_base}.session.session"):
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                        logging.info("Removed incomplete session %s (new add flow)", p)
+                    except OSError:
+                        pass
+
     await state.clear()
-    await bot.send_message(user_id, 'Пришлите номер телефона\nПример: 79999999999')
+    await bot.send_message(user_id, 'Пришлите номер телефона\nПример: 79999999999\nДля отмены отправьте "-"')
     await state.set_state(addsession.number)
     await state.update_data({"warmup_only": warmup_only})
 
@@ -3435,6 +3597,21 @@ async def start(message: types.Message, state: FSMContext):
         await message.answer("Введите пароль для доступа:")
         await state.set_state(AuthState.waiting_for_password)
     else:
+        current_state = await state.get_state()
+        if current_state and "addsession" in str(current_state):
+            data = await state.get_data()
+            client = data.get("client")
+            number = data.get("number")
+            await cleanup_auth(client, state)
+            if number:
+                session_base = os.path.join(SESSIONS_BASE_DIR, str(message.from_user.id), str(number))
+                for p in (f"{session_base}.session", f"{session_base}.session.session"):
+                    if os.path.exists(p):
+                        try:
+                            os.remove(p)
+                            logging.info("Removed incomplete session %s (user returned to start)", p)
+                        except OSError:
+                            pass
         await main_message(message)
 
 @dp.message(lambda message: message.text and message.text.startswith('/summary'))
@@ -3521,6 +3698,107 @@ async def handle_warmup_settings_button(message: types.Message, state: FSMContex
     await open_warmup_settings_dialog(message.from_user.id, state)
 
 
+@dp.message(lambda message: message.text == "📋 Черный список")
+async def handle_blacklist_button(message: types.Message, state: FSMContext):
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+    
+    accounts = await get_accounts_for_user(message.from_user.id)
+    if not accounts:
+        await message.answer("У вас нет аккаунтов")
+        return
+    
+    keyboard = InlineKeyboardBuilder()
+    for acc in accounts:
+        phone = acc.get("phone", "unknown")
+        acc_id = acc.get("id")
+        keyboard.button(text=f"{phone}", callback_data=f"blacklist_{acc_id}")
+    keyboard.adjust(1)
+    await message.answer("Выберите аккаунт для просмотра черного списка:", reply_markup=keyboard.as_markup())
+
+
+@dp.message(lambda message: message.text == "⚠️ Проблемные каналы")
+async def handle_problematic_channels_button(message: types.Message, state: FSMContext):
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+    
+    accounts = await get_accounts_for_user(message.from_user.id)
+    if not accounts:
+        await message.answer("У вас нет аккаунтов")
+        return
+    
+    keyboard = InlineKeyboardBuilder()
+    for acc in accounts:
+        phone = acc.get("phone", "unknown")
+        acc_id = acc.get("id")
+        keyboard.button(text=f"{phone}", callback_data=f"problematic_{acc_id}")
+    keyboard.adjust(1)
+    await message.answer("Выберите аккаунт для просмотра проблемных каналов:", reply_markup=keyboard.as_markup())
+
+
+@dp.message(lambda message: message.text == "🔍 Анализ каналов")
+async def handle_analyze_channels_button(message: types.Message, state: FSMContext):
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+    
+    accounts = await get_accounts_for_user(message.from_user.id)
+    if not accounts:
+        await message.answer("У вас нет аккаунтов")
+        return
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="📊 Анализировать все аккаунты", callback_data="analyze_all")
+    keyboard.adjust(1)
+    
+    for acc in accounts:
+        phone = acc.get("phone", "unknown")
+        acc_id = acc.get("id")
+        keyboard.button(text=f"📊 {phone}", callback_data=f"analyze_{acc_id}")
+    keyboard.adjust(1)
+    
+    await message.answer("Выберите аккаунт для анализа каналов:", reply_markup=keyboard.as_markup())
+
+
+@dp.message(lambda message: message.text == "🚫 Отписка от каналов")
+async def handle_unsubscribe_button(message: types.Message, state: FSMContext):
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+
+    accounts = await get_accounts_for_user(message.from_user.id)
+    if not accounts:
+        await message.answer("У вас нет аккаунтов")
+        return
+
+    if len(accounts) == 1:
+        account = accounts[0]
+        account_id = account.get("id")
+        channels = list(set(
+            (account.get("channels") or []) + (account.get("warmup_channels") or [])
+        ))
+        if not channels:
+            await message.answer("У единственного аккаунта нет каналов в БД.")
+            return
+        await state.update_data({"unsubscribe_account_id": account_id})
+        keyboard = InlineKeyboardBuilder()
+        for channel in channels[:20]:
+            keyboard.button(text=channel, callback_data=f"unsubscribe_channel_{account_id}_{channel}")
+        keyboard.adjust(1)
+        await message.answer("Выберите канал для отписки:", reply_markup=keyboard.as_markup())
+        return
+
+    keyboard = InlineKeyboardBuilder()
+    for acc in accounts:
+        phone = acc.get("phone", "unknown")
+        acc_id = acc.get("id")
+        keyboard.button(text=f"{phone}", callback_data=f"unsubscribe_account_{acc_id}")
+    keyboard.adjust(1)
+    await message.answer("Выберите аккаунт для отписки от канала:", reply_markup=keyboard.as_markup())
+
+
 @dp.message(Command("testwarmup"))
 async def test_warmup_command(message: Message) -> None:
     """Команда для тестирования режима прогрева"""
@@ -3581,6 +3859,196 @@ async def clean_sessions_command(message: Message) -> None:
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
         logging.exception("Error in clean_sessions_command: %s", e)
+
+@dp.message(Command("blacklist"))
+async def blacklist_command(message: Message) -> None:
+    """Команда для вывода черного списка каналов"""
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+    
+    parts = message.text.split()
+    account_id = None
+    
+    if len(parts) > 1:
+        try:
+            account_id = int(parts[1])
+            # Проверяем, что аккаунт принадлежит пользователю
+            account = await get_account_by_id(account_id)
+            if not account or account.get("user_id") != message.from_user.id:
+                await message.answer("Аккаунт не найден или не принадлежит вам")
+                return
+        except ValueError:
+            await message.answer("Использование: /blacklist [account_id]\nПример: /blacklist 123")
+            return
+    
+    if account_id is None:
+        # Показываем список аккаунтов для выбора
+        accounts = await get_accounts_for_user(message.from_user.id)
+        if not accounts:
+            await message.answer("У вас нет аккаунтов")
+            return
+        
+        keyboard = InlineKeyboardBuilder()
+        for acc in accounts:
+            phone = acc.get("phone", "unknown")
+            acc_id = acc.get("id")
+            keyboard.button(text=f"{phone}", callback_data=f"blacklist_{acc_id}")
+        keyboard.adjust(1)
+        await message.answer("Выберите аккаунт для просмотра черного списка:", reply_markup=keyboard.as_markup())
+        return
+    
+    # Получаем черный список
+    blacklist = await get_channel_blacklist(account_id)
+    
+    if not blacklist:
+        await message.answer(f"Черный список для аккаунта {account_id} пуст")
+        return
+    
+    # Формируем сообщение
+    text = f"📋 Черный список аккаунта {account_id}:\n\n"
+    for idx, item in enumerate(blacklist[:20], 1):  # Показываем первые 20
+        channel_id = item.get("channel_id", "unknown")
+        reason = item.get("reason", "не указана")
+        created_at = item.get("created_at")
+        if isinstance(created_at, str):
+            date_str = created_at[:16] if len(created_at) > 16 else created_at
+        else:
+            date_str = str(created_at)[:16] if created_at else "неизвестно"
+        
+        text += f"{idx}. {channel_id}\n"
+        text += f"   • Причина: {reason}\n"
+        text += f"   • Дата: {date_str}\n\n"
+    
+    if len(blacklist) > 20:
+        text += f"\n... и еще {len(blacklist) - 20} каналов"
+    
+    await message.answer(text)
+
+
+@dp.message(Command("problematic_channels"))
+async def problematic_channels_command(message: Message) -> None:
+    """Команда для вывода проблемных каналов"""
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+    
+    parts = message.text.split()
+    account_id = None
+    
+    if len(parts) > 1:
+        try:
+            account_id = int(parts[1])
+            account = await get_account_by_id(account_id)
+            if not account or account.get("user_id") != message.from_user.id:
+                await message.answer("Аккаунт не найден или не принадлежит вам")
+                return
+        except ValueError:
+            await message.answer("Использование: /problematic_channels [account_id]\nПример: /problematic_channels 123")
+            return
+    
+    if account_id is None:
+        accounts = await get_accounts_for_user(message.from_user.id)
+        if not accounts:
+            await message.answer("У вас нет аккаунтов")
+            return
+        
+        keyboard = InlineKeyboardBuilder()
+        for acc in accounts:
+            phone = acc.get("phone", "unknown")
+            acc_id = acc.get("id")
+            keyboard.button(text=f"{phone}", callback_data=f"problematic_{acc_id}")
+        keyboard.adjust(1)
+        await message.answer("Выберите аккаунт для просмотра проблемных каналов:", reply_markup=keyboard.as_markup())
+        return
+    
+    await message.answer("Анализирую каналы...")
+    
+    # Получаем отчет о проблемных каналах
+    problematic = await get_problematic_channels_report(account_id)
+    
+    if not problematic:
+        await message.answer(f"Проблемных каналов для аккаунта {account_id} не найдено")
+        return
+    
+    # Формируем сообщение
+    text = f"⚠️ Проблемные каналы аккаунта {account_id}:\n\n"
+    for idx, item in enumerate(problematic[:15], 1):  # Показываем первые 15
+        channel_id = item.get("channel_id", "unknown")
+        reason = item.get("reason", "неизвестно")
+        stats = item.get("stats", {})
+        problematic_count = item.get("problematic_count", 0)
+        total_posts = item.get("total_posts", 0)
+        
+        text += f"{idx}. {channel_id}\n"
+        text += f"   • Причина: {reason}\n"
+        text += f"   • Последние 10 постов: {problematic_count} проблемных, {total_posts - problematic_count} пропущено\n"
+        text += f"   • Статистика: успешных={stats.get('success', 0)}, ошибок={stats.get('error', 0)}, no_comments={stats.get('no_comments', 0)}\n\n"
+    
+    if len(problematic) > 15:
+        text += f"\n... и еще {len(problematic) - 15} каналов"
+    
+    await message.answer(text)
+
+
+@dp.message(Command("unsubscribe"))
+async def unsubscribe_command(message: Message, state: FSMContext) -> None:
+    """Команда для отписки от каналов"""
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+    
+    accounts = await get_accounts_for_user(message.from_user.id)
+    if not accounts:
+        await message.answer("У вас нет аккаунтов")
+        return
+    
+    keyboard = InlineKeyboardBuilder()
+    for acc in accounts:
+        phone = acc.get("phone", "unknown")
+        acc_id = acc.get("id")
+        keyboard.button(text=f"{phone}", callback_data=f"unsubscribe_account_{acc_id}")
+    keyboard.adjust(1)
+    await message.answer("Выберите аккаунт для отписки от канала:", reply_markup=keyboard.as_markup())
+
+
+@dp.message(Command("analyze_channels"))
+async def analyze_channels_command(message: Message) -> None:
+    """Команда для автоматического анализа каналов и проставления отметок"""
+    if not await is_user_authenticated(message.from_user.id):
+        await message.answer("Сначала авторизуйтесь командой /start")
+        return
+    
+    parts = message.text.split()
+    account_id = None
+    
+    if len(parts) > 1:
+        try:
+            account_id = int(parts[1])
+            account = await get_account_by_id(account_id)
+            if not account or account.get("user_id") != message.from_user.id:
+                await message.answer("Аккаунт не найден или не принадлежит вам")
+                return
+        except ValueError:
+            await message.answer("Использование: /analyze_channels [account_id]\nПример: /analyze_channels 123\nИли без параметров для анализа всех аккаунтов")
+            return
+    
+    await message.answer("Запускаю анализ каналов... Это может занять некоторое время.")
+    
+    try:
+        result = await auto_analyze_and_mark_problematic_channels(account_id)
+        
+        text = "✅ Анализ завершен!\n\n"
+        text += f"• Проанализировано каналов: {result.get('total_analyzed', 0)}\n"
+        text += f"• Добавлено в blacklist (забаненные): {result.get('banned_channels', 0)}\n"
+        text += f"• Добавлено в blacklist (без linked_chat): {result.get('no_linked_chat_channels', 0)}\n"
+        text += f"• Всего добавлено: {result.get('banned_channels', 0) + result.get('no_linked_chat_channels', 0)}"
+        
+        await message.answer(text)
+    except Exception as e:
+        logging.exception("Error in analyze_channels_command")
+        await message.answer(f"Ошибка при анализе: {e}")
+
 
 @dp.message(Command("fixmode"))
 async def fix_mode_command(message: Message) -> None:
@@ -3670,6 +4138,150 @@ async def callbacks(callback_query: types.CallbackQuery, state: FSMContext):
         await callback_query.answer()
         await send_global_stats_report(user_id)
         await main_message(callback_query)
+        return
+    
+    if call.startswith("blacklist_"):
+        account_id = int(call.split("_")[1])
+        await callback_query.answer()
+        blacklist = await get_channel_blacklist(account_id)
+        if not blacklist:
+            await callback_query.message.answer(f"Черный список для аккаунта {account_id} пуст")
+            return
+        text = f"📋 Черный список аккаунта {account_id}:\n\n"
+        for idx, item in enumerate(blacklist[:20], 1):
+            channel_id = item.get("channel_id", "unknown")
+            reason = item.get("reason", "не указана")
+            created_at = item.get("created_at")
+            if isinstance(created_at, str):
+                date_str = created_at[:16] if len(created_at) > 16 else created_at
+            else:
+                date_str = str(created_at)[:16] if created_at else "неизвестно"
+            text += f"{idx}. {channel_id}\n"
+            text += f"   • Причина: {reason}\n"
+            text += f"   • Дата: {date_str}\n\n"
+        if len(blacklist) > 20:
+            text += f"\n... и еще {len(blacklist) - 20} каналов"
+        await callback_query.message.answer(text)
+        return
+    
+    if call.startswith("problematic_"):
+        account_id = int(call.split("_")[1])
+        await callback_query.answer("Анализирую каналы...")
+        problematic = await get_problematic_channels_report(account_id)
+        if not problematic:
+            await callback_query.message.answer(f"Проблемных каналов для аккаунта {account_id} не найдено")
+            return
+        text = f"⚠️ Проблемные каналы аккаунта {account_id}:\n\n"
+        for idx, item in enumerate(problematic[:15], 1):
+            channel_id = item.get("channel_id", "unknown")
+            reason = item.get("reason", "неизвестно")
+            stats = item.get("stats", {})
+            problematic_count = item.get("problematic_count", 0)
+            total_posts = item.get("total_posts", 0)
+            text += f"{idx}. {channel_id}\n"
+            text += f"   • Причина: {reason}\n"
+            text += f"   • Последние 10 постов: {problematic_count} проблемных, {total_posts - problematic_count} пропущено\n"
+            text += f"   • Статистика: успешных={stats.get('success', 0)}, ошибок={stats.get('error', 0)}, no_comments={stats.get('no_comments', 0)}\n\n"
+        if len(problematic) > 15:
+            text += f"\n... и еще {len(problematic) - 15} каналов"
+        await callback_query.message.answer(text)
+        return
+    
+    if call.startswith("unsubscribe_account_"):
+        account_id = int(call.split("_")[2])
+        await callback_query.answer()
+        account = await get_account_by_id(account_id)
+        if not account or account.get("user_id") != user_id:
+            await callback_query.message.answer("Аккаунт не найден")
+            return
+        channels = list(set(
+            (account.get("channels") or []) + (account.get("warmup_channels") or [])
+        ))
+        if not channels:
+            await callback_query.message.answer("У аккаунта нет каналов в БД. Добавьте каналы в настройках.")
+            return
+        await state.update_data({"unsubscribe_account_id": account_id})
+        keyboard = InlineKeyboardBuilder()
+        for channel in channels[:20]:  # Показываем первые 20
+            keyboard.button(text=channel, callback_data=f"unsubscribe_channel_{account_id}_{channel}")
+        keyboard.adjust(1)
+        await callback_query.message.answer("Выберите канал для отписки:", reply_markup=keyboard.as_markup())
+        return
+    
+    if call.startswith("unsubscribe_channel_"):
+        parts = call.split("_")
+        account_id = int(parts[2])
+        channel = "_".join(parts[3:])  # Канал может содержать подчеркивания
+        await callback_query.answer()
+        await state.update_data({"unsubscribe_channel": channel, "unsubscribe_account_id": account_id})
+        keyboard = InlineKeyboardBuilder()
+        keyboard.button(text="Нет чата комментариев", callback_data=f"unsubscribe_reason_{account_id}_NO_LINKED_CHAT")
+        keyboard.button(text="Пользователь забанен", callback_data=f"unsubscribe_reason_{account_id}_USER_BANNED_IN_CHANNEL")
+        keyboard.button(text="Комментарии ограничены", callback_data=f"unsubscribe_reason_{account_id}_COMMENTS_DISABLED")
+        keyboard.button(text="Другое", callback_data=f"unsubscribe_reason_{account_id}_OTHER")
+        keyboard.adjust(1)
+        await callback_query.message.answer(f"Выберите причину отписки от {channel}:", reply_markup=keyboard.as_markup())
+        return
+    
+    if call.startswith("unsubscribe_reason_"):
+        parts = call.split("_")
+        account_id = int(parts[2])
+        reason_code = parts[3]
+        await callback_query.answer()
+        data = await state.get_data()
+        channel = data.get("unsubscribe_channel")
+        if not channel:
+            await callback_query.message.answer("Ошибка: канал не найден")
+            return
+        account = await get_account_by_id(account_id)
+        if not account or account.get("user_id") != user_id:
+            await callback_query.message.answer("Аккаунт не найден")
+            return
+        reason_text = {
+            "NO_LINKED_CHAT": "Нет чата комментариев",
+            "USER_BANNED_IN_CHANNEL": "Пользователь забанен",
+            "COMMENTS_DISABLED": "Комментарии ограничены",
+            "OTHER": "Другое",
+        }.get(reason_code, reason_code)
+        # Отписываемся от канала
+        try:
+            session_path = account.get("session_path")
+            session_file = session_path
+            if not session_path.endswith(".session"):
+                session_file = session_path + ".session"
+            if session_path and (os.path.exists(session_path) or os.path.exists(session_file)):
+                session_base = session_path.replace(".session.session", "").replace(".session", "")
+                async def _unsubscribe(client: Client):
+                    await client.leave_chat(channel)
+
+                try:
+                    await safe_session_operation(
+                        session_base,
+                        _unsubscribe,
+                        operation_name="unsubscribe",
+                    )
+                    success = True
+                    error = None
+                except Exception as e:
+                    success = False
+                    error = str(e)
+                
+                if success:
+                    await add_to_channel_blacklist(account_id, channel, reason_code)
+                    channels = [c for c in (account.get("channels") or []) if c != channel]
+                    await update_account_settings(account_id, channels=channels)
+                    warmup = [c for c in (account.get("warmup_channels") or []) if c != channel]
+                    if warmup != (account.get("warmup_channels") or []):
+                        await sync_warmup_channels(account_id, warmup)
+                    await callback_query.message.answer(f"✅ Отписались от {channel}\nПричина: {reason_text}")
+                else:
+                    await callback_query.message.answer(f"❌ Ошибка при отписке: {error}")
+            else:
+                await callback_query.message.answer("❌ Файл сессии не найден")
+        except Exception as e:
+            logging.exception("Error in unsubscribe")
+            await callback_query.message.answer(f"❌ Ошибка: {e}")
+        await state.clear()
         return
 
     if call.startswith("info_"):
@@ -5403,6 +6015,19 @@ async def join_channel(
                 session_active
             )
             return False, busy_message
+        
+        # Проверка blacklist перед подпиской
+        if await is_channel_blacklisted(account_id, channel):
+            blacklist_info = await get_channel_blacklist_info(account_id, channel)
+            reason = blacklist_info.get("reason", "") if blacklist_info else ""
+            # Если канал в blacklist с причиной NO_LINKED_CHAT или COMMENTS_DISABLED - не подписываем
+            if "NO_LINKED_CHAT" in reason or "COMMENTS_DISABLED" in reason or "no_linked_chat" in reason.lower():
+                error_msg = f"Канал {channel} в blacklist (причина: {reason}), пропускаем подписку"
+                logging.info(f"Warmup: Skipping channel {channel} for account {account_id} - in blacklist: {reason}")
+                if is_warmup:
+                    await record_warmup_channel_error(account_id, channel, f"channel in blacklist: {reason}")
+                return False, error_msg
+        
         # Создаем клиент
         session_dir = os.path.join(SESSIONS_BASE_DIR, str(user_id))
         session_name = os.path.join(session_dir, session_key)
@@ -6057,6 +6682,12 @@ async def save_session_and_cleanup(
 async def add_number(message: Message, state: FSMContext) -> None:
     raw_number = (message.text or "").strip()
 
+    if raw_number == "-":
+        await message.answer("Добавление аккаунта отменено.")
+        await state.clear()
+        await main_message(message)
+        return
+
     if raw_number.isdigit():
         warmup_only = (await state.get_data()).get("warmup_only")
 
@@ -6107,15 +6738,34 @@ async def add_number(message: Message, state: FSMContext) -> None:
             await main_message(message)
     else:
         await message.answer(
-            "Пришлите код из SMS, состоящий только из цифр. Для отмены отправьте '-'."
+            "Пришлите номер телефона (только цифры, например 79999999999) или '-' для отмены."
         )
 
 @dp.message(addsession.code)
 async def add_code(message: Message, state: FSMContext) -> None:
-    code = (message.text or "").replace(' ', '')
+    raw = (message.text or "").strip()
+    code = raw.replace(' ', '')
+
+    if raw == "-":
+        await message.answer("Добавление аккаунта отменено. Код не введен.")
+        state_data = await state.get_data()
+        client = state_data.get("client")
+        number = state_data.get("number")
+        await cleanup_auth(client, state)
+        if number:
+            session_base = os.path.join(SESSIONS_BASE_DIR, str(message.from_user.id), str(number))
+            for p in (f"{session_base}.session", f"{session_base}.session.session"):
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                        logging.info("Removed incomplete session %s (user cancelled)", p)
+                    except OSError:
+                        pass
+        await main_message(message)
+        return
 
     if not code.isdigit():
-        await message.answer("Код должен содержать только цифры")
+        await message.answer("Код должен содержать только цифры, или '-' для отмены")
         return
 
     state_data = await state.get_data()
@@ -6159,7 +6809,26 @@ async def add_code(message: Message, state: FSMContext) -> None:
 
 @dp.message(addsession.password)
 async def add_password(message: Message, state: FSMContext) -> None:
-    password = (message.text or "").strip()
+    raw = (message.text or "").strip()
+    if raw == "-":
+        await message.answer("Добавление аккаунта отменено.")
+        state_data = await state.get_data()
+        client = state_data.get("client")
+        number = state_data.get("number")
+        await cleanup_auth(client, state)
+        if number:
+            session_base = os.path.join(SESSIONS_BASE_DIR, str(message.from_user.id), str(number))
+            for p in (f"{session_base}.session", f"{session_base}.session.session"):
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                        logging.info("Removed incomplete session %s (user cancelled at 2FA)", p)
+                    except OSError:
+                        pass
+        await main_message(message)
+        return
+
+    password = raw
     state_data = await state.get_data()
 
     client: Optional[Client] = state_data.get("client")

@@ -28,9 +28,9 @@ services:
     hostname: bot
     environment:
       - BOT_NAME=${BOT_NAME}
-      - SESSIONS_DIR=${SESSIONS_DIR}
-      - LOGS_DIR=${LOGS_DIR}
-      - DATA_DIR=${DATA_DIR}
+      - SESSIONS_DIR=sessions
+      - LOGS_DIR=logs
+      - DATA_DIR=data
       - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
     env_file:
       - .env

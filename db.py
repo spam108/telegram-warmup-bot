@@ -1527,3 +1527,289 @@ async def get_global_statistics() -> Dict[str, Any]:
             "total_attempts": warmup_attempts,
         },
     }
+
+
+async def get_channel_comment_stats(account_id: int, channel_id: str, limit: int = 10) -> Dict[str, int]:
+    """Получить статистику комментариев по каналу за последние N записей."""
+    rows = await _fetchall(
+        """
+        SELECT status, COUNT(*) as count
+        FROM comment_logs
+        WHERE account_id = ? AND channel = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (account_id, channel_id, limit),
+    )
+    
+    stats = {
+        "success": 0,
+        "error": 0,
+        "no_comments": 0,
+        "no_linked_chat": 0,
+        "banned": 0,
+        "channel_blacklisted": 0,
+        "comment_skipped": 0,
+        "total": 0,
+    }
+    
+    for row in rows:
+        status = row["status"] or ""
+        count = int(row["count"] or 0)
+        stats["total"] += count
+        
+        if status == "success":
+            stats["success"] += count
+        elif status == "error":
+            stats["error"] += count
+        elif status == "no_comments":
+            stats["no_comments"] += count
+        elif status == "no_linked_chat":
+            stats["no_linked_chat"] += count
+        elif status in ("banned", "USER_BANNED_IN_CHANNEL"):
+            stats["banned"] += count
+        elif status == "channel_blacklisted":
+            stats["channel_blacklisted"] += count
+        elif status == "comment_skipped":
+            stats["comment_skipped"] += count
+    
+    return stats
+
+
+async def get_channel_blacklist_info(account_id: int, channel_id: str) -> Optional[Dict[str, Any]]:
+    """Получить информацию о канале в черном списке."""
+    row = await _fetchone(
+        """
+        SELECT channel_id, reason, created_at
+        FROM channel_blacklist
+        WHERE account_id = ? AND channel_id = ?
+        """,
+        (account_id, channel_id),
+    )
+    return dict(row) if row else None
+
+
+async def get_channel_blacklist(account_id: int) -> List[Dict[str, Any]]:
+    """Получить список каналов в черном списке для аккаунта."""
+    rows = await _fetchall(
+        """
+        SELECT channel_id, reason, created_at
+        FROM channel_blacklist
+        WHERE account_id = ?
+        ORDER BY created_at DESC
+        """,
+        (account_id,),
+    )
+    return [dict(row) for row in rows]
+
+
+async def get_problematic_channels_report(account_id: int, min_problematic_posts: int = 8) -> List[Dict[str, Any]]:
+    """Получить отчет о проблемных каналах по последним 10 постам."""
+    # Получаем все уникальные каналы аккаунта из comment_logs
+    channel_rows = await _fetchall(
+        """
+        SELECT DISTINCT channel
+        FROM comment_logs
+        WHERE account_id = ? AND channel IS NOT NULL
+        """,
+        (account_id,),
+    )
+    
+    problematic_channels = []
+    
+    for channel_row in channel_rows:
+        channel_id = channel_row["channel"]
+        if not channel_id:
+            continue
+        
+        # Получаем статистику по последним 10 записям
+        stats = await get_channel_comment_stats(account_id, channel_id, limit=10)
+        
+        # Определяем проблемность
+        total_posts = stats["total"]
+        if total_posts == 0:
+            continue
+        
+        problematic_count = (
+            stats["error"] + 
+            stats["no_comments"] + 
+            stats["no_linked_chat"] + 
+            stats["banned"] + 
+            stats["channel_blacklisted"]
+        )
+        
+        if problematic_count >= min_problematic_posts:
+            # Определяем причину
+            reason = "неизвестно"
+            if stats["banned"] > 0:
+                reason = "пользователь забанен"
+            elif stats["no_linked_chat"] > 0:
+                reason = "нет чата комментариев"
+            elif stats["no_comments"] > 0:
+                reason = "комментарии ограничены"
+            elif stats["error"] > 0:
+                reason = "ошибки при комментировании"
+            
+            problematic_channels.append({
+                "channel_id": channel_id,
+                "reason": reason,
+                "stats": stats,
+                "problematic_count": problematic_count,
+                "total_posts": total_posts,
+            })
+    
+    return problematic_channels
+
+
+async def analyze_and_mark_banned_channels(account_id: Optional[int] = None) -> Dict[str, int]:
+    """Анализировать логи и автоматически добавлять забаненные каналы в blacklist."""
+    if account_id is not None:
+        # Анализ для конкретного аккаунта
+        accounts_query = "SELECT id FROM accounts WHERE id = ?"
+        accounts_params = (account_id,)
+    else:
+        # Анализ для всех аккаунтов
+        accounts_query = "SELECT DISTINCT id FROM accounts"
+        accounts_params = ()
+    
+    account_rows = await _fetchall(accounts_query, accounts_params)
+    
+    total_marked = 0
+    total_checked = 0
+    
+    for account_row in account_rows:
+        acc_id = account_row["id"]
+        
+        # Находим каналы с ошибками про бан/ограничения
+        error_channels = await _fetchall(
+            """
+            SELECT DISTINCT channel
+            FROM comment_logs
+            WHERE account_id = ? 
+              AND channel IS NOT NULL
+              AND (
+                  status = 'error' 
+                  OR status = 'no_comments'
+                  OR status = 'channel_blacklisted'
+                  OR status LIKE '%banned%'
+                  OR error LIKE '%BANNED%'
+                  OR error LIKE '%FORBIDDEN%'
+                  OR error LIKE '%ChatWriteForbidden%'
+              )
+            """,
+            (acc_id,),
+        )
+        
+        for channel_row in error_channels:
+            channel_id = channel_row["channel"]
+            if not channel_id:
+                continue
+            
+            total_checked += 1
+            
+            # Проверяем статистику по каналу
+            stats = await get_channel_comment_stats(acc_id, channel_id, limit=10)
+            
+            # Если >= 8 из 10 постов проблемные - добавляем в blacklist
+            problematic_count = (
+                stats["error"] + 
+                stats["no_comments"] + 
+                stats["banned"] + 
+                stats["channel_blacklisted"]
+            )
+            
+            if problematic_count >= 8 and stats["total"] >= 8:
+                # Определяем причину
+                reason = "AUTO_BANNED"
+                if stats["banned"] > 0:
+                    reason = "USER_BANNED_IN_CHANNEL"
+                elif stats["no_comments"] > 0:
+                    reason = "COMMENTS_DISABLED"
+                elif stats["error"] > 0:
+                    reason = "COMMENT_ERRORS"
+                
+                # Проверяем, не в blacklist ли уже
+                if not await is_channel_blacklisted(acc_id, channel_id):
+                    await add_to_channel_blacklist(acc_id, channel_id, reason)
+                    total_marked += 1
+    
+    return {
+        "checked_channels": total_checked,
+        "marked_channels": total_marked,
+    }
+
+
+async def check_channels_without_linked_chat(account_id: int) -> List[Dict[str, Any]]:
+    """Проверить каналы без linked_chat (10+ постов без успешных комментариев)."""
+    # Получаем каналы с >= 10 постами
+    channels_with_posts = await _fetchall(
+        """
+        SELECT channel, COUNT(*) as post_count
+        FROM posts
+        WHERE account_id = ?
+        GROUP BY channel
+        HAVING COUNT(*) >= 10
+        """,
+        (account_id,),
+    )
+    
+    channels_without_chat = []
+    
+    for row in channels_with_posts:
+        channel_id = row["channel"]
+        post_count = int(row["post_count"] or 0)
+        
+        # Проверяем успешные комментарии в этом канале
+        success_count = await _fetchone(
+            """
+            SELECT COUNT(*) as count
+            FROM comment_logs
+            WHERE account_id = ? AND channel = ? AND status = 'success'
+            """,
+            (account_id, channel_id),
+        )
+        
+        success_num = int(success_count["count"] or 0) if success_count else 0
+        
+        # Если постов >= 10, а успешных комментариев 0 - канал без linked_chat
+        if post_count >= 10 and success_num == 0:
+            # Проверяем, не в blacklist ли уже
+            if not await is_channel_blacklisted(account_id, channel_id):
+                await add_to_channel_blacklist(account_id, channel_id, "NO_LINKED_CHAT")
+                channels_without_chat.append({
+                    "channel_id": channel_id,
+                    "post_count": post_count,
+                    "success_comments": success_num,
+                })
+    
+    return channels_without_chat
+
+
+async def auto_analyze_and_mark_problematic_channels(account_id: Optional[int] = None) -> Dict[str, Any]:
+    """Автоматический анализ всех каналов и проставление отметок в blacklist."""
+    result = {
+        "banned_channels": 0,
+        "no_linked_chat_channels": 0,
+        "total_analyzed": 0,
+    }
+    
+    # Анализ забаненных каналов
+    banned_result = await analyze_and_mark_banned_channels(account_id)
+    result["banned_channels"] = banned_result["marked_channels"]
+    result["total_analyzed"] += banned_result["checked_channels"]
+    
+    # Анализ каналов без linked_chat
+    if account_id is not None:
+        no_chat_channels = await check_channels_without_linked_chat(account_id)
+        result["no_linked_chat_channels"] = len(no_chat_channels)
+    else:
+        # Для всех аккаунтов
+        accounts = await _fetchall("SELECT id FROM accounts", ())
+        total_no_chat = 0
+        for acc_row in accounts:
+            acc_id = acc_row["id"]
+            no_chat_channels = await check_channels_without_linked_chat(acc_id)
+            total_no_chat += len(no_chat_channels)
+        result["no_linked_chat_channels"] = total_no_chat
+    
+    return result

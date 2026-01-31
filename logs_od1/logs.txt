@@ -1,0 +1,94 @@
+["OD1Bot"] 2026-01-24 13:55:07,259 INFO root: Logging configured: all logs will be written to logs_od1/logs.txt
+["OD1Bot"] 2026-01-24 13:55:07,260 INFO __main__: ============================================================
+["OD1Bot"] 2026-01-24 13:55:07,260 INFO __main__: Logging system initialized
+["OD1Bot"] 2026-01-24 13:55:07,260 INFO __main__: Log file: logs_od1/logs.txt
+["OD1Bot"] 2026-01-24 13:55:07,260 INFO __main__: ============================================================
+["OD1Bot"] 2026-01-24 13:55:07,260 INFO root: Bot instance: "OD1Bot"
+["OD1Bot"] 2026-01-24 13:55:07,260 INFO root: Sessions directory: "sessions_od1"
+["OD1Bot"] 2026-01-24 13:55:07,260 INFO root: Database: "pgbot_od1"
+["OD1Bot"] 2026-01-24 13:55:07,458 INFO __main__: Starting bot instance: "OD1Bot"
+["OD1Bot"] 2026-01-24 13:55:07,471 INFO __main__: ============================================================
+["OD1Bot"] 2026-01-24 13:55:07,471 INFO __main__: Starting Telegram Comment Bot
+["OD1Bot"] 2026-01-24 13:55:07,471 INFO __main__: ============================================================
+["OD1Bot"] 2026-01-24 13:55:07,472 INFO __main__: Process lock acquired at /root/od1_1/bot_process.lock by PID 139851
+["OD1Bot"] 2026-01-24 13:55:07,472 INFO __main__: Process lock acquired
+["OD1Bot"] 2026-01-24 13:55:07,473 INFO __main__: Initializing database...
+["OD1Bot"] 2026-01-24 13:55:07,480 ERROR root: Main function error: invalid literal for int() with base 10: '"5433"'
+Traceback (most recent call last):
+  File "/root/od1_1/main.py", line 7553, in main
+    await init_db()
+  File "/root/od1_1/db.py", line 230, in init_db
+    _POOL = await asyncpg.create_pool(dsn)
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/pool.py", line 403, in _async__init__
+    await self._initialize()
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/pool.py", line 430, in _initialize
+    await first_ch.connect()
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/pool.py", line 128, in connect
+    self._con = await self._pool._get_new_connection()
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/pool.py", line 502, in _get_new_connection
+    con = await connection.connect(
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/connection.py", line 2329, in connect
+    return await connect_utils._connect(
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/connect_utils.py", line 983, in _connect
+    addrs, params, config = _parse_connect_arguments(**kwargs)
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/connect_utils.py", line 692, in _parse_connect_arguments
+    addrs, params = _parse_connect_dsn_and_args(
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/connect_utils.py", line 294, in _parse_connect_dsn_and_args
+    host, port = _parse_hostlist(dsn_hostspec, port, unquote=True)
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/connect_utils.py", line 229, in _parse_hostlist
+    hostlist_ports.append(int(hostspec_port))
+ValueError: invalid literal for int() with base 10: '"5433"'
+["OD1Bot"] 2026-01-24 13:55:07,490 INFO __main__: Process lock released at /root/od1_1/bot_process.lock
+[OD1Bot] 2026-01-24 13:56:43,009 INFO root: Logging configured: all logs will be written to logs_od1/logs.txt
+[OD1Bot] 2026-01-24 13:56:43,009 INFO __main__: ============================================================
+[OD1Bot] 2026-01-24 13:56:43,009 INFO __main__: Logging system initialized
+[OD1Bot] 2026-01-24 13:56:43,010 INFO __main__: Log file: logs_od1/logs.txt
+[OD1Bot] 2026-01-24 13:56:43,010 INFO __main__: ============================================================
+[OD1Bot] 2026-01-24 13:56:43,010 INFO root: Bot instance: OD1Bot
+[OD1Bot] 2026-01-24 13:56:43,010 INFO root: Sessions directory: sessions_od1
+[OD1Bot] 2026-01-24 13:56:43,010 INFO root: Database: pgbot_od1
+[OD1Bot] 2026-01-24 13:56:43,102 INFO __main__: Starting bot instance: OD1Bot
+[OD1Bot] 2026-01-24 13:56:43,114 INFO __main__: ============================================================
+[OD1Bot] 2026-01-24 13:56:43,114 INFO __main__: Starting Telegram Comment Bot
+[OD1Bot] 2026-01-24 13:56:43,115 INFO __main__: ============================================================
+[OD1Bot] 2026-01-24 13:56:43,115 INFO __main__: Process lock acquired at /root/od1_1/bot_process.lock by PID 139884
+[OD1Bot] 2026-01-24 13:56:43,115 INFO __main__: Process lock acquired
+[OD1Bot] 2026-01-24 13:56:43,115 INFO __main__: Initializing database...
+[OD1Bot] 2026-01-24 13:56:44,876 ERROR root: Main function error: [Errno -2] Name or service not known
+Traceback (most recent call last):
+  File "/root/od1_1/main.py", line 7557, in main
+    await init_db()
+  File "/root/od1_1/db.py", line 230, in init_db
+    _POOL = await asyncpg.create_pool(dsn)
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/pool.py", line 403, in _async__init__
+    await self._initialize()
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/pool.py", line 430, in _initialize
+    await first_ch.connect()
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/pool.py", line 128, in connect
+    self._con = await self._pool._get_new_connection()
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/pool.py", line 502, in _get_new_connection
+    con = await connection.connect(
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/connection.py", line 2329, in connect
+    return await connect_utils._connect(
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/connect_utils.py", line 1017, in _connect
+    raise last_error or exceptions.TargetServerAttributeNotMatched(
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/connect_utils.py", line 991, in _connect
+    conn = await _connect_addr(
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/connect_utils.py", line 828, in _connect_addr
+    return await __connect_addr(params, True, *args)
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/connect_utils.py", line 873, in __connect_addr
+    tr, pr = await connector
+  File "/root/od1_1/venv/lib/python3.10/site-packages/asyncpg/connect_utils.py", line 744, in _create_ssl_connection
+    tr, pr = await loop.create_connection(
+  File "/usr/lib/python3.10/asyncio/base_events.py", line 1036, in create_connection
+    infos = await self._ensure_resolved(
+  File "/usr/lib/python3.10/asyncio/base_events.py", line 1418, in _ensure_resolved
+    return await loop.getaddrinfo(host, port, family=family, type=type,
+  File "/usr/lib/python3.10/asyncio/base_events.py", line 863, in getaddrinfo
+    return await self.run_in_executor(
+  File "/usr/lib/python3.10/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/usr/lib/python3.10/socket.py", line 955, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+socket.gaierror: [Errno -2] Name or service not known
+[OD1Bot] 2026-01-24 13:56:44,886 INFO __main__: Process lock released at /root/od1_1/bot_process.lock

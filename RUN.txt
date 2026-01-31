@@ -1,0 +1,23 @@
+# Запуск бота на сервере
+
+## Через Docker (рекомендуется)
+
+cd /root/od1_1bot
+docker-compose up -d
+
+# Просмотр логов (все логи пишутся в logs_od1/bot_log.txt)
+docker-compose logs -f bot
+tail -f logs_od1/bot_log.txt
+
+# Остановка
+docker-compose down
+
+
+## Без Docker (venv)
+
+cd /root/od1_1bot
+source venv/bin/activate
+python main.py
+
+# Логи: logs_od1/bot_log.txt
+tail -f logs_od1/bot_log.txt
